@@ -1,0 +1,30 @@
+[
+  {
+    "Periodo": "12/2025",
+    "Mes": 12,
+    "Ano": 2025,
+    "Categoria": "Sem Categoria",
+    "Qtde_Venda": 43.0,
+    "Qtde_Documentos": 2,
+    "Ticket_Medio": 609.46,
+    "Vlr_Venda": 1218.91,
+    "Markdown_Pct": 45.0,
+    "Markup_Pct": 0,
+    "Vlr_Lucro": 548.51,
+    "Custo_Medio_Liq": 0.0
+  },
+  {
+    "Periodo": "01/2026",
+    "Mes": 1,
+    "Ano": 2026,
+    "Categoria": "Sem Categoria",
+    "Qtde_Venda": 31.0,
+    "Qtde_Documentos": 1,
+    "Ticket_Medio": 217.61,
+    "Vlr_Venda": 217.61,
+    "Markdown_Pct": 45.0,
+    "Markup_Pct": 0,
+    "Vlr_Lucro": 97.92,
+    "Custo_Medio_Liq": 0.0
+  }
+]

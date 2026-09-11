@@ -1,0 +1,65 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Data files (unnecessary for deployment)
+*.xlsx
+*.xls
+*.csv
+*.docx
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# Local data directories (but keep /public/data for static JSON files)
+dados_importados/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Streamlit cache
+.streamlit/cache/
+
+# Git files
+.git/
+.gitignore
+
+# Logs
+*.log
+logs/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Node modules (if applicable)
+node_modules/
+
+# Test files
+test_*.py
+*_test.py
+.pytest_cache/

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestão | Mercado duBairro</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏪</text></svg>">
+    <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen" class="login-screen hidden">
+    <form id="login-form" class="login-card">
+        <img src="assets/logo.png" alt="Mercado duBairro" data-fallback>
+        <h1>Mercado duBairro</h1>
+        <p>Painel dos Sócios — acesso restrito</p>
+        <div id="login-error" class="form-error"></div>
+        <input type="password" id="login-password" class="login-input" placeholder="Senha de acesso" autocomplete="current-password" required>
+        <button type="submit" class="btn-primary" id="login-submit">Entrar</button>
+    </form>
+</div>
+
+<!-- Loading -->
+<div id="loading" class="loading">
+    <div class="loading-spinner"></div>
+    Carregando dashboard...
+</div>
+
+<!-- App -->
+<div id="app" class="hidden">
+
+    <nav class="sidebar">
+        <img src="assets/logo.png" alt="Mercado duBairro" class="sidebar-logo" data-fallback>
+        <div class="sidebar-title">Painel dos Sócios</div>
+        <hr>
+
+        <button class="nav-item active" data-page="resumo" data-nav="resumo">📊 Resumo Executivo</button>
+        <button class="nav-item" data-page="estoque" data-nav="estoque">📦 Produtos &amp; Estoque</button>
+        <button class="nav-item" data-page="sync" data-nav="sync">🔗 Sincronização Mobne</button>
+
+        <hr>
+        <div class="sidebar-section-title">🎛️ Simulador</div>
+        <label class="sim-label" for="custo-fixo-input">Custo Fixo Mensal (R$)</label>
+        <input type="number" id="custo-fixo-input" class="sim-input" step="100">
+
+        <hr>
+        <div class="sidebar-section-title">📅 Período</div>
+        <div id="year-tabs" class="period-tabs"></div>
+        <div id="month-buttons" class="month-grid"></div>
+        <div id="period-status" class="period-status"></div>
+
+        <div class="sidebar-footer">
+            <span id="sidebar-user"></span><br>
+            <button class="btn-secondary footer-btn w-full mt-8" data-logout>Sair</button>
+            <div class="mt-8">Mercado duBairro &copy; 2026</div>
+        </div>
+    </nav>
+
+    <main class="main-content" id="content"></main>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

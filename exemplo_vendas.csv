@@ -1,0 +1,11 @@
+Data,Categoria,Produto,Quantidade,Valor_Unitario,Vlr_Venda,Custo,Vlr_Lucro,Qtde_Documentos
+2026-02-01,Alimentos,Arroz 5kg,3,25.50,76.50,45.90,30.60,1
+2026-02-01,Bebidas,Água 1.5L,10,3.50,35.00,14.00,21.00,1
+2026-02-02,Higiene,Sabonete,5,8.00,40.00,16.00,24.00,1
+2026-02-02,Limpeza,Detergente,2,15.00,30.00,12.00,18.00,1
+2026-02-03,Alimentos,Leite,4,6.50,26.00,15.60,10.40,1
+2026-02-03,Congelados,Frango,2,45.00,90.00,36.00,54.00,1
+2026-02-04,Bebidas,Refrigerante,8,5.00,40.00,16.00,24.00,1
+2026-02-04,Higiene,Shampoo,3,12.00,36.00,14.40,21.60,1
+2026-02-05,Alimentos,Pão Francês,15,1.50,22.50,9.00,13.50,2
+2026-02-05,Limpeza,Desinfetante,4,10.00,40.00,16.00,24.00,1

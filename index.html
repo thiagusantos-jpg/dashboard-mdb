@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestão | Mercado duBairro</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏪</text></svg>">
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.min.js"></script>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loading" class="loading">
+    <div class="loading-spinner"></div>
+    <div>Carregando dashboard...</div>
+    <div id="loading-debug" style="margin-top: 20px; font-size: 12px; color: #999; max-width: 400px;"></div>
+</div>
+
+<!-- App -->
+<div id="app" style="display:none;">
+
+    <!-- Sidebar -->
+    <nav class="sidebar">
+        <img src="logo_dubairro.png" alt="Mercado duBairro" class="sidebar-logo"
+             onerror="this.style.display='none'; document.getElementById('fallback-logo').style.display='block';">
+        <div id="fallback-logo" style="display:none;text-align:center;font-size:24px;margin-bottom:8px;">🏪 Mercado duBairro</div>
+        <div class="sidebar-title">Painel dos Sócios</div>
+        <hr>
+
+        <button class="nav-item active" data-page="resumo" onclick="navigate('resumo')">📊 Resumo Executivo</button>
+        <button class="nav-item" data-page="precos" onclick="navigate('precos')">💰 Inteligência de Preços</button>
+        <button class="nav-item" data-page="mapa" onclick="navigate('mapa')">🗺️ Mapa de Produtos</button>
+        <button class="nav-item" data-page="diagnostico" onclick="navigate('diagnostico')">🔍 Diagnóstico de Faturamento</button>
+        <button class="nav-item" data-page="sazonalidade" onclick="navigate('sazonalidade')">📈 Sazonalidade e Tendências</button>
+        <button class="nav-item" data-page="visao" onclick="navigate('visao')">🔮 Visão Futurista</button>
+        <button class="nav-item" data-page="importacao" onclick="navigate('importacao')">📥 Importação de Dados</button>
+
+        <hr>
+        <div class="sidebar-section-title">🎛️ Simulador</div>
+        <label class="sim-label">Custo Fixo Mensal (R$)</label>
+        <input type="number" id="custo-fixo-input" class="sim-input" value="16913.46" step="500" onchange="updateCustoFixo()">
+        <div id="sim-badge" class="sim-badge" style="display:none;"></div>
+
+        <hr>
+        <div class="sidebar-section-title">📅 Seletor de Período</div>
+        <div id="year-tabs" class="period-tabs">
+          <button class="tab-btn-period active" data-year="2026" onclick="selectMes(SELECTED_MES, 2026)">2026</button>
+          <button class="tab-btn-period" data-year="2025" onclick="selectMes(SELECTED_MES, 2025)">2025</button>
+        </div>
+        <div id="month-buttons" class="month-grid"></div>
+        <div id="period-status" class="period-status"></div>
+
+        <hr>
+        <div class="sidebar-section-title">⚙️ Informações</div>
+        <div class="sidebar-info"><strong>Custo Fixo:</strong> <span id="info-custo">R$ 16.913,46</span></div>
+        <div class="sidebar-info"><strong>Meta Líquida:</strong> 15%</div>
+
+        <div class="sidebar-footer">
+            Mercado duBairro &copy; 2026<br>
+            Dashboard de Gestão v2.0
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content" id="content">
+    </main>
+</div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

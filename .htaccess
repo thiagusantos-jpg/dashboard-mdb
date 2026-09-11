@@ -1,0 +1,27 @@
+# Enable CORS and proper JSON headers
+<FilesMatch "\.json$">
+  Header set Content-Type "application/json; charset=utf-8"
+  Header set Access-Control-Allow-Origin "*"
+  Header set Cache-Control "public, max-age=3600"
+</FilesMatch>
+
+# Rewrite rules for SPA
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  
+  # Skip rewrite for actual files and directories
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+  
+  # Rewrite everything else to index.html
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# Compress static files
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml
+  AddOutputFilterByType DEFLATE text/css text/javascript
+  AddOutputFilterByType DEFLATE application/xml application/json
+  AddOutputFilterByType DEFLATE application/javascript
+</IfModule>
