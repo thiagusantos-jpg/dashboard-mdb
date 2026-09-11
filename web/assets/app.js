@@ -116,7 +116,10 @@ function boot() {
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     // Insight charts are drawn at their pixel width; redraw from the cached payload.
-    resizeTimer = setTimeout(() => { if (INSIGHT_PAGES.includes(APP.page) && APP.dashboard) renderPage(); }, 250);
+    resizeTimer = setTimeout(() => {
+      if (INSIGHT_PAGES.includes(APP.page) && APP.dashboard) renderPage();
+      if (typeof resizeEcharts === 'function') resizeEcharts();
+    }, 250);
   });
   refreshSession();
 }
@@ -442,6 +445,9 @@ function onRouteChange() {
 }
 
 async function renderPage() {
+  // Every render replaces #content's innerHTML somewhere below, which would orphan any
+  // ECharts canvas mounted in the previous render (Fase 2 prototype, echarts-charts.js).
+  if (typeof disposeEcharts === 'function') disposeEcharts();
   if (APP.page === 'sync') return renderSyncPage();
   if (!APP.period) {
     return renderEmptyState('Nenhum período sincronizado ainda. Vá em "Sincronização Mobne" e clique em Sincronizar agora.');
@@ -602,7 +608,7 @@ function renderResumo(data) {
     <div class="row">
       <div class="col-60">
         <div class="section-header">Receita diária</div>
-        <div class="chart-container chart-box">${svgLineChart(dailyPoints)}</div>
+        <div class="chart-container chart-box" id="echart-daily"></div>
       </div>
       <div class="col-40">
         <div class="section-header">Categorias</div>
@@ -620,8 +626,13 @@ function renderResumo(data) {
       <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de Produtos →</button></div>` : ''}
 
     <div class="section-header">Histórico mensal</div>
-    <div class="chart-container chart-box">${svgBarChart(timelinePoints)}</div>
+    <div class="chart-container chart-box" id="echart-timeline"></div>
   `;
+  // Fase 2 prototype: only these two charts run through ECharts (see echarts-charts.js);
+  // mounted after innerHTML so the container elements exist. Sizes itself off the box's
+  // own CSS height (.chart-box) rather than the fixed 700x260 viewBox the SVG charts use.
+  mountEchartLine(document.getElementById('echart-daily'), dailyPoints);
+  mountEchartBar(document.getElementById('echart-timeline'), timelinePoints);
 }
 
 /* ---------------------------------------------------------------- Produtos & Estoque */
