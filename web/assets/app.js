@@ -74,16 +74,12 @@ function boot() {
   let resizeTimer = null;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
-    // Insight charts are drawn at their pixel width; redraw from the cached payload.
-    resizeTimer = setTimeout(() => {
-      if (INSIGHT_PAGES.includes(APP.page) && APP.dashboard) renderPage();
-      if (typeof resizeEcharts === 'function') resizeEcharts();
-    }, 250);
+    // Every chart is ECharts now (Fase 2/3 + the gauge), so a resize only needs
+    // resizeEcharts() — no more full-page rebuild to redraw a fixed-pixel-width SVG.
+    resizeTimer = setTimeout(() => { if (typeof resizeEcharts === 'function') resizeEcharts(); }, 250);
   });
   refreshSession();
 }
-
-const INSIGHT_PAGES = ['precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao'];
 
 function setupChartTooltip() {
   const tip = document.createElement('div');

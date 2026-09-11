@@ -83,14 +83,6 @@ function table(headers, rows) {
   return `<div class="data-table-container"><table class="data-table"><thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
-/* Charts are drawn at the pixel width they will occupy so text stays legible. */
-function chartWidth(frac) {
-  const el = document.getElementById('content');
-  const inner = (el && el.clientWidth ? el.clientWidth : 1100) - 64;
-  if (window.innerWidth <= 900) frac = 1;
-  return Math.max(340, Math.round(inner * frac - (frac < 1 ? 20 : 0) - 16));
-}
-
 function zeroCostBanner(data) {
   const zero = (data.products || []).filter((p) => p.cost === 0 && p.revenue > 0);
   if (!zero.length) return '';
@@ -580,15 +572,15 @@ function renderVisao(data) {
   };
 
   const be = mg > 0 ? fixed / (mg / 100) : null, ideal = be ? be * 1.5 : null;
-  const gauge = be ? gaugeChart({
-    width: Math.min(chartWidth(1), 640), value: pace, max: ideal * 1.5, fmt: brl,
+  const gaugeOpts = be ? {
+    value: pace, max: ideal * 1.5, fmt: brl,
     steps: [{to: be, color: '#FADBD8'}, {to: ideal, color: '#F9E79F'}, {to: ideal * 1.5, color: '#D5F5E3'}],
     threshold: be, thresholdTip: `Ponto de equilíbrio: ${brl(be)}`,
     tip: P.partial ? `Ritmo projetado: ${brl(pace)}\nRealizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}` : `Faturamento: ${brl(fat)}`,
     ticks: [0, be, ideal, ideal * 1.5],
     title: P.partial ? `Faturamento projetado ${P.label} (ritmo de ${P.endDay} dias)` : `Faturamento ${P.label}`,
     delta: {value: pace - ideal, text: `${pace >= ideal ? '▲' : '▼'} ${brl(Math.abs(pace - ideal))} vs meta ideal`},
-  }) : chartEmpty('Margem indisponível no período — não é possível calcular o ponto de equilíbrio.');
+  } : null;
 
   const idxNext = S.index[nx.m - 1];
   const top5 = (data.categories || []).slice().sort((a, b) => b.revenue - a.revenue).slice(0, 5);
@@ -644,7 +636,8 @@ function renderVisao(data) {
     <hr class="divider">
 
     ${section(`🏎️ Velocímetro — ${P.label} vs Metas`)}
-    ${chartBox(gauge)}
+    ${gaugeOpts ? '<div class="chart-container chart-h-330" id="chart-visao-gauge"></div>'
+      : chartBox(chartEmpty('Margem indisponível no período — não é possível calcular o ponto de equilíbrio.'))}
     ${be ? explain('Velocímetro', `Vermelho = abaixo do ponto de equilíbrio (${brl(be)}). Amarelo = acima do equilíbrio. Verde = acima da meta ideal (${brl(ideal)} = 1,5× equilíbrio).`,
       'A linha vermelha é o ponto de equilíbrio. Quanto mais para a direita (verde), mais saudável.', 'Mostra se o mês cobre o custo fixo com folga.',
       P.partial ? `Realizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}. O ponteiro usa o ritmo diário projetado para o mês inteiro.` : undefined) : ''}
@@ -674,4 +667,5 @@ function renderVisao(data) {
       'Ações priorizadas por impacto: margem → estoque → sazonalidade.', 'Revise com os sócios no início de cada mês.')}
   `;
   mountEchartCombo(document.getElementById('chart-visao-proj'), projOpts);
+  if (gaugeOpts) mountEchartGauge(document.getElementById('chart-visao-gauge'), gaugeOpts);
 }

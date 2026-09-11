@@ -1,15 +1,15 @@
-/* Mercado duBairro — Apache ECharts chart engine, replacing the hand-rolled SVG
- * charts (charts.js) across every page. Fase 2 (2026-09-11 UX audit) proved this
- * runs clean under the CSP and reads as the brand on Resumo's two time-series
- * charts; Fase 3 below carries that to Inteligência de Preços, Mapa de Produtos,
- * Diagnóstico, Sazonalidade and Visão Futurista's charts.
+/* Mercado duBairro — Apache ECharts chart engine. Every chart on the site (Fase
+ * 2/3 of the 2026-09-11 UX audit, plus the break-even gauge) runs through here
+ * now; charts.js keeps only the math/format helpers this file still calls
+ * directly (niceScale, compactNum, bubbleRadius, heatColor).
  *
  * ECharts is vendored locally (assets/vendor/echarts/, Apache-2.0 — LICENSE and
- * NOTICE included there) — never a CDN, the CSP would block it anyway. The
- * "common" build is Canvas-only (line/bar/scatter/heatmap/gauge/pie + grid/
- * legend/title/tooltip/markLine/markPoint components, ~240 KB gzipped): a
- * canvas has no per-point DOM to style, which sidesteps the CSP issue entirely
- * for the chart body.
+ * NOTICE included there) — never a CDN, the CSP would block it anyway. The full
+ * build (`echarts.min.js`) is used deliberately: the smaller `common`/`simple`
+ * builds were tried and rejected (see vendor/echarts/README.md) — `common`
+ * silently drops the `heatmap` series with no warning, `simple` also lacks
+ * markLine/markPoint. Canvas renderer only, no SVG: a canvas has no per-point
+ * DOM to style, which sidesteps the CSP issue entirely for the chart body.
  *
  * The one real CSP risk is ECharts' built-in HTML tooltip: it sets inline style
  * attributes on a DOM node it injects, which fails under a strict style-src
@@ -22,15 +22,12 @@
  * <style> blocks are restricted by CSP).
  *
  * Design: each mount* function below takes THE SAME option shape the SVG
- * function it replaces took (charts.js's comboChart/scatterChart/heatmapChart),
- * so insights.js's page renderers — all the carefully-tuned business logic:
- * quadrant cuts, erosion thresholds, seasonality math — do not change at all,
- * only the `${xyzChart(opts)}` inline-SVG call becomes a placeholder <div> plus
- * a mount*(el, opts) call after the page's innerHTML is set. gaugeChart() (the
- * Visão Futurista break-even speedometer) is intentionally NOT ported here: its
- * arbitrary (non-evenly-spaced) tick positions have no clean equivalent in
- * ECharts' gauge component without hand-placed graphic overlays that would not
- * reposition on resize — left on the old SVG renderer pending a follow-up.
+ * function it replaces took (charts.js's former comboChart/scatterChart/
+ * heatmapChart/gaugeChart), so insights.js's page renderers — all the
+ * carefully-tuned business logic: quadrant cuts, erosion thresholds,
+ * seasonality math, break-even zones — do not change at all, only the
+ * `${xyzChart(opts)}` inline-SVG call becomes a placeholder <div> plus a
+ * mount*(el, opts) call after the page's innerHTML is set.
  */
 'use strict';
 
@@ -42,7 +39,10 @@ function disposeEcharts() {
 }
 
 function resizeEcharts() {
-  ECHARTS_INSTANCES.forEach((c) => { try { c.resize(); } catch (e) {} });
+  // A gauge's tick labels/threshold marker are hand-placed graphic elements (pixel
+  // coordinates, not chart data) — mountEchartGauge stashes a recompute callback on
+  // the instance so they move with the gauge instead of staying put through a resize.
+  ECHARTS_INSTANCES.forEach((c) => { try { c.resize(); if (c._reflow) c._reflow(); } catch (e) {} });
 }
 
 // ECharts' entry animation is JS-driven, so the CSS prefers-reduced-motion media query
@@ -345,4 +345,70 @@ function mountEchartHeatmap(el, o) {
       emphasis: {itemStyle: {borderColor: t.dark, borderWidth: 2}}}],
   });
   echartsTooltip(chart, (p) => p.data && p.data.tipText);
+}
+
+/* Semicircle break-even gauge — replaces gaugeChart(). Colored zones, the value
+ * progress arc, and the value+delta text are all native ECharts gauge sub-options
+ * (they reflow for free when center/radius are recomputed below). The one thing the
+ * gauge series can't do — 4 tick labels at ARBITRARY, non-evenly-spaced positions
+ * (0 / ponto de equilíbrio / meta ideal / topo) plus the red threshold line at the
+ * break-even point — is drawn as `graphic` elements using the exact same polar
+ * (angle, radius) math the old SVG gaugeChart() used, recomputed on every resize
+ * via the chart's stashed _reflow() (see resizeEcharts() above) so they track the
+ * gauge instead of drifting once the container's width changes. */
+function mountEchartGauge(el, o) {
+  if (!el) return;
+  const t = brandTokens();
+  const chart = echarts.init(el, null, {renderer: 'canvas'});
+  ECHARTS_INSTANCES.push(chart);
+  const max = o.max > 0 ? o.max : 1;
+  const tip = document.querySelector('.chart-tip');
+
+  const layout = () => {
+    const W = chart.getWidth() || 560, H = 330;
+    const cx = W / 2, cy = H - 70, R = Math.min(W / 2 - 60, 170), thick = 34;
+    const ang = (v) => Math.PI * (1 - Math.max(0, Math.min(max, v)) / max);
+    const pt = (a, r) => [cx + r * Math.cos(a), cy - r * Math.sin(a)];
+    const zoneColors = (o.steps || []).map((s) => [Math.min(1, Math.max(0, s.to / max)), s.color]);
+
+    const graphics = [];
+    (o.ticks || []).forEach((v) => {
+      const a = ang(v);
+      const [x, y] = pt(a, R + thick / 2 + 12);
+      graphics.push({type: 'text', x, y,
+        style: {text: o.fmt(v), fill: '#777', fontSize: 11, font: '11px sans-serif',
+          align: a > Math.PI * 0.6 ? 'right' : a < Math.PI * 0.4 ? 'left' : 'center', verticalAlign: 'middle'}});
+    });
+    if (o.threshold != null) {
+      const a = ang(o.threshold);
+      const [x0, y0] = pt(a, R - thick * 0.62), [x1, y1] = pt(a, R + thick * 0.62);
+      graphics.push({type: 'line', shape: {x1: x0, y1: y0, x2: x1, y2: y1}, z: 10,
+        style: {stroke: '#E74C3C', lineWidth: 4}, cursor: 'default',
+        onmouseover: () => { if (tip && o.thresholdTip) { tip.textContent = o.thresholdTip; tip.classList.remove('hidden'); } },
+        onmouseout: () => tip && tip.classList.add('hidden')});
+    }
+    chart.setOption({
+      graphic: {elements: graphics},
+      series: [{
+        type: 'gauge', startAngle: 180, endAngle: 0, min: 0, max,
+        center: [cx, cy], radius: R,
+        axisLine: {lineStyle: {width: thick, color: zoneColors.length ? zoneColors : [[1, '#eee']]}},
+        progress: {show: true, width: thick * 0.42, itemStyle: {color: o.color || t.amber}},
+        pointer: {show: false}, anchor: {show: false},
+        axisTick: {show: false}, splitLine: {show: false}, axisLabel: {show: false},
+        title: {show: !!o.title, offsetCenter: [0, 18 - cy], color: t.dark, fontSize: 14, fontWeight: 600},
+        detail: {show: true, offsetCenter: [0, -6], formatter: () => `{main|${o.fmt(o.value)}}${o.delta ? `\n{delta|${o.delta.text}}` : ''}`,
+          rich: {main: {fontSize: 30, fontWeight: 700, color: t.dark, lineHeight: 36},
+            delta: {fontSize: 14, fontWeight: 600, lineHeight: 20, color: o.delta && o.delta.value >= 0 ? '#1E8449' : '#C0392B'}}},
+        data: [{value: o.value, name: o.title || ''}],
+      }],
+    }, {replaceMerge: ['graphic']});
+  };
+
+  layout();
+  chart._reflow = layout;
+  // componentType is 'series' for the gauge's own value arc/pointer and 'graphic' for the
+  // hand-placed tick labels and threshold line — those already carry their own onmouseover
+  // (above) and must not be clobbered by this catch-all firing right after on the same hover.
+  echartsTooltip(chart, (p) => p.componentType === 'series' ? (o.tip || '') : '');
 }
