@@ -4,7 +4,7 @@ python-multipart>=0.0.6
 uvicorn[standard]>=0.24.0
 
 # Servidor ASGI para Vercel
-gunicorn>=23.0.0
+gunicorn>=26.2.0
 
 # Processamento de dados
 pandas>=2.0.0
