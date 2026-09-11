@@ -211,8 +211,10 @@ function mountEchartCombo(el, o) {
         const stroke = s.strokes ? s.strokes[i] : s.stroke;
         return {value: v, itemStyle: stroke ? {color, borderColor: stroke, borderWidth: 1.5} : {color}};
       });
+      // itemStyle.color here is only what the legend swatch reads (mirrors the SVG version's
+      // same fallback) — each bar's real color still comes from its own data[i].itemStyle above.
       return {name: s.name, type: 'bar', data, yAxisIndex: s.axis === 'right' ? 1 : 0,
-        itemStyle: {opacity: s.opacity == null ? 1 : s.opacity, borderRadius: [2, 2, 0, 0]},
+        itemStyle: {color: s.color || (s.colors && s.colors[0]) || '#999', opacity: s.opacity == null ? 1 : s.opacity, borderRadius: [2, 2, 0, 0]},
         barGap: o.barMode === 'overlay' ? '-100%' : undefined,
         label: s.labels ? {show: true, position: 'top', color: t.muted, fontSize: 10,
           formatter: (p) => (s.labelFmt || s.fmt || String)(p.value)} : undefined};

@@ -56,47 +56,6 @@ const MONTHS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', '
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[c]);
 
-/* ---------------------------------------------------------------- charts (self-hosted SVG, no CDN) */
-
-function svgLineChart(points) {
-  if (!points.length) return '<div class="chart-empty">Sem dados no período.</div>';
-  const w = 700, h = 260, pad = 30;
-  const values = points.map((p) => p.value);
-  const max = Math.max(...values, 0), min = Math.min(...values, 0);
-  const range = (max - min) || 1;
-  const stepX = points.length > 1 ? (w - pad * 2) / (points.length - 1) : 0;
-  const x = (i) => pad + i * stepX;
-  const y = (v) => h - pad - ((v - min) / range) * (h - pad * 2);
-  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
-  const dots = points.map((p, i) =>
-    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="3" class="chart-dot"><title>${esc(p.label)}: ${esc(p.display)}</title></circle>`
-  ).join('');
-  return `<svg viewBox="0 0 ${w} ${h}" class="chart-svg" preserveAspectRatio="none">
-    <line x1="${pad}" y1="${(h - pad).toFixed(1)}" x2="${w - pad}" y2="${(h - pad).toFixed(1)}" class="chart-axis"/>
-    <path d="${path}" class="chart-line"/>${dots}
-  </svg>`;
-}
-
-function svgBarChart(points) {
-  if (!points.length) return '<div class="chart-empty">Sem dados.</div>';
-  const w = 700, h = 260, pad = 30;
-  const max = Math.max(...points.map((p) => p.value), 1);
-  const bw = (w - pad * 2) / points.length;
-  const bars = points.map((p, i) => {
-    const bh = (p.value / max) * (h - pad * 2 - 14);
-    const bx = pad + i * bw + bw * 0.15;
-    const by = h - pad - bh;
-    return `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${bh.toFixed(1)}" class="chart-bar"><title>${esc(p.label)}: ${esc(p.display)}</title></rect>`;
-  }).join('');
-  const labels = points.map((p, i) =>
-    `<text x="${(pad + i * bw + bw / 2).toFixed(1)}" y="${(h - pad + 14).toFixed(1)}" class="chart-label" text-anchor="middle">${esc(p.label)}</text>`
-  ).join('');
-  return `<svg viewBox="0 0 ${w} ${h}" class="chart-svg" preserveAspectRatio="none">
-    <line x1="${pad}" y1="${(h - pad).toFixed(1)}" x2="${w - pad}" y2="${(h - pad).toFixed(1)}" class="chart-axis"/>
-    ${bars}${labels}
-  </svg>`;
-}
-
 /* ---------------------------------------------------------------- boot */
 
 function boot() {
