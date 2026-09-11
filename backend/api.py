@@ -110,11 +110,15 @@ def dashboard(company:int,period:str):
         sales=db.dataset(company,'sales',period,conn)
         if not sales:
             raise HTTPException(404,'Este mês ainda não foi sincronizado. Consulte a integração Mobne.')
+        if not sales['payload'].get('raw_count'):
+            raise HTTPException(404,'O Mobne não tem vendas registradas neste período (ex.: antes da integração da loja).')
         products=db.dataset(company,'products',db=conn)
         catalog={r['id']:r for r in products['payload']} if products else {}
         data=models.summarize(sales['payload']['receipts'],catalog,sales['payload']['analysis'])
         prior_period=f'{int(period[:4])-1:04}'+period[4:]
         prior=db.dataset(company,'sales',prior_period,conn)
+        if prior and not prior['payload'].get('raw_count'):
+            prior=None  # Mobne has no data for this period (e.g. before onboarding); not a same-store comparison
         comparison=None
         if prior:
             # Match elapsed days when the selected period is not a closed month.
@@ -126,7 +130,9 @@ def dashboard(company:int,period:str):
         fixed=conn.execute('SELECT fixed_cost_cents FROM config WHERE company=?',(company,)).fetchone()
         fixed=fixed['fixed_cost_cents'] if fixed else 1691346
         timeline=[]
-        for r in conn.execute("SELECT period,payload FROM datasets WHERE company=? AND resource='sales' ORDER BY period",(company,)):
+        # documents=0 means Mobne genuinely has no sales for the period (e.g. before
+        # onboarding), not an unsynced gap; excluded so it never reads as a zero-revenue month.
+        for r in conn.execute("SELECT period,payload FROM datasets WHERE company=? AND resource='sales' AND documents>0 ORDER BY period",(company,)):
             p=__import__('json').loads(r['payload'])
             s=models.summarize(p['receipts'])['totals']
             # Seasonality/projection pages must not read an in-progress month as a closed one.

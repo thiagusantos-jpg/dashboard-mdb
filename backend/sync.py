@@ -61,24 +61,34 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
             if mode=='reconcile': periods=month_range('2025-01',today.strftime('%Y-%m'))
         db.update_job(job_id,total=len(periods)+4,completed=0)
         # Sales first: a catalog outage must not erase the last good sales dataset.
+        # Each period is independent: a bad reconciliation or contract surprise in one
+        # month must not block the clean months around it (see ANALISE_TECNICA_2026-09-11.md).
+        # Only a MobneError (network/auth/contract-wide) aborts the whole run below, since
+        # it will most likely repeat for every remaining period too.
+        failed_periods=[]
         for index,p in enumerate(periods):
             end=min(month_end(p),today).isoformat(); start=p+'-01'
-            if start>end: raise models.DataError('Período futuro não permitido.')
-            def progress(page,pages,count,total):
-                db.update_job(job_id,detail=f'Cupons {p}: página {page}/{pages} · {count}/{total}')
-            raw=client.fetch_all('receipts',{'Filter.EmpresaId':company,
-                'Filter.DataMovimentoInicial':start+'T00:00:00',
-                'Filter.DataMovimentoFinal':end+'T23:59:59','Filter.Especie':'T'},progress)
-            canonical=models.canonical_receipts([models.receipt(r,company,start,end) for r in raw])
-            db.update_job(job_id,detail=f'Reconciliando {p} com a análise Mobne')
-            analysis=models.normalize_analysis(client.analysis(company,start,end),company)
-            check=models.reconcile(canonical,analysis)
-            if not check['matched']:
-                raise models.DataError(f'Reconciliação {p}: diferença de {check["difference"]/100:.2f}; {check["missing_documents"]} documentos sem correspondência. Base anterior preservada.')
-            with db.connection() as conn:
-                db.put_dataset(company,'sales',p,{'receipts':canonical,'analysis':analysis,
-                    'reconciliation':check,'raw_count':len(raw),'start':start,'end':end},conn)
-            db.update_job(job_id,completed=index+1,detail=f'{p} reconciliado e salvo')
+            try:
+                if start>end: raise models.DataError('Período futuro não permitido.')
+                def progress(page,pages,count,total):
+                    db.update_job(job_id,detail=f'Cupons {p}: página {page}/{pages} · {count}/{total}')
+                raw=client.fetch_all('receipts',{'Filter.EmpresaId':company,
+                    'Filter.DataMovimentoInicial':start+'T00:00:00',
+                    'Filter.DataMovimentoFinal':end+'T23:59:59','Filter.Especie':'T'},progress)
+                canonical=models.canonical_receipts([models.receipt(r,company,start,end) for r in raw])
+                db.update_job(job_id,detail=f'Reconciliando {p} com a análise Mobne')
+                analysis=models.normalize_analysis(client.analysis(company,start,end),company)
+                check=models.reconcile(canonical,analysis)
+                if not check['matched']:
+                    raise models.DataError(f'Reconciliação {p}: diferença de {check["difference"]/100:.2f}; {check["missing_documents"]} documentos sem correspondência. Base anterior preservada.')
+                with db.connection() as conn:
+                    db.put_dataset(company,'sales',p,{'receipts':canonical,'analysis':analysis,
+                        'reconciliation':check,'raw_count':len(raw),'start':start,'end':end},conn,documents=len(raw))
+                db.update_job(job_id,completed=index+1,detail=f'{p} reconciliado e salvo')
+            except (models.DataError,KeyError,ValueError,TypeError) as e:
+                message=str(e) if isinstance(e,models.DataError) else f'Contrato Mobne incompatível em {p}; consulte a cobertura da sincronização.'
+                failed_periods.append((p,message))
+                db.update_job(job_id,completed=index+1,detail=f'{p}: falhou — base anterior preservada')
         # Full daily refresh, with per-entity atomic replacement. Current observations never rewrite historical costs.
         categories=db.dataset(company,'categories')
         cats={r['id']:r['name'] for r in categories['payload']} if categories else {}
@@ -99,7 +109,13 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
                 db.put_dataset(company,resource,'current',payload,conn)
             if resource=='categories': cats={r['id']:r['name'] for r in payload}
             db.update_job(job_id,completed=len(periods)+i+1)
-        db.update_job(job_id,state='completed',detail='Sincronização concluída',error=None)
+        if failed_periods:
+            ok=len(periods)-len(failed_periods)
+            db.update_job(job_id,state='completed_with_errors',
+                detail=f'{ok}/{len(periods)} períodos sincronizados; {len(failed_periods)} com falha (execute novamente para tentar de novo)',
+                error='; '.join(f'{p}: {msg}' for p,msg in failed_periods))
+        else:
+            db.update_job(job_id,state='completed',detail='Sincronização concluída',error=None)
     except (MobneError,models.DataError,KeyError,ValueError,TypeError) as e:
         message=str(e) if isinstance(e,(MobneError,models.DataError)) else 'Contrato Mobne incompatível; consulte a cobertura da sincronização.'
         db.update_job(job_id,state='failed',error=message,detail='Execução interrompida; lotes completos preservados')

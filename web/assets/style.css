@@ -472,6 +472,10 @@ body {
 .month-btn:hover:not(:disabled) { background: var(--yellow); color: var(--dark); }
 .month-btn.active { background: var(--yellow); color: var(--dark); font-weight: 700; }
 .month-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+/* Synced, but Mobne has no sales for the period (e.g. before onboarding) — distinct from
+   "not yet synced" (.month-btn:disabled): still clickable, so the reason stays reachable. */
+.month-btn-empty { background: #2c2c2c; color: #777; font-style: italic; text-decoration: line-through; }
+.month-btn-empty.active { background: #555; color: #ddd; }
 
 .period-status { font-size: 11px; color: #999; text-align: center; padding: 6px; }
 

@@ -163,7 +163,7 @@ def summarize(receipts, products=None, analysis=None):
     cats=defaultdict(lambda:{'revenue':0,'cost':0,'unknown':0,'docs':set()})
     prods={}
     revenue=cost=unknown=documents=cancelled=0
-    zero_cost=0
+    zero_cost=items_total=0
     for doc in receipts:
         if doc['status']=='C':
             cancelled+=1
@@ -174,6 +174,7 @@ def summarize(receipts, products=None, analysis=None):
         day['revenue']+=doc['revenue']; day['receipts']+=1
         for item in doc['items']:
             if item['status']!='V': continue
+            items_total+=1
             pid=item['product_id']
             desc=descriptions.get(pid,{})
             prod=products.get(pid,{})
@@ -203,7 +204,12 @@ def summarize(receipts, products=None, analysis=None):
         p['classification']='Estrela' if p['turnover']>=.6 and (p['margin'] or 0)>=35 else 'Gerador de caixa' if p['turnover']>=.6 else 'Oportunidade' if (p['margin'] or 0)>=35 else 'Baixo giro'
     totals=financial({'revenue':revenue,'cost':cost,'unknown':unknown,'receipts':documents})
     totals.update(ticket=round(revenue/documents) if documents else None, cancelled=cancelled,
-                  products=len(ranked),zero_cost_items=zero_cost)
+                  products=len(ranked),zero_cost_items=zero_cost,
+                  # Mobne reports an explicit 0 as a real known cost (e.g. free/promo items),
+                  # never remapped to "unknown" here — but a high ratio means many items likely
+                  # had no purchase-cost history yet (new store/product), and margin is overstated.
+                  # See ANALISE_TECNICA_2026-09-11.md and Jul-Aug/2025 (100% zero-cost).
+                  zero_cost_ratio=round(zero_cost/items_total,4) if items_total else 0.0)
     return {'totals':totals,'daily':[dict(date=k,**financial(v)) for k,v in sorted(daily.items())],
             'categories':[dict(name=k,receipts=len(v.pop('docs')),**financial(v)) for k,v in sorted(cats.items(),key=lambda x:-x[1]['revenue'])],
             'products':ranked}

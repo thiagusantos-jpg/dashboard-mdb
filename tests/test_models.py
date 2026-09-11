@@ -175,6 +175,27 @@ def test_summarize_excludes_cancelled_from_revenue_but_counts_it():
     assert result['totals']['cancelled'] == 1
 
 
+def test_summarize_reports_zero_cost_ratio_without_hiding_profit():
+    """Regression: Jul-Aug/2025 had 100% zero-cost items (Mobne had no purchase
+    history yet for a newly onboarded store), inflating margin to 100%. An explicit
+    zero stays a known cost (design choice, see models.receipt) but the ratio must
+    be surfaced so the frontend can warn when it is this high."""
+    receipts = [{'id': 1, 'status': 'V', 'date': '2026-01-10', 'revenue': 200,
+                 'items': [
+                     {'id': 1, 'product_id': 1, 'status': 'V', 'revenue': 100, 'cost': 0, 'quantity': '1'},
+                     {'id': 2, 'product_id': 2, 'status': 'V', 'revenue': 100, 'cost': 50, 'quantity': '1'},
+                 ]}]
+    result = models.summarize(receipts)
+    assert result['totals']['zero_cost_items'] == 1
+    assert result['totals']['zero_cost_ratio'] == 0.5
+    assert result['totals']['profit'] == 150  # 200 revenue - (0 + 50) known cost
+
+
+def test_summarize_zero_cost_ratio_is_zero_when_there_are_no_items():
+    result = models.summarize([])
+    assert result['totals']['zero_cost_ratio'] == 0.0
+
+
 def test_summarize_profit_is_none_when_cost_is_missing_not_estimated():
     receipts = [{'id': 1, 'status': 'V', 'date': '2026-01-10', 'revenue': 100,
                  'items': [{'id': 1, 'product_id': 1, 'status': 'V', 'revenue': 100,

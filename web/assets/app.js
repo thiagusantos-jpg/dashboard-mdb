@@ -224,6 +224,12 @@ async function onAuthenticated(session) {
   APP.company = APP.companies[0].id;
   await refreshStatus();
   navigate('resumo');
+  // The automatic worker (backend/sync.py Worker) can finish a sync with nobody watching
+  // the "sync" page; without this, new months only show up after a manual reload.
+  setInterval(async () => {
+    await refreshStatus();
+    if (APP.page === 'sync') renderSyncPage(); else renderPage();
+  }, 60000);
 }
 
 /* ---------------------------------------------------------------- status/period */
@@ -258,7 +264,10 @@ function buildPeriodSelector() {
     return;
   }
   if (!APP.period || !APP.periods.some((p) => p.period === APP.period)) {
-    APP.period = APP.periods[0].period;
+    // Prefer the newest period that actually has Mobne sales over one Mobne reports empty
+    // (e.g. before the store was onboarded) so the dashboard never opens on a blank month.
+    const withData = APP.periods.find((p) => p.documents > 0);
+    APP.period = (withData || APP.periods[0]).period;
   }
   const activeYear = APP.period.slice(0, 4);
 
@@ -270,13 +279,20 @@ function buildPeriodSelector() {
   monthGrid.innerHTML = MONTHS.map((label, i) => {
     const period = `${activeYear}-${String(i + 1).padStart(2, '0')}`;
     const info = known.get(period);
+    const empty = info && !info.documents;  // synced, but Mobne has no sales for this period
     const active = period === APP.period ? 'active' : '';
-    const disabled = info ? '' : 'disabled';
-    return `<button class="month-btn ${active}" ${disabled} data-period="${period}">${label}</button>`;
+    const disabled = info ? '' : 'disabled';  // empty stays clickable, so its explanation is reachable
+    const cls = ['month-btn', active, empty ? 'month-btn-empty' : ''].filter(Boolean).join(' ');
+    const title = empty ? ' title="Mobne não tem vendas registradas neste período"' : '';
+    return `<button class="${cls}" ${disabled}${title} data-period="${period}">${label}</button>`;
   }).join('');
 
   const current = known.get(APP.period);
-  periodStatus.textContent = current ? `Atualizado ${dt(current.updated_at)} · v${current.version}` : '';
+  periodStatus.textContent = current
+    ? (current.documents
+        ? `Atualizado ${dt(current.updated_at)} · v${current.version}`
+        : 'Mobne não tem vendas registradas neste período.')
+    : '';
 }
 
 function selectYear(year) {
@@ -344,6 +360,7 @@ function headerBlock(data) {
     <span class="periodo-badge">${label}${partial}</span>
     <span class="periodo-badge muted">Atualizado ${dt(data.updated_at)} · v${data.version}</span>
     ${reconciliationBanner(data.reconciliation)}
+    ${dataQualityBanner(data.totals)}
   `;
 }
 
@@ -354,6 +371,18 @@ function reconciliationBanner(r) {
   return `<div class="disclosure-banner warn">⚠️ Diferença de ${money(r.difference)} entre Cupom e Análise Mobne
     (${r.missing_documents} documento${r.missing_documents === 1 ? '' : 's'}: ${r.missing_document_ids.join(', ')}).
     Publicado por estar dentro da tolerância declarada de ${money(r.tolerance_cents)}. Cupom é a receita oficial.</div>`;
+}
+
+// Mobne keeps an explicit item cost of R$0 as a real known cost (see backend/models.py
+// receipt()) — but a high share of zero-cost items usually means the store had no
+// purchase-cost history yet (new product/onboarding), not that items were free.
+// Jul-Aug/2025 was 100% zero-cost; steady state since Nov/2025 is ~7-9%.
+const ZERO_COST_WARN_THRESHOLD = 0.15;
+function dataQualityBanner(t) {
+  if (!t.zero_cost_ratio || t.zero_cost_ratio <= ZERO_COST_WARN_THRESHOLD) return '';
+  return `<div class="disclosure-banner warn">⚠️ ${pct(t.zero_cost_ratio * 100)} dos itens vendidos neste período
+    estão com custo zero no Mobne (sem histórico de compra) — lucro e margem deste mês provavelmente estão
+    superestimados e não devem ser comparados com meses de custo completo.</div>`;
 }
 
 function renderResumo(data) {
@@ -443,8 +472,10 @@ function renderEstoque(data) {
 /* ---------------------------------------------------------------- sync page */
 
 function jobBadge(state) {
-  const map = {queued: 'badge-info', running: 'badge-info', completed: 'badge-success', failed: 'badge-error'};
-  const label = {queued: 'Na fila', running: 'Em execução', completed: 'Concluído', failed: 'Falhou'};
+  const map = {queued: 'badge-info', running: 'badge-info', completed: 'badge-success',
+    completed_with_errors: 'badge-warning', failed: 'badge-error'};
+  const label = {queued: 'Na fila', running: 'Em execução', completed: 'Concluído',
+    completed_with_errors: 'Concluído com falhas', failed: 'Falhou'};
   return `<span class="${map[state] || 'badge-muted'}">${label[state] || state}</span>`;
 }
 
@@ -475,8 +506,10 @@ function renderSyncPage() {
 
     <div class="section-header">Períodos de vendas sincronizados</div>
     <div class="data-table-container table-scroll-md">
-      <table class="data-table"><thead><tr><th>Período</th><th>Atualizado</th><th>Versão</th></tr></thead>
-      <tbody>${(s.periods || []).map((p) => `<tr><td>${p.period}</td><td>${dt(p.updated_at)}</td><td>${p.version}</td></tr>`).join('') || '<tr><td colspan="3">Nenhum período ainda.</td></tr>'}</tbody></table>
+      <table class="data-table"><thead><tr><th>Período</th><th>Documentos</th><th>Atualizado</th><th>Versão</th></tr></thead>
+      <tbody>${(s.periods || []).map((p) => `<tr><td>${p.period}</td>
+        <td>${p.documents ? num(p.documents) : 'Sem vendas no Mobne'}</td>
+        <td>${dt(p.updated_at)}</td><td>${p.version}</td></tr>`).join('') || '<tr><td colspan="4">Nenhum período ainda.</td></tr>'}</tbody></table>
     </div>
 
     <div class="section-header">Execuções recentes</div>

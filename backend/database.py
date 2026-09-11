@@ -43,6 +43,17 @@ def initialize():
         CREATE TABLE IF NOT EXISTS config(company INTEGER PRIMARY KEY, fixed_cost_cents INTEGER NOT NULL DEFAULT 1691346);
         ''')
         db.execute('INSERT OR IGNORE INTO schema_versions VALUES(1,?)', (now(),))
+        # v2: 'documents' lets periods()/dashboard() tell a period Mobne genuinely has
+        # no sales for (e.g. before onboarding) from one merely not yet synced, without
+        # parsing every multi-MB sales payload on the hot status-poll path.
+        columns = {r['name'] for r in db.execute('PRAGMA table_info(datasets)')}
+        if 'documents' not in columns:
+            db.execute('ALTER TABLE datasets ADD COLUMN documents INTEGER NOT NULL DEFAULT 0')
+            for row in db.execute("SELECT company,resource,period,payload FROM datasets WHERE resource='sales'"):
+                count = json.loads(row['payload']).get('raw_count', 0)
+                db.execute('UPDATE datasets SET documents=? WHERE company=? AND resource=? AND period=?',
+                           (count, row['company'], row['resource'], row['period']))
+            db.execute('INSERT OR IGNORE INTO schema_versions VALUES(2,?)', (now(),))
     os.chmod(settings.DB_PATH, 0o600)
 
 def save_companies(rows):
@@ -55,11 +66,11 @@ def companies():
     with connection() as db:
         return [dict(r) for r in db.execute('SELECT * FROM companies ORDER BY name')]
 
-def put_dataset(company, resource, period, payload, db=None):
-    sql = '''INSERT INTO datasets(company,resource,period,payload,updated_at) VALUES(?,?,?,?,?)
+def put_dataset(company, resource, period, payload, db=None, documents=0):
+    sql = '''INSERT INTO datasets(company,resource,period,payload,updated_at,documents) VALUES(?,?,?,?,?,?)
     ON CONFLICT(company,resource,period) DO UPDATE SET payload=excluded.payload,
-    updated_at=excluded.updated_at,version=datasets.version+1'''
-    args = (company, resource, period, json.dumps(payload, ensure_ascii=False, allow_nan=False), now())
+    updated_at=excluded.updated_at,version=datasets.version+1,documents=excluded.documents'''
+    args = (company, resource, period, json.dumps(payload, ensure_ascii=False, allow_nan=False), now(), documents)
     if db is not None:
         db.execute(sql, args)
     else:
@@ -80,7 +91,7 @@ def dataset(company, resource, period='current', db=None):
 
 def periods(company):
     with connection() as db:
-        return [dict(r) for r in db.execute('SELECT period,updated_at,version FROM datasets WHERE company=? AND resource=? ORDER BY period DESC', (company, 'sales'))]
+        return [dict(r) for r in db.execute('SELECT period,updated_at,version,documents FROM datasets WHERE company=? AND resource=? ORDER BY period DESC', (company, 'sales'))]
 
 def create_job(company, mode):
     with connection() as db:
