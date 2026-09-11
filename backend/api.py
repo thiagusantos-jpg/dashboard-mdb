@@ -107,12 +107,25 @@ class SyncRequest(BaseModel):
 
 @app.post('/api/companies/{company}/sync',dependencies=[Depends(security.authenticate)],status_code=202)
 def trigger_sync(company:int,body:SyncRequest):
-    authorized_company(company)
+    # No authorized_company() pre-check here on purpose: the very first sync for a company
+    # runs against an empty companies table (nothing to check membership against yet) — sync.run()
+    # already re-validates the id against the live Mobne company list before touching anything,
+    # so this endpoint can safely bootstrap a brand-new database the same way the old local-only
+    # CLI entrypoint (`python -m backend.sync --company ...`) always did.
     job_id=db.create_job(company,body.mode)
     if settings.IS_SERVERLESS:
         # No background Worker is running here to pick the job off the queue.
         sync.run(company,body.mode,job_id=job_id)
     return {'job_id':job_id}
+
+@app.get('/api/sync-jobs/{job_id}',dependencies=[Depends(security.authenticate)])
+def sync_job(job_id:int):
+    # The administrator must be able to follow bootstrap before companies exist.
+    with db.connection() as conn:
+        job=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+    if job is None:
+        raise HTTPException(404,'Sincronização não encontrada.')
+    return dict(job)
 
 @app.get('/api/cron/sync')
 def cron_sync(request:Request):

@@ -199,7 +199,7 @@ async function onAuthenticated(session) {
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
   if (!APP.companies.length) {
-    renderEmptyState('Nenhuma empresa liberada para esta credencial Mobne.');
+    renderBootstrapForm();
     return;
   }
   APP.company = APP.companies[0].id;
@@ -440,6 +440,64 @@ function renderEmptyState(message) {
   document.getElementById('content').innerHTML = `
     <div class="page-title">Mercado duBairro</div>
     <div class="story-box mt-16">${esc(message)}</div>`;
+}
+
+// A brand-new database has no company yet — the first sync registers companies,
+// so there is nothing for the normal per-company UI to show beforehand.
+// This is the one-time bootstrap: the Mobne company id is entered directly, and the sync
+// endpoint validates it against the live Mobne API itself (see trigger_sync in backend/api.py).
+function renderBootstrapForm() {
+  document.getElementById('content').innerHTML = `
+    <div class="page-title">Mercado duBairro</div>
+    <div class="story-box mt-16">Nenhuma empresa sincronizada ainda nesta base de dados.
+      Informe o ID da empresa na Mobne para carregar os dados pela primeira vez.</div>
+    <form id="bootstrap-form" class="login-card mt-16">
+      <label for="bootstrap-company-id" class="field-label">ID da empresa (Mobne)</label>
+      <input type="number" id="bootstrap-company-id" class="login-input" min="1" step="1" required>
+      <button type="submit" class="btn-primary" id="bootstrap-submit">Sincronizar</button>
+      <div id="bootstrap-status" class="sim-status" role="status" aria-live="polite"></div>
+    </form>`;
+  document.getElementById('bootstrap-form').addEventListener('submit', onBootstrapSubmit);
+}
+
+async function onBootstrapSubmit(ev) {
+  ev.preventDefault();
+  const id = parseInt(document.getElementById('bootstrap-company-id').value, 10);
+  const btn = document.getElementById('bootstrap-submit');
+  const status = document.getElementById('bootstrap-status');
+  btn.disabled = true;
+  status.className = 'sim-status';
+  status.textContent = 'Iniciando sincronização — aguarde…';
+  try {
+    const {job_id} = await api(`/api/companies/${id}/sync`, {method: 'POST', body: JSON.stringify({mode: 'recent'})});
+    // Company registration precedes sales ingestion. Follow the job, not the company list.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const job = await api(`/api/sync-jobs/${job_id}`);
+      if (job.state === 'failed' || job.state === 'completed_with_errors') {
+        throw new Error(job.error || job.detail || 'A sincronização não foi concluída.');
+      }
+      if (job.state === 'completed') {
+        const session = await api('/api/session');
+        if (!(session.companies || []).some((company) => company.id === id)) {
+          throw new Error('A empresa não está disponível após a sincronização.');
+        }
+        // Open the requested company even when Mobne returns multiple companies.
+        session.companies.sort((a, b) => Number(b.id === id) - Number(a.id === id));
+        status.className = 'sim-status ok';
+        status.textContent = 'Sincronizado! Carregando o painel…';
+        await onAuthenticated(session);
+        return;
+      }
+      status.textContent = job.detail || 'Aguardando o início da sincronização…';
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    status.textContent = 'A sincronização ainda está em andamento. Clique novamente para acompanhar a execução.';
+    btn.disabled = false;
+  } catch (e) {
+    status.className = 'sim-status error';
+    status.textContent = 'Não foi possível sincronizar: ' + e.message;
+    btn.disabled = false;
+  }
 }
 
 function headerBlock(data) {
