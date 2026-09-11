@@ -103,12 +103,57 @@ function boot() {
     img.addEventListener('error', () => img.classList.add('hidden'));
   });
   document.addEventListener('click', onDelegatedClick);
+  setupChartTooltip();
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    // Insight charts are drawn at their pixel width; redraw from the cached payload.
+    resizeTimer = setTimeout(() => { if (INSIGHT_PAGES.includes(APP.page) && APP.dashboard) renderPage(); }, 250);
+  });
   refreshSession();
+}
+
+const INSIGHT_PAGES = ['precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao'];
+
+function setupChartTooltip() {
+  const tip = document.createElement('div');
+  tip.className = 'chart-tip hidden';
+  document.body.appendChild(tip);
+  document.addEventListener('mouseover', (ev) => {
+    const el = ev.target.closest && ev.target.closest('[data-tip]');
+    if (!el || !el.dataset.tip) return tip.classList.add('hidden');
+    tip.textContent = el.dataset.tip;
+    tip.classList.remove('hidden');
+  });
+  document.addEventListener('mousemove', (ev) => {
+    if (tip.classList.contains('hidden')) return;
+    const x = ev.clientX + 14, y = ev.clientY + 14;
+    tip.style.left = Math.max(8, Math.min(x, window.innerWidth - tip.offsetWidth - 8)) + 'px';
+    tip.style.top = (y + tip.offsetHeight > window.innerHeight - 8 ? ev.clientY - tip.offsetHeight - 10 : y) + 'px';
+  });
 }
 
 function onDelegatedClick(ev) {
   const nav = ev.target.closest('[data-nav]');
   if (nav) return navigate(nav.dataset.nav);
+  const explainBtn = ev.target.closest('[data-explain]');
+  if (explainBtn) return explainBtn.nextElementSibling.classList.toggle('open');
+  const tab = ev.target.closest('[data-tab]');
+  if (tab) {
+    const bar = tab.closest('.tabs');
+    bar.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b === tab));
+    for (let s = bar.nextElementSibling; s && s.classList.contains('tab-content'); s = s.nextElementSibling) {
+      s.classList.toggle('active', s.id === tab.dataset.tab);
+    }
+    return;
+  }
+  const legend = ev.target.closest('[data-legend]');
+  if (legend) {
+    const off = legend.classList.toggle('off');
+    document.querySelectorAll(`[data-series="${legend.dataset.legend}-${legend.dataset.s}"]`)
+      .forEach((el) => el.classList.toggle('series-off', off));
+    return;
+  }
   const year = ev.target.closest('[data-year]');
   if (year) return selectYear(year.dataset.year);
   const period = ev.target.closest('[data-period]');
@@ -196,6 +241,7 @@ async function refreshStatus() {
   } else if (!hasActiveJob && APP.pollTimer) {
     clearInterval(APP.pollTimer);
     APP.pollTimer = null;
+    APP.dashboard = null;  // a finished sync may have refreshed catalogs/sales
   }
 }
 
@@ -237,13 +283,13 @@ function selectYear(year) {
   const inYear = APP.periods.find((p) => p.period.startsWith(year));
   APP.period = inYear ? inYear.period : `${year}-01`;
   buildPeriodSelector();
-  if (APP.page === 'resumo' || APP.page === 'estoque') renderPage();
+  if (APP.page !== 'sync') renderPage();
 }
 
 function selectPeriod(period) {
   APP.period = period;
   buildPeriodSelector();
-  if (APP.page === 'resumo' || APP.page === 'estoque') renderPage();
+  if (APP.page !== 'sync') renderPage();
 }
 
 /* ---------------------------------------------------------------- nav */
@@ -252,6 +298,7 @@ function navigate(page) {
   APP.page = page;
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   renderPage();
+  window.scrollTo(0, 0);
 }
 
 async function renderPage() {
@@ -259,16 +306,26 @@ async function renderPage() {
   if (!APP.period) {
     return renderEmptyState('Nenhum período sincronizado ainda. Vá em "Sincronização Mobne" e clique em Sincronizar agora.');
   }
-  document.getElementById('content').innerHTML = '<div class="loading loading-inline"><div class="loading-spinner"></div>Carregando…</div>';
-  try {
-    APP.dashboard = await api(`/api/companies/${APP.company}/dashboard?period=${APP.period}`);
-  } catch (e) {
-    if (e.status === 404) return renderEmptyState(e.message);
-    return renderEmptyState('Não foi possível carregar os dados: ' + e.message);
+  // Every data page reads the same /dashboard payload; reuse it until the period or its version changes.
+  const info = APP.periods.find((p) => p.period === APP.period);
+  const cached = APP.dashboard && APP.dashboard.period === APP.period && APP.dashboardCompany === APP.company &&
+    (!info || info.version === APP.dashboard.version);
+  if (!cached) {
+    document.getElementById('content').innerHTML = '<div class="loading loading-inline"><div class="loading-spinner"></div>Carregando…</div>';
+    try {
+      APP.dashboard = await api(`/api/companies/${APP.company}/dashboard?period=${APP.period}`);
+      APP.dashboardCompany = APP.company;
+    } catch (e) {
+      APP.dashboard = null;
+      if (e.status === 404) return renderEmptyState(e.message);
+      return renderEmptyState('Não foi possível carregar os dados: ' + e.message);
+    }
+    document.getElementById('custo-fixo-input').value = (APP.dashboard.fixed_cost_cents / 100).toFixed(2);
   }
-  document.getElementById('custo-fixo-input').value = (APP.dashboard.fixed_cost_cents / 100).toFixed(2);
-  if (APP.page === 'resumo') renderResumo(APP.dashboard);
-  else if (APP.page === 'estoque') renderEstoque(APP.dashboard);
+  const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
+    diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao};
+  if (APP.page === 'sync') return renderSyncPage();  // user navigated away mid-fetch
+  (renderers[APP.page] || renderResumo)(APP.dashboard);
 }
 
 function renderEmptyState(message) {
@@ -457,7 +514,8 @@ function updateCustoFixo() {
       await api(`/api/companies/${APP.company}/config`, {
         method: 'PUT', body: JSON.stringify({fixed_cost_cents: Math.round(value * 100)}),
       });
-      if (APP.page === 'resumo') renderPage();
+      APP.dashboard = null;
+      if (APP.page !== 'sync') renderPage();
     } catch (e) {
       alert('Não foi possível salvar o custo fixo: ' + e.message);
     }

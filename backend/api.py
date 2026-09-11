@@ -127,8 +127,11 @@ def dashboard(company:int,period:str):
         fixed=fixed['fixed_cost_cents'] if fixed else 1691346
         timeline=[]
         for r in conn.execute("SELECT period,payload FROM datasets WHERE company=? AND resource='sales' ORDER BY period",(company,)):
-            s=models.summarize(__import__('json').loads(r['payload'])['receipts'])['totals']
-            timeline.append({'period':r['period'],**s})
+            p=__import__('json').loads(r['payload'])
+            s=models.summarize(p['receipts'])['totals']
+            # Seasonality/projection pages must not read an in-progress month as a closed one.
+            timeline.append({'period':r['period'],'end':p['end'],
+                'partial':p['end']<__import__('backend.sync',fromlist=['month_end']).month_end(r['period']).isoformat(),**s})
         stock=db.dataset(company,'stock',db=conn)
         prices=db.dataset(company,'prices',db=conn)
         price_map={r['id']:r for r in (prices['payload'] if prices else []) if r['package']=='1.0' or r['package']=='1'}
