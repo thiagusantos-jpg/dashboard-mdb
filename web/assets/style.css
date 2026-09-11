@@ -28,6 +28,15 @@
     --amber: #B7791F;          /* 3.6:1 — yellow lines / outline of yellow bars (#FFC107 is 1.6:1) */
     --link: #1F6FA8;           /* 5.4:1 */
     --sidebar-muted: #A0A0A0;  /* 5.3:1 on --dark — was #666 (2.4:1) */
+
+    /* Plain neutral surfaces/borders (not contrast-critical, unlike the block above) —
+       named so each shade only needs to change in one place. */
+    --border: #ddd;             /* light-mode input/card borders */
+    --divider: #e0e0e0;         /* light-mode dividers — a touch lighter than --border */
+    --surface-muted: #eee;      /* light-mode neutral fill (secondary buttons, muted badges) */
+    --sidebar-line: #444;       /* dark-sidebar borders/fills, resting state */
+    --sidebar-line-hover: #555; /* dark-sidebar borders/fills, hover/active state */
+    --sidebar-text: #ccc;       /* dark-sidebar primary text (brighter than --sidebar-muted) */
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -58,7 +67,7 @@ body {
 .mt-16 { margin-top: 16px; }
 .mt-8 { margin-top: 8px; }
 .w-full { width: 100%; }
-.periodo-badge.muted { background: #e0e0e0; }
+.periodo-badge.muted { background: var(--divider); }
 .btn-row { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 .btn-wide { width: auto !important; padding: 10px 20px; }
 .table-scroll-sm { max-height: 280px; }
@@ -104,7 +113,7 @@ body {
 .login-input {
     width: 100%;
     padding: 12px 14px;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 14px;
     margin-bottom: 12px;
@@ -130,7 +139,7 @@ body {
 
 .btn-secondary {
     padding: 8px 16px;
-    background: #eee;
+    background: var(--surface-muted);
     color: var(--dark);
     border: none;
     border-radius: 6px;
@@ -139,7 +148,7 @@ body {
     cursor: pointer;
 }
 
-.btn-secondary:hover { background: #ddd; }
+.btn-secondary:hover { background: var(--border); }
 
 .form-error {
     color: var(--negative);
@@ -178,7 +187,7 @@ body {
     background: rgba(255, 255, 255, 0.08); color: #fff; font-size: 18px; cursor: pointer;
 }
 
-.sidebar hr { border: none; border-top: 1px solid #444; margin: 12px 0; }
+.sidebar hr { border: none; border-top: 1px solid var(--sidebar-line); margin: 12px 0; }
 
 .nav-item {
     display: block;
@@ -186,7 +195,7 @@ body {
     padding: 10px 14px;
     background: transparent;
     border: none;
-    color: #ccc;
+    color: var(--sidebar-text);
     font-size: 14px;
     text-align: left;
     text-decoration: none;
@@ -210,8 +219,6 @@ body {
     margin: 16px 0 8px 4px;
 }
 
-.sidebar-info { font-size: 12px; color: #aaa; margin: 4px 0 4px 4px; }
-
 .sidebar-footer {
     margin-top: auto;
     padding-top: 16px;
@@ -220,13 +227,13 @@ body {
     text-align: center;
 }
 
-.sim-label { font-size: 12px; color: #aaa; margin: 4px 0 4px 4px; display: block; }
+.sim-label { font-size: 12px; color: var(--sidebar-muted); margin: 4px 0 4px 4px; display: block; }
 
 .sim-input {
     width: 100%;
     padding: 8px 10px;
     border-radius: 6px;
-    border: 1px solid #555;
+    border: 1px solid var(--sidebar-line-hover);
     background: #333;
     color: white;
     font-size: 13px;
@@ -258,7 +265,7 @@ body {
 }
 .topbar-menu, .period-step {
     min-width: 40px; min-height: 40px;
-    border: 1px solid #ddd; border-radius: 8px; background: #fff;
+    border: 1px solid var(--border); border-radius: 8px; background: #fff;
     color: var(--dark); font-size: 20px; line-height: 1; cursor: pointer;
 }
 .topbar-menu { display: none; align-items: center; justify-content: center; }
@@ -300,7 +307,7 @@ body {
     margin-right: 8px;
 }
 
-.divider { border: none; border-top: 1px solid #e0e0e0; margin: 16px 0; }
+.divider { border: none; border-top: 1px solid var(--divider); margin: 16px 0; }
 
 /* ============================================================
    DISCLOSURE / RECONCILIATION BANNER
@@ -387,7 +394,7 @@ body {
     max-height: 420px;
     overflow-y: auto;
     border-radius: 8px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--divider);
 }
 
 .data-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -427,7 +434,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .chip.active { background: var(--dark); border-color: var(--dark); color: #fff; }
 .chip-count {
     display: inline-block; margin-left: 4px; padding: 0 6px; border-radius: 9px;
-    background: #eee; color: var(--dark); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+    background: var(--surface-muted); color: var(--dark); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
 }
 .chip.active .chip-count { background: var(--yellow); }
 .result-count { font-size: 12px; color: var(--text-muted); margin: 6px 0 8px; }
@@ -436,14 +443,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
    CHART CONTAINERS
    ============================================================ */
 .chart-container { background: white; border-radius: 8px; padding: 8px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04); }
-.chart-caption { text-align: center; font-size: 11px; color: var(--gray); margin-top: 4px; }
-.chart-svg { width: 100%; height: 100%; display: block; }
-.chart-line { fill: none; stroke: var(--amber); stroke-width: 2.5; }
-.chart-dot { fill: var(--dark); }
-.chart-bar { fill: var(--blue); }
-.chart-axis { stroke: #ddd; stroke-width: 1; }
-.chart-label { font-size: 11px; fill: var(--text-muted); }
-.chart-empty { padding: 40px 0; text-align: center; color: #999; font-size: 13px; }
+.chart-empty { padding: 40px 0; text-align: center; color: var(--text-muted); font-size: 13px; }
 
 /* ============================================================
    INSIGHT PAGES — story, "como interpretar", tabs, action plan
@@ -456,7 +456,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
     border-radius: 0 8px 8px 0;
     margin: 8px 0 16px 0;
     font-size: 13px;
-    color: #555;
+    color: var(--text-muted);
     line-height: 1.5;
 }
 
@@ -468,7 +468,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .tooltip-box { margin: 8px 0; }
 .tooltip-toggle {
     background: none;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 8px 14px;
     font-size: 13px;
@@ -482,12 +482,12 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .tooltip-content {
     display: none;
     background: white;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--divider);
     border-radius: 0 0 6px 6px;
     padding: 12px 16px;
     font-size: 13px;
     line-height: 1.6;
-    color: #555;
+    color: var(--text-muted);
 }
 .tooltip-content.open { display: block; }
 .tooltip-content strong { color: var(--dark); }
@@ -495,9 +495,9 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .tabs { display: flex; gap: 0; }
 .tab-btn {
     padding: 10px 20px;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border);
     border-bottom: none;
-    background: #f5f5f5;
+    background: var(--light-gray);
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;
@@ -506,7 +506,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
     transition: all 0.2s;
 }
 .tab-btn.active { background: white; color: var(--dark); font-weight: 600; border-bottom: 2px solid var(--yellow); }
-.tab-content { display: none; border: 1px solid #ddd; border-top: none; padding: 16px; background: white; border-radius: 0 0 8px 8px; }
+.tab-content { display: none; border: 1px solid var(--border); border-top: none; padding: 16px; background: white; border-radius: 0 0 8px 8px; }
 .tab-content.active { display: block; }
 
 .action-title { font-size: 16px; margin: 4px 0 8px 0; }
@@ -515,37 +515,9 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .action-list li:last-child { border-bottom: none; }
 
 /* ============================================================
-   INTERACTIVE CHARTS (web/assets/charts.js)
+   CHARTS — hover tooltip shared by every ECharts mount (echarts-charts.js);
+   the chart body itself is Canvas, drawn/styled entirely from JS, not CSS.
    ============================================================ */
-.chart-wrap { width: 100%; }
-.chart-svg-i { width: 100%; height: auto; display: block; overflow: visible; }
-.chart-grid { stroke: #EFEFEF; stroke-width: 1; }
-.chart-zero { stroke: #BBBBBB; stroke-width: 1; }
-.chart-tick { font-size: 11px; fill: var(--text-muted); }
-.chart-axis-title { font-size: 11px; fill: #555; font-weight: 600; }
-.chart-value { font-size: 10px; fill: #444; pointer-events: none; }
-.chart-annot { font-size: 10px; pointer-events: none; }
-.chart-quadrant { font-size: 12px; font-weight: 700; pointer-events: none; }
-.chart-cell { font-size: 11px; font-weight: 600; pointer-events: none; }
-.chart-gauge-title { font-size: 14px; fill: var(--dark); font-weight: 600; }
-.chart-gauge-value { font-size: 30px; fill: var(--dark); font-weight: 700; }
-.chart-gauge-delta { font-size: 14px; font-weight: 600; }
-.chart-gauge .chart-svg-i { max-width: 640px; margin: 0 auto; }
-.chart-hover { fill: #000; fill-opacity: 0; }
-.chart-hover:hover { fill-opacity: 0.04; }
-.chart-mark { cursor: pointer; transition: opacity 0.15s; }
-.chart-mark:hover { stroke: var(--dark); stroke-width: 2; }
-.series-off { display: none; }
-
-.chart-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; padding: 6px 0 2px; }
-.legend-item {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: none; border: none; cursor: pointer;
-    font-size: 12px; color: #444; padding: 2px 4px; border-radius: 4px;
-}
-.legend-item:hover { background: #f3f3f3; }
-.legend-item.off { opacity: 0.35; text-decoration: line-through; }
-
 .chart-tip {
     position: fixed; z-index: 1000; pointer-events: none;
     background: rgba(45, 45, 45, 0.95); color: white;
@@ -559,7 +531,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .loading { display: flex; align-items: center; justify-content: center; height: 60vh; font-size: 18px; color: var(--gray); }
 .loading-spinner {
     width: 40px; height: 40px;
-    border: 4px solid #e0e0e0;
+    border: 4px solid var(--divider);
     border-top: 4px solid var(--yellow);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
@@ -593,7 +565,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .badge-info { display: inline-block; background: #D6EAF8; color: #1B5E8C; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .badge-warning { display: inline-block; background: #FDEBD0; color: #7A4F00; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .badge-error { display: inline-block; background: #FADBD8; color: #943126; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
-.badge-muted { display: inline-block; background: #eee; color: #777; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+.badge-muted { display: inline-block; background: var(--surface-muted); color: var(--text-muted); padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 
 /* ============================================================
    PERIOD SELECTOR
@@ -601,15 +573,15 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .period-tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .tab-btn-period {
     flex: 1; min-width: 50px; padding: 8px;
-    background: #444; color: #ccc; border: none; border-radius: 4px;
+    background: var(--sidebar-line); color: var(--sidebar-text); border: none; border-radius: 4px;
     cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 12px;
 }
-.tab-btn-period:hover { background: #555; }
+.tab-btn-period:hover { background: var(--sidebar-line-hover); }
 .tab-btn-period.active { background: var(--yellow); color: var(--dark); }
 
 .month-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; }
 .month-btn {
-    min-height: 40px; padding: 8px; background: #444; color: #ccc; border: none; border-radius: 4px;
+    min-height: 40px; padding: 8px; background: var(--sidebar-line); color: var(--sidebar-text); border: none; border-radius: 4px;
     cursor: pointer; font-size: 12px; font-weight: 500; transition: all 0.15s;
 }
 .month-btn:hover:not(:disabled) { background: var(--yellow); color: var(--dark); }
@@ -618,14 +590,14 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 /* Synced, but Mobne has no sales for the period (e.g. before onboarding) — distinct from
    "not yet synced" (.month-btn:disabled): still clickable, so the reason stays reachable. */
 .month-btn-empty { background: #2c2c2c; color: #9a9a9a; font-style: italic; text-decoration: line-through; }
-.month-btn-empty.active { background: #555; color: #ddd; }
+.month-btn-empty.active { background: var(--sidebar-line-hover); color: #ddd; }
 
-.period-status { font-size: 11px; color: #999; text-align: center; padding: 6px; }
+.period-status { font-size: 11px; color: var(--text-muted); text-align: center; padding: 6px; }
 
 /* ============================================================
    SYNC STATUS
    ============================================================ */
-.sync-status { font-size: 12px; color: #ccc; padding: 8px 12px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; margin-bottom: 8px; line-height: 1.4; }
+.sync-status { font-size: 12px; color: var(--sidebar-text); padding: 8px 12px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; margin-bottom: 8px; line-height: 1.4; }
 
 .loading-status {
     display: flex; align-items: center; gap: 8px;

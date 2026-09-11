@@ -135,13 +135,6 @@ function onDelegatedClick(ev) {
     }
     return;
   }
-  const legend = ev.target.closest('[data-legend]');
-  if (legend) {
-    const off = legend.classList.toggle('off');
-    document.querySelectorAll(`[data-series="${legend.dataset.legend}-${legend.dataset.s}"]`)
-      .forEach((el) => el.classList.toggle('series-off', off));
-    return;
-  }
   const year = ev.target.closest('[data-year]');
   if (year) return selectYear(year.dataset.year);
   const period = ev.target.closest('[data-period]');
