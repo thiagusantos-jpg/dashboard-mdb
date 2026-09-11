@@ -58,6 +58,16 @@ body {
 .table-scroll-tall { max-height: 70vh; margin-top: 12px; }
 .loading-inline { height: 40vh; }
 .chart-box { height: 280px; }
+/* Fixed pixel heights for ECharts containers (echarts.init needs a real clientHeight;
+   the old SVG charts self-sized via viewBox, these don't) — CSP blocks style="", so
+   sizes come from classes, not inline styles. Named for the height they replace. */
+.chart-h-290 { height: 290px; }
+.chart-h-330 { height: 330px; }
+.chart-h-360 { height: 360px; }
+.chart-h-380 { height: 380px; }
+.chart-h-400 { height: 400px; }
+.chart-h-460 { height: 460px; }
+.chart-h-520 { height: 520px; }
 
 /* ============================================================
    LOGIN

@@ -164,8 +164,7 @@ function renderPrecos(data) {
   const rOf = bubbleRadius(cap.map((p) => p.profit), 4, 18);
   const avgRev = cap.length ? sumBy(cap, (p) => p.revenue) / cap.length : 0;
   const maxRev = Math.max(0, ...cap.map((p) => p.revenue));
-  const scatter = scatterChart({
-    width: chartWidth(0.6), height: 460,
+  const scatterOpts = {
     points: cap.map((p) => ({x: p.revenue, y: p.margin, r: rOf(p.profit), g: CLASSES.indexOf(classInfo(p.classification)),
       tip: `${p.name}\nReceita: ${money(p.revenue)}\nMargem: ${pct1(p.margin)}\nLucro: ${money(p.profit)}\n${classInfo(p.classification).label}`})),
     groups: CLASSES.map((c) => ({name: c.label, color: c.color})),
@@ -174,7 +173,7 @@ function renderPrecos(data) {
     vlines: [{x: avgRev, label: `Receita média: ${brlShort(avgRev)}`}],
     hlines: mdm == null ? [] : [{y: mdm, label: `Margem média: ${pct1(mdm)}`}],
     empty: 'Nenhum produto Curva A com custo conhecido no período.',
-  });
+  };
 
   const cats = (data.categories || []).filter((c) => c.revenue > 0)
     .sort((a, b) => (b.margin == null ? -1e9 : b.margin) - (a.margin == null ? -1e9 : a.margin));
@@ -204,7 +203,7 @@ function renderPrecos(data) {
     <div class="row">
       <div class="col-60">
         ${section(`Duelo de Produtos (${P.label})`)}
-        ${chartBox(scatter)}
+        <div class="chart-container chart-h-460" id="chart-precos-scatter"></div>
         ${explain('Scatter Plot de Preços', 'Cada bolha = produto Curva A. X = faturamento. Y = margem. Tamanho = lucro. Clique na legenda para filtrar.',
           'Superior direito = melhor. Inferior direito = vende mas não lucra. Passe o mouse para ver detalhes.', 'Identifica onde reajustar preço.')}
       </div>
@@ -232,6 +231,7 @@ function renderPrecos(data) {
     ${explain('Erosão de Margem', 'Compara o markdown calculado com o custo médio vs com o custo da última entrada.',
       'Positivo = custo subiu (ruim). Negativo = custo caiu (bom).', 'Alerta antecipado do que VAI acontecer com a margem.')}
   `;
+  mountEchartScatter(document.getElementById('chart-precos-scatter'), scatterOpts);
 }
 
 /* ================================================================ PÁGINA: MAPA DE PRODUTOS */
@@ -255,12 +255,11 @@ function renderMapa(data) {
   const ys = niceScale(Math.min(0, ...margins), Math.max(MARGEM_CORTE + 10, ...margins), 6);
   const span = ys.max - ys.min;
   const groups = CLASSES.map((c) => ({name: c.label, color: c.key === 'Baixo giro' ? COR.lightGray : c.color}));
-  const matrix = scatterChart({
-    width: chartWidth(1), height: 520,
+  const matrixOpts = {
     points: pp.map((p) => ({x: p.turnover, y: p.margin, r: rOf(p.revenue), g: CLASSES.indexOf(classInfo(p.classification)),
       tip: `${p.name}\nGiro: ${Math.round(p.turnover * 100)}% dos dias (${p.days_sold} dias)\nMargem: ${pct1(p.margin)}\nReceita: ${money(p.revenue)}\nLucro: ${money(p.profit)}`})),
     groups,
-    xScale: {min: -0.05, max: 1.05, ticks: [0, 0.2, 0.4, 0.6, 0.8, 1]}, yScale: ys,
+    xScale: {min: -0.05, max: 1.05}, yScale: {min: ys.min, max: ys.max},
     xTitle: 'Giro (% dos dias com venda)', yTitle: 'Margem (%)', xFmt: (v) => Math.round(v * 100) + '%', yFmt: (v) => v + '%',
     vlines: [{x: GIRO_CORTE}], hlines: [{y: MARGEM_CORTE}],
     annotations: [
@@ -270,7 +269,7 @@ function renderMapa(data) {
       {x: 0.27, y: ys.min + span * 0.05, text: '⚠️ PESO MORTO', color: COR.red},
     ],
     empty: 'Nenhum produto com custo conhecido no período.',
-  });
+  };
 
   const rowsOf = (arr) => arr.map((p) => [esc(p.name), p.days_sold, pct1(p.margin), money(p.revenue), money(p.profit)]);
   const heads = ['Produto', 'Dias', 'Margem %', 'Receita', 'Lucro'];
@@ -293,7 +292,7 @@ function renderMapa(data) {
     <hr class="divider">
 
     ${section(`Matriz de Rentabilidade (${P.label})`)}
-    ${chartBox(matrix)}
+    <div class="chart-container chart-h-520" id="chart-mapa-matrix"></div>
     ${explain('Scatter Plot Giro vs Margem', 'Cada bolha = produto. X = giro. Y = margem. Tamanho = faturamento.',
       'Superior direito = ⭐. Inferior direito = 💰. Passe o mouse para ver detalhes; clique na legenda para filtrar grupos.',
       'Ferramenta principal para decisões de mix.')}
@@ -313,6 +312,7 @@ function renderMapa(data) {
       </div>
     </div>
   `;
+  mountEchartScatter(document.getElementById('chart-mapa-matrix'), matrixOpts);
 }
 
 /* ================================================================ PÁGINA: DIAGNÓSTICO DE FATURAMENTO */
@@ -334,15 +334,15 @@ function renderDiagnostico(data) {
   const vsTxt = prevLabel ? ` vs ${prevLabel}` : '';
 
   const topCats = (data.categories || []).slice().sort((a, b) => b.revenue - a.revenue).slice(0, 12);
-  const contrib = comboChart({
-    width: chartWidth(0.5), height: 380, rotate: true, legend: false,
+  const contribOpts = {
+    rotate: true,
     labels: topCats.map((c) => c.name.length > 22 ? c.name.slice(0, 21) + '…' : c.name),
     tipLabels: topCats.map((c) => c.name),
     series: [{name: 'Faturamento', type: 'bar', values: topCats.map((c) => c.revenue), fmt: money, labels: true, labelFmt: brlShort,
       colors: topCats.map((c) => c.profit == null ? COR.gray : c.profit > 0 ? COR.green : COR.red),
       tips: topCats.map((c) => `Lucro: ${money(c.profit)} · Margem: ${pct1(c.margin)}`)}],
     yFmt: brlShort, yTitle: 'Faturamento (R$)', empty: 'Sem categorias no período.',
-  });
+  };
 
   // Weekday × week-of-month heatmap (Monday-first weeks)
   const daily = data.daily || [];
@@ -354,13 +354,13 @@ function renderDiagnostico(data) {
   });
   const weeks = [...new Set(dayInfo.map((d) => d.week))].sort((a, b) => a - b);
   const dowPresent = DIAS_CURTOS.map((_, i) => i).filter((i) => dayInfo.some((d) => d.dow === i));
-  const heat = heatmapChart({
-    width: chartWidth(0.5), rows: weeks.map((w) => `Sem ${w + 1}`), cols: dowPresent.map((i) => DIAS_CURTOS[i]),
+  const heatOpts = {
+    rows: weeks.map((w) => `Sem ${w + 1}`), cols: dowPresent.map((i) => DIAS_CURTOS[i]),
     cells: dayInfo.map((d) => ({r: weeks.indexOf(d.week), c: dowPresent.indexOf(d.dow), value: d.revenue,
       text: brlShort(d.revenue),
       tip: `${String(d.day).padStart(2, '0')}/${String(P.m).padStart(2, '0')} (${DIAS_SEMANA[d.dow]})\nFaturamento: ${money(d.revenue)}\nCupons: ${num(d.receipts)}\nMargem: ${pct1(d.margin)}`})),
     empty: 'Sem vendas diárias no período.',
-  });
+  };
 
   const byDow = DIAS_SEMANA.map((nome, i) => {
     const days = dayInfo.filter((d) => d.dow === i);
@@ -368,13 +368,13 @@ function renderDiagnostico(data) {
   }).filter((d) => d.dias);
   const best = byDow.length ? byDow.reduce((a, b) => (a.media > b.media ? a : b)) : null;
   const worst = byDow.length ? byDow.reduce((a, b) => (a.media < b.media ? a : b)) : null;
-  const dowChart = comboChart({
-    width: chartWidth(1), height: 290, legend: false, labels: byDow.map((d) => d.nome),
+  const dowChartOpts = {
+    labels: byDow.map((d) => d.nome),
     series: [{name: 'Faturamento médio', type: 'bar', values: byDow.map((d) => d.media), fmt: money, labels: true, labelFmt: brl,
       colors: byDow.map((d) => d.nome === 'Domingo' ? COR.red : COR.yellow),
       strokes: byDow.map((d) => d.nome === 'Domingo' ? null : COR.amber), tips: byDow.map((d) => `${d.dias} dia(s) com venda`)}],
     yFmt: brlShort, yTitle: 'Fat. médio (R$)',
-  });
+  };
 
   document.getElementById('content').innerHTML = `
     ${insightHeader('🔍', 'Diagnóstico de Faturamento', 'Menos clientes, menos gasto, ou mix mudou?', P)}
@@ -395,24 +395,27 @@ function renderDiagnostico(data) {
     <div class="row">
       <div class="col-50">
         ${section(`Contribuição por Categoria (${P.label})`)}
-        ${chartBox(contrib)}
+        <div class="chart-container chart-h-380" id="chart-diag-contrib"></div>
         ${explain('Contribuição por Categoria', 'Top 12 categorias por faturamento. Verde = lucro positivo, vermelho = prejuízo.',
           'Barras mais altas = mais faturamento. Passe o mouse para ver lucro e margem.', 'Identifica os motores do faturamento.')}
       </div>
       <div class="col-50">
         ${section(`Heatmap por Dia (${P.label})`)}
-        ${chartBox(heat)}
+        <div class="chart-container chart-h-380" id="chart-diag-heat"></div>
         ${explain('Heatmap Semanal', `Faturamento de cada dia de ${P.nome}/${P.y}, por semana do mês.`,
           'Cores quentes = dias fortes. Frias = fracos. Cinza = sem venda.', 'Identifica padrões semanais e dias atípicos.')}
       </div>
     </div>
 
     ${section(`Faturamento Médio por Dia da Semana (${P.label})`)}
-    ${chartBox(dowChart)}
+    <div class="chart-container chart-h-290" id="chart-diag-dow"></div>
     ${explain('Faturamento por Dia da Semana', `Média diária em ${P.nome}/${P.y}. Domingo em vermelho.`,
       'Barras altas = dias fortes. Use para planejar estoque e escala.', 'Promoções nos dias fracos, reforço nos fortes.')}
     ${best ? story(`${best.nome} é o dia mais forte (${brl(best.media)} em média), ${worst.nome} o mais fraco (${brl(worst.media)}). Promoções para ${worst.nome}, reforço de estoque para ${best.nome}.`) : ''}
   `;
+  mountEchartCombo(document.getElementById('chart-diag-contrib'), contribOpts);
+  mountEchartHeatmap(document.getElementById('chart-diag-heat'), heatOpts);
+  mountEchartCombo(document.getElementById('chart-diag-dow'), dowChartOpts);
 }
 
 /* ================================================================ PÁGINA: SAZONALIDADE E TENDÊNCIAS */
@@ -451,9 +454,8 @@ function renderSazonalidade(data) {
     ? `<div class="disclosure-banner">ℹ️ ${R} tem vendas sincronizadas só de ${MONTHS[refMonths[0]]} a ${MONTHS[refMonths[refMonths.length - 1]]}
        (${S.refVals.length} meses). Médias e índices de sazonalidade usam apenas esses meses.</div>` : '';
 
-  const w60 = chartWidth(0.6), w40 = chartWidth(0.4);
-  const saz = comboChart({
-    width: w60, height: 400, labels: MONTHS, tipLabels: MESES_NOMES,
+  const sazOpts = {
+    labels: MONTHS, tipLabels: MESES_NOMES,
     series: [
       {name: `${R}`, type: 'line', values: S.ref.map((t) => (t ? t.revenue : null)), color: COR.gray, fmt: money, labels: true, labelFmt: brlShort},
       {name: `${P.y} (real)`, type: 'line', values: S.cur.map((t) => (t && !t.partial ? t.revenue : null)), color: COR.amber,
@@ -463,25 +465,25 @@ function renderSazonalidade(data) {
     ],
     hlines: S.refAvg ? [{value: S.refAvg, label: `Média ${R}: ${brlShort(S.refAvg)}`, color: '#CCCCCC', dash: '2 4'}] : [],
     yFmt: brlShort, yTitle: 'Faturamento (R$)',
-  });
-  const idx = comboChart({
-    width: w40, height: 400, legend: false, labels: MONTHS, tipLabels: MESES_NOMES, yMin: 0,
+  };
+  const idxOpts = {
+    labels: MONTHS, tipLabels: MESES_NOMES, yMin: 0,
     series: [{name: 'Índice', type: 'bar', values: S.index, fmt: dec2, labels: true,
       colors: S.index.map((v) => (v != null && v > 1 ? COR.green : COR.red)),
       tips: S.ref.map((t) => (t ? `Faturamento: ${money(t.revenue)}` : ''))}],
     hlines: [{value: 1, color: '#999', dash: '1 0', width: 2}],
     yFmt: dec2, yTitle: 'Índice (1,00 = média)', empty: `Sem vendas de ${R} para calcular o índice.`,
-  });
+  };
 
   const skuRef = S.ref.map((t) => (t ? t.products : null)), skuCur = S.cur.map((t) => (t && !t.partial ? t.products : null));
-  const mix = comboChart({
-    width: chartWidth(1), height: 290, labels: MONTHS, tipLabels: MESES_NOMES,
+  const mixOpts = {
+    labels: MONTHS, tipLabels: MESES_NOMES,
     series: [
       {name: `SKUs ${R}`, type: 'line', values: skuRef, color: COR.gray, fmt: num, labels: true},
       {name: `SKUs ${P.y}`, type: 'line', values: skuCur, color: COR.blue, fmt: num, labels: true, labelPos: 'bottom'},
     ],
     yFmt: num, yTitle: 'Nº SKUs vendidos',
-  });
+  };
   const mixBase = skuCur.filter((v) => v != null).length >= 2 ? {vals: skuCur, year: P.y} : {vals: skuRef, year: R};
   const mixIdx = mixBase.vals.map((v, i) => (v != null ? i : -1)).filter((i) => i >= 0);
   const mixStory = mixIdx.length >= 2 ? (() => {
@@ -491,11 +493,12 @@ function renderSazonalidade(data) {
 
   const rol = rolling12(data);
   const trend = rol.length >= 2 ? growth(rol[rol.length - 1].value, rol[0].value) : null;
-  const rollChart = rol.length ? comboChart({
-    width: chartWidth(1), height: 290, legend: false, labels: rol.map((r) => r.label),
+  const rollOpts = {
+    labels: rol.map((r) => r.label),
     series: [{name: 'Faturamento 12 meses', type: 'line', values: rol.map((r) => r.value), color: COR.blue, fill: true, width: 3, fmt: money}],
-    yFmt: brlShort, yTitle: 'Fat. acumulado 12m (R$)', headroom: 0.05,
-  }) : chartEmpty('São necessários 12 meses completos de vendas sincronizadas para a média móvel.');
+    yFmt: brlShort, yTitle: 'Fat. acumulado 12m (R$)',
+    empty: 'São necessários 12 meses completos de vendas sincronizadas para a média móvel.',
+  };
 
   document.getElementById('content').innerHTML = `
     <div class="page-title">📈 Sazonalidade e Tendências</div>
@@ -517,30 +520,34 @@ function renderSazonalidade(data) {
     <div class="row">
       <div class="col-60">
         ${section(`Sazonalidade — ${R} vs ${P.y}`)}
-        ${chartBox(saz)}
+        <div class="chart-container chart-h-400" id="chart-saz-saz"></div>
         ${explain(`Sazonalidade ${R} vs ${P.y}`, `Cinza = ${R}. Losangos amarelos = ${P.y} (meses fechados). Laranja = mês em andamento. Linha pontilhada = média de ${R}.`,
           `Compare o losango de ${P.y} com o ponto do MESMO mês de ${R}.`, `${R} mostra o padrão do ano.`)}
       </div>
       <div class="col-40">
         ${section(`Índice de Sazonalidade — ${R}`)}
-        ${chartBox(idx)}
+        <div class="chart-container chart-h-400" id="chart-saz-idx"></div>
         ${explain('Índice de Sazonalidade', `Cada barra = faturamento do mês ÷ média mensal de ${R}. 1,00 = exatamente na média.`,
           'Verde (> 1,00) = mês forte. Vermelho (< 1,00) = mês fraco.', `Prever meses fortes e fracos de ${P.y}.`)}
       </div>
     </div>
 
     ${section('Mix de Produtos — SKUs vendidos por mês')}
-    ${chartBox(mix)}
+    <div class="chart-container chart-h-290" id="chart-saz-mix"></div>
     ${explain('Evolução do Mix', 'Quantidade de produtos diferentes vendidos em cada mês (o mês em andamento fica de fora).',
       'Linha descendo = menos variedade na prateleira.', 'Menos produtos = menos motivos para o cliente voltar.')}
     ${mixStory ? story(`Mix ${mixStory.b >= mixStory.a ? 'cresceu' : 'encolheu'} de ${num(mixStory.a)} para ${num(mixStory.b)} SKUs entre ${mixStory.from} e ${mixStory.to}/${String(mixStory.year).slice(2)} (${mixStory.b - mixStory.a >= 0 ? '+' : ''}${num(mixStory.b - mixStory.a)}).`) : ''}
 
     ${section('Tendência — 12 Meses Móveis')}
-    ${chartBox(rollChart)}
+    <div class="chart-container chart-h-290" id="chart-saz-roll"></div>
     ${explain('12 Meses Móveis', 'Soma dos últimos 12 meses fechados em cada ponto. Elimina a sazonalidade.',
       'Subindo = negócio crescendo. Descendo = encolhendo.', 'Melhor indicador de tendência real.')}
     ${rol.length ? story(`Faturamento 12m: ${brl(rol[rol.length - 1].value)}.${trend == null ? '' : ` Tendência ${trend > 0 ? 'subindo' : 'caindo'} (${signedPct(trend)} desde ${rol[0].label}).`}`) : ''}
   `;
+  mountEchartCombo(document.getElementById('chart-saz-saz'), sazOpts);
+  mountEchartCombo(document.getElementById('chart-saz-idx'), idxOpts);
+  mountEchartCombo(document.getElementById('chart-saz-mix'), mixOpts);
+  mountEchartCombo(document.getElementById('chart-saz-roll'), rollOpts);
 }
 
 /* ================================================================ PÁGINA: VISÃO FUTURISTA */
@@ -558,8 +565,8 @@ function renderVisao(data) {
   const closedReal = S.cur.map((c) => (c && !c.partial ? c.revenue : null));
   const projVals = S.projection.map((v, i) => (closedReal[i] == null ? v : null));
   const partialVals = S.cur.map((c) => (c && c.partial ? c.revenue : null));
-  const projChart = comboChart({
-    width: chartWidth(1), height: 400, barMode: 'overlay', labels: MONTHS, tipLabels: MESES_NOMES,
+  const projOpts = {
+    barMode: 'overlay', labels: MONTHS, tipLabels: MESES_NOMES,
     series: [
       {name: `${P.y} (real)`, type: 'bar', values: closedReal, color: COR.yellow, stroke: COR.amber, fmt: money, labels: true, labelFmt: brlShort},
       {name: `${P.y} (projeção)`, type: 'bar', values: projVals, color: COR.yellow, opacity: 0.35, stroke: COR.amber, fmt: money, labels: true, labelFmt: brlShort},
@@ -567,7 +574,7 @@ function renderVisao(data) {
       {name: `${S.R} (referência)`, type: 'line', values: S.ref.map((c) => (c ? c.revenue : null)), color: '#BBBBBB', dash: '4 4', width: 2, fmt: money},
     ],
     yFmt: brlShort, yTitle: 'Faturamento (R$)',
-  });
+  };
 
   const be = mg > 0 ? fixed / (mg / 100) : null, ideal = be ? be * 1.5 : null;
   const gauge = be ? gaugeChart({
@@ -616,7 +623,7 @@ function renderVisao(data) {
     <hr class="divider">
 
     ${section(`📊 Projeção de Faturamento — ${P.y} Completo`)}
-    ${chartBox(projChart)}
+    <div class="chart-container chart-h-400" id="chart-visao-proj"></div>
     ${explain(`Projeção ${P.y}`, `Amarelo sólido = real. Amarelo transparente = projeção sazonal. Laranja = mês em andamento. Linha cinza = ${S.R}.`,
       S.factor != null ? `Fator de ajuste: ${dec2(S.factor)} (${P.y} está ${signedPct((S.factor - 1) * 100)} vs ${S.R} nos ${S.pairs} meses comparáveis). Projeção = mês de ${S.R} × fator.`
         : `Não há meses fechados comparáveis entre ${P.y} e ${S.R} — sem projeção sazonal.`,
@@ -663,4 +670,5 @@ function renderVisao(data) {
     ${explain('Plano de Ação', 'Gerado automaticamente com base nos dados e projeções.',
       'Ações priorizadas por impacto: margem → estoque → sazonalidade.', 'Revise com os sócios no início de cada mês.')}
   `;
+  mountEchartCombo(document.getElementById('chart-visao-proj'), projOpts);
 }

@@ -579,7 +579,7 @@ function renderResumo(data) {
   const topProfit = (data.products || []).filter((p) => p.profit != null).slice().sort((a, b) => b.profit - a.profit).slice(0, 10);
   const topProfitSum = topProfit.reduce((s, p) => s + p.profit, 0);
   const topPoints = topProfit.slice().reverse()
-    .map((p) => ({label: p.name.length > 16 ? p.name.slice(0, 16) + '…' : p.name, value: p.profit / 100, display: money(p.profit)}));
+    .map((p) => ({label: p.name, value: p.profit / 100, display: money(p.profit)}));
 
   document.getElementById('content').innerHTML = `
     ${headerBlock(data)}
@@ -620,7 +620,7 @@ function renderResumo(data) {
     </div>
 
     <div class="section-header">Top 10 produtos por lucro</div>
-    <div class="chart-container chart-box">${svgBarChart(topPoints)}</div>
+    <div class="chart-container chart-h-330" id="echart-top10"></div>
     ${topProfit.length ? `<div class="story-box">💡 Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
       ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.
       <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de Produtos →</button></div>` : ''}
@@ -628,11 +628,11 @@ function renderResumo(data) {
     <div class="section-header">Histórico mensal</div>
     <div class="chart-container chart-box" id="echart-timeline"></div>
   `;
-  // Fase 2 prototype: only these two charts run through ECharts (see echarts-charts.js);
-  // mounted after innerHTML so the container elements exist. Sizes itself off the box's
-  // own CSS height (.chart-box) rather than the fixed 700x260 viewBox the SVG charts use.
+  // Mounted after innerHTML so the container elements exist; each sizes itself off its
+  // own CSS height (.chart-h-*) rather than a fixed viewBox like the old SVG charts.
   mountEchartLine(document.getElementById('echart-daily'), dailyPoints);
   mountEchartBar(document.getElementById('echart-timeline'), timelinePoints);
+  mountEchartBarH(document.getElementById('echart-top10'), topPoints);
 }
 
 /* ---------------------------------------------------------------- Produtos & Estoque */
