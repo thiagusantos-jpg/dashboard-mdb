@@ -12,7 +12,7 @@ openpyxl>=3.1.0
 numpy>=1.24.0
 
 # Integração Mobne
-requests>=2.31.0
+requests>=2.34.2
 python-dotenv>=1.0.0
 
 # Opcional: Para sincronização assíncrona
