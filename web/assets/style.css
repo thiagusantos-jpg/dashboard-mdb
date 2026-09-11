@@ -46,6 +46,14 @@ body {
 :focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .sidebar :focus-visible, .period-popover :focus-visible { outline-color: var(--yellow); }
 
+/* Keyboard-only: invisible until focused, jumps past the sidebar straight to #content. */
+.skip-link {
+    position: absolute; top: -48px; left: 8px; z-index: 1000;
+    background: var(--dark); color: #fff; padding: 10px 16px; border-radius: 0 0 8px 8px;
+    text-decoration: none; font-weight: 600; font-size: 14px; transition: top 0.15s;
+}
+.skip-link:focus { top: 0; }
+
 /* Utility spacing/sizing used instead of inline style="" (blocked by CSP style-src 'self') */
 .mt-16 { margin-top: 16px; }
 .mt-8 { margin-top: 8px; }
@@ -56,7 +64,6 @@ body {
 .table-scroll-sm { max-height: 280px; }
 .table-scroll-md { max-height: 200px; }
 .table-scroll-tall { max-height: 70vh; margin-top: 12px; }
-.loading-inline { height: 40vh; }
 .chart-box { height: 280px; }
 /* Fixed pixel heights for ECharts containers (echarts.init needs a real clientHeight;
    the old SVG charts self-sized via viewBox, these don't) — CSP blocks style="", so
@@ -329,7 +336,7 @@ body {
 }
 
 .kpi-title { font-size: 13px; color: var(--gray); margin-bottom: 4px; font-weight: 500; }
-.kpi-value { font-size: 26px; font-weight: 700; color: var(--dark); line-height: 1.2; }
+.kpi-value { font-size: 26px; font-weight: 700; color: var(--dark); line-height: 1.2; font-variant-numeric: tabular-nums; }
 .kpi-subtitle { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 .kpi-positive { color: var(--positive) !important; }
 .kpi-negative { color: var(--negative) !important; }
@@ -338,7 +345,7 @@ body {
 
 /* M/M and A/A comparison chips on a kpi-card — see backend/api.py comparison_for() */
 .kpi-deltas { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.delta-chip { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #f0f0f0; color: #5E5E5E; font-weight: 600; }
+.delta-chip { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #f0f0f0; color: #5E5E5E; font-weight: 600; font-variant-numeric: tabular-nums; }
 .delta-chip.delta-positive { background: #D5F5E3; color: #17693A; }
 .delta-chip.delta-negative { background: #FADBD8; color: #943126; }
 
@@ -383,7 +390,7 @@ body {
     border: 1px solid #e0e0e0;
 }
 
-.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
 .data-table th {
     background: var(--dark);
     color: white;
@@ -406,7 +413,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 
 /* Produtos & Estoque: search + quick filters (the page lists ~700 products) */
 .estoque-toolbar { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 4px; }
-.field-label { font-size: 13px; font-weight: 600; color: var(--dark); }
+.field-label { display: block; font-size: 13px; font-weight: 600; color: var(--dark); margin-bottom: 4px; }
 .search-input {
     width: 100%; max-width: 420px; min-height: 40px; padding: 8px 12px;
     border: 1px solid #bbb; border-radius: 8px; font-size: 14px;
@@ -560,6 +567,25 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Page-switch skeleton (renderPage()'s inline loading state) — reuses .kpi-grid-4's own
+   responsive breakpoints instead of a bespoke grid. Kept separate from #loading above,
+   the app's one-time boot spinner (nothing to mimic the shape of yet at that point). */
+.skeleton-page { padding-top: 2px; }
+.skeleton-line, .skeleton-card, .skeleton-block {
+    background: linear-gradient(90deg, #ececec 25%, #f6f6f6 50%, #ececec 75%);
+    background-size: 200% 100%; animation: skeleton-shimmer 1.4s ease-in-out infinite;
+    border-radius: 8px;
+}
+.skeleton-line { height: 14px; margin-bottom: 10px; }
+.skeleton-title { width: 220px; height: 24px; margin-bottom: 6px; }
+.skeleton-sub { width: 340px; }
+.skeleton-card { height: 92px; border-radius: 12px; }
+.skeleton-block { height: 240px; margin-top: 20px; }
+@keyframes skeleton-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+    .skeleton-line, .skeleton-card, .skeleton-block { animation: none; background: #ececec; }
+}
+
 /* ============================================================
    BADGES
    ============================================================ */
@@ -658,5 +684,10 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
     .kpi-grid-4, .kpi-grid-3, .kpi-grid-2, .kpi-grid-5 { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-    .sidebar { transition: none !important; }
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
 }

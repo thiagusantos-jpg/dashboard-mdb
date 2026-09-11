@@ -6,9 +6,11 @@
     <title>Gestão | Mercado duBairro</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏪</text></svg>">
     <!-- ?v= busts copies browsers cached before the server sent Cache-Control: no-cache (backend/api.py). -->
-    <link rel="stylesheet" href="assets/style.css?v=20260911-ux1">
+    <link rel="stylesheet" href="assets/style.css?v=20260911-ux5">
 </head>
 <body>
+
+<a href="#content" class="skip-link">Pular para o conteúdo</a>
 
 <!-- Login -->
 <div id="login-screen" class="login-screen hidden">
@@ -17,7 +19,8 @@
         <h1>Mercado duBairro</h1>
         <p>Painel dos Sócios — acesso restrito</p>
         <div id="login-error" class="form-error"></div>
-        <input type="password" id="login-password" class="login-input" placeholder="Senha de acesso" autocomplete="current-password" required>
+        <label for="login-password" class="field-label">Senha de acesso</label>
+        <input type="password" id="login-password" class="login-input" autocomplete="current-password" required>
         <button type="submit" class="btn-primary" id="login-submit">Entrar</button>
     </form>
 </div>
@@ -84,15 +87,15 @@
             </div>
             <div id="period-status" class="period-status" aria-live="polite"></div>
         </header>
-        <main class="main-content" id="content"></main>
+        <main class="main-content" id="content" tabindex="-1"></main>
     </div>
 </div>
 
-<script src="assets/charts.js?v=20260911-ux1"></script>
-<script src="assets/insights.js?v=20260911-ux1"></script>
-<!-- Apache ECharts prototype (Fase 2) — vendored locally, Apache-2.0, see assets/vendor/echarts/README.md -->
+<script src="assets/charts.js?v=20260911-ux5"></script>
+<script src="assets/insights.js?v=20260911-ux5"></script>
+<!-- Apache ECharts — vendored locally, Apache-2.0, see assets/vendor/echarts/README.md -->
 <script src="assets/vendor/echarts/echarts.min.js?v=6.1.0"></script>
-<script src="assets/echarts-charts.js?v=20260911-ux4"></script>
-<script src="assets/app.js?v=20260911-ux4"></script>
+<script src="assets/echarts-charts.js?v=20260911-ux5"></script>
+<script src="assets/app.js?v=20260911-ux5"></script>
 </body>
 </html>

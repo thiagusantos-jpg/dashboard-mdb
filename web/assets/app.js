@@ -104,6 +104,14 @@ function setupChartTooltip() {
 }
 
 function onDelegatedClick(ev) {
+  // The app's own hash router (onRouteChange) treats every #... as a /página/período route
+  // and rewrites it right back — a plain href="#content" anchor jump never survives that.
+  // Move focus manually instead; preventDefault keeps location.hash untouched entirely.
+  if (ev.target.closest('.skip-link')) {
+    ev.preventDefault();
+    document.getElementById('content').focus();
+    return;
+  }
   // Outside click closes the period popover; checked before any handler re-renders the target.
   if (isPickerOpen() && !ev.target.closest('.period-control')) closePeriodPicker();
   if (ev.target.closest('[data-nav-toggle]')) {
@@ -416,7 +424,13 @@ async function renderPage() {
   const cached = APP.dashboard && APP.dashboard.period === APP.period && APP.dashboardCompany === APP.company &&
     (!info || info.version === APP.dashboard.version);
   if (!cached) {
-    document.getElementById('content').innerHTML = '<div class="loading loading-inline"><div class="loading-spinner"></div>Carregando…</div>';
+    document.getElementById('content').innerHTML = `
+      <div class="skeleton-page">
+        <div class="skeleton-line skeleton-title"></div>
+        <div class="skeleton-line skeleton-sub"></div>
+        <div class="kpi-grid kpi-grid-4">${'<div class="skeleton-card"></div>'.repeat(4)}</div>
+        <div class="skeleton-block"></div>
+      </div>`;
     try {
       APP.dashboard = await api(`/api/companies/${APP.company}/dashboard?period=${APP.period}`);
       APP.dashboardCompany = APP.company;
@@ -558,11 +572,10 @@ function renderResumo(data) {
       ${kpiCard('Ponto de equilíbrio', money(data.break_even_cents), data.break_even_cents == null ? 'kpi-unavailable' : '',
         '', data.break_even_gap_pct == null ? '' : `Folga: ${data.break_even_gap_pct >= 0 ? '+' : ''}${pct(data.break_even_gap_pct)}`)}
     </div>
-    <div class="story-box">
-      Resultado simulado = receita − custo dos itens conhecidos − custo fixo cadastrado. Não é o lucro líquido contábil
-      (despesas reais não confirmadas com o Mobne). Ponto de equilíbrio = custo fixo ÷ margem do período; ambos ficam
-      indisponíveis quando há itens sem custo conhecido, em vez de usar uma margem parcial como se fosse a real.
-    </div>
+    ${explain('Resultado simulado e Ponto de equilíbrio',
+      'Resultado simulado = receita − custo dos itens conhecidos − custo fixo cadastrado do mês. Ponto de equilíbrio = custo fixo ÷ margem do período.',
+      'Nenhum dos dois é o lucro líquido contábil — despesas reais não são confirmadas com o Mobne; são apenas simulações a partir das vendas e do custo cadastrado.',
+      'Ambos ficam indisponíveis quando há itens vendidos sem custo conhecido no período, em vez de usar uma margem parcial como se fosse a real.')}
 
     <div class="row">
       <div class="col-60">
@@ -717,6 +730,8 @@ function jobBadge(state) {
   return `<span class="${map[state] || 'badge-muted'}">${label[state] || state}</span>`;
 }
 
+const SYNC_MODE_LABELS = {recent: 'Recente', history: 'Histórico completo', reconcile: 'Reconciliação completa', month: 'Mês específico'};
+
 function renderSyncPage() {
   const s = APP.status;
   const catalogs = s.catalogs || {};
@@ -753,7 +768,7 @@ function renderSyncPage() {
     <div class="section-header">Execuções recentes</div>
     <div class="jobs-list">
       ${(s.jobs || []).map((j) => `<div class="job-row">
-          <div><strong>${j.mode}</strong> ${jobBadge(j.state)}
+          <div><strong>${SYNC_MODE_LABELS[j.mode] || j.mode}</strong> ${jobBadge(j.state)}
             <div class="job-detail">${esc(j.detail || '')}</div>
             ${j.error ? `<div class="job-error">${esc(j.error)}</div>` : ''}
           </div>

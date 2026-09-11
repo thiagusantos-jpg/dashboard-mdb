@@ -457,7 +457,10 @@ function renderSazonalidade(data) {
   const sazOpts = {
     labels: MONTHS, tipLabels: MESES_NOMES,
     series: [
-      {name: `${R}`, type: 'line', values: S.ref.map((t) => (t ? t.revenue : null)), color: COR.gray, fmt: money, labels: true, labelFmt: brlShort},
+      // No static labels on the reference line: with the current-year diamonds also labeled
+      // (labelPos 'bottom' below), close months collided. Its value is still one hover away
+      // (comboAxisTooltip in echarts-charts.js shows every series at that x-position).
+      {name: `${R}`, type: 'line', values: S.ref.map((t) => (t ? t.revenue : null)), color: COR.gray, fmt: money},
       {name: `${P.y} (real)`, type: 'line', values: S.cur.map((t) => (t && !t.partial ? t.revenue : null)), color: COR.amber,
         marker: 'diamond', markerSize: 7, width: 3, fmt: money, labels: true, labelPos: 'bottom', labelFmt: brlShort},
       partialIdx >= 0 ? {name: `${MONTHS[partialIdx]}/${P.yy} (parcial)`, type: 'line', values: S.cur.map((t) => (t && t.partial ? t.revenue : null)),

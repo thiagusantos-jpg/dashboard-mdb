@@ -45,6 +45,10 @@ function resizeEcharts() {
   ECHARTS_INSTANCES.forEach((c) => { try { c.resize(); } catch (e) {} });
 }
 
+// ECharts' entry animation is JS-driven, so the CSS prefers-reduced-motion media query
+// (style.css) cannot turn it off on its own — checked once per mount instead.
+const CHART_ANIM_MS = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 300;
+
 // Reads the brand's actual CSS custom properties (style.css :root) instead of duplicating
 // hex values here, so the chart theme can never drift from the rest of the UI.
 function brandTokens() {
@@ -91,7 +95,7 @@ function mountEchartLine(el, points) {
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
   chart.setOption({
-    animationDuration: 300,
+    animationDuration: CHART_ANIM_MS,
     grid: {left: 8, right: 16, top: 16, bottom: 28, containLabel: true},
     tooltip: {show: false},
     xAxis: Object.assign({type: 'category', data: points.map((p) => p.label), boundaryGap: false}, baseAxis(t, dayMonthLabel)),
@@ -113,7 +117,7 @@ function mountEchartBar(el, points) {
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
   chart.setOption({
-    animationDuration: 300,
+    animationDuration: CHART_ANIM_MS,
     grid: {left: 8, right: 16, top: 16, bottom: 28, containLabel: true},
     tooltip: {show: false},
     xAxis: Object.assign({type: 'category', data: points.map((p) => p.label)}, baseAxis(t, monthYearLabel)),
@@ -135,7 +139,7 @@ function mountEchartBarH(el, points) {
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
   chart.setOption({
-    animationDuration: 300,
+    animationDuration: CHART_ANIM_MS,
     grid: {left: 8, right: 48, top: 8, bottom: 8, containLabel: true},
     tooltip: {show: false},
     xAxis: {type: 'value', show: false},
@@ -248,7 +252,7 @@ function mountEchartCombo(el, o) {
   if (hasY2) yAxis.push({type: 'value', name: o.y2Title, nameTextStyle: {color: t.muted, fontSize: 11},
     splitLine: {show: false}, axisLine: {show: false}, axisLabel: {color: t.muted, fontSize: 11, formatter: o.y2Fmt || compactNum}});
   chart.setOption({
-    animationDuration: 300,
+    animationDuration: CHART_ANIM_MS,
     grid: {left: 8, right: hasY2 ? 8 : 16, top: 16, bottom: o.rotate ? 76 : (series.length > 1 ? 40 : 28), containLabel: true},
     tooltip: {show: false},
     legend: series.length > 1 ? {bottom: 0, textStyle: {color: t.muted, fontSize: 11}, icon: 'roundRect'} : undefined,
@@ -300,7 +304,7 @@ function mountEchartScatter(el, o) {
     series[0].markLine.data.push({yAxis: h.y, label: h.label ? {show: true, formatter: h.label, color: '#888', fontSize: 10} : {show: false}});
   });
   chart.setOption({
-    animationDuration: 300,
+    animationDuration: CHART_ANIM_MS,
     grid: {left: 8, right: 16, top: 16, bottom: 44, containLabel: true},
     tooltip: {show: false},
     legend: groups.length > 1 ? {bottom: 0, textStyle: {color: t.muted, fontSize: 11}, icon: 'circle',
@@ -330,7 +334,7 @@ function mountEchartHeatmap(el, o) {
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
   chart.setOption({
-    animationDuration: 300,
+    animationDuration: CHART_ANIM_MS,
     grid: {left: 8, right: 8, top: 8, bottom: 8, containLabel: true},
     tooltip: {show: false},
     xAxis: {type: 'category', data: o.cols, splitArea: {show: false}, position: 'top',
