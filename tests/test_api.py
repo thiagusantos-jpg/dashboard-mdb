@@ -8,6 +8,7 @@ any other plain function) against a temp sqlite db.
 """
 from __future__ import annotations
 import pytest
+from fastapi.testclient import TestClient
 from backend import api, database as db, sync
 
 COMPANY = 218
@@ -122,3 +123,20 @@ def test_alerts_flag_items_sold_with_unknown_cost(isolated_db):
                [raw_analysis(1, '2026-01-05', revenue=100.0, cost=None)])
     d = api.dashboard(COMPANY, '2026-01')
     assert any(a['type'] == 'custo' for a in d['alerts'])
+
+
+def test_responses_are_gzip_compressed_when_the_client_accepts_it():
+    """The /dashboard payload is ~420 KB of JSON; it used to go out uncompressed.
+    Checked on a static asset so the test needs no session (no lifespan is started)."""
+    client = TestClient(api.app)
+    r = client.get('/assets/app.js', headers={'Accept-Encoding': 'gzip'})
+    assert r.status_code == 200
+    assert r.headers.get('content-encoding') == 'gzip'
+
+
+def test_page_and_assets_are_always_revalidated_by_the_browser():
+    """Regression: style.css was heuristically cached, so a UI update did not show up
+    until a forced reload. no-cache keeps it cached but revalidated (304 when unchanged)."""
+    client = TestClient(api.app)
+    for path in ('/', '/assets/style.css', '/assets/app.js'):
+        assert client.get(path).headers.get('cache-control') == 'no-cache', path

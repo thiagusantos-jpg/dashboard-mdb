@@ -130,8 +130,9 @@ function comboChart(o) {
         const yv = Y(v);
         const top = Math.min(yv, base), h = Math.max(1, Math.abs(base - yv));
         const fill = s.colors ? s.colors[i] : s.color;
+        const stroke = s.strokes ? s.strokes[i] : s.stroke;  // per-point, like colors
         const tip = `${o.tipLabels ? o.tipLabels[i] : labels[i]}\n${s.name}: ${fmt(v)}${s.tips && s.tips[i] ? '\n' + s.tips[i] : ''}`;
-        body += `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${fill}" fill-opacity="${s.opacity == null ? 1 : s.opacity}"${s.stroke ? ` stroke="${s.stroke}" stroke-width="1.5"` : ''} class="chart-mark" data-tip="${esc(tip)}"/>`;
+        body += `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${fill}" fill-opacity="${s.opacity == null ? 1 : s.opacity}"${stroke ? ` stroke="${stroke}" stroke-width="1.5"` : ''} class="chart-mark" data-tip="${esc(tip)}"/>`;
         if (s.labels) {
           const ly = v >= 0 ? top - 5 : top + h + 11;
           body += `<text x="${(x + w / 2).toFixed(1)}" y="${ly.toFixed(1)}" class="chart-value" text-anchor="middle">${esc((s.labelFmt || fmt)(v))}</text>`;
@@ -307,6 +308,7 @@ function gaugeChart(o) {
   });
   if (o.title) g += `<text x="${cx}" y="18" class="chart-gauge-title" text-anchor="middle">${esc(o.title)}</text>`;
   g += `<text x="${cx}" y="${cy - 6}" class="chart-gauge-value" text-anchor="middle">${esc(o.fmt(o.value))}</text>`;
-  if (o.delta) g += `<text x="${cx}" y="${cy + 22}" class="chart-gauge-delta" text-anchor="middle" fill="${o.delta.value >= 0 ? '#27AE60' : '#E74C3C'}">${esc(o.delta.text)}</text>`;
+  // Text on white: the darker positive/negative tokens (4.7:1 / 5.4:1), not the chart greens/reds.
+  if (o.delta) g += `<text x="${cx}" y="${cy + 22}" class="chart-gauge-delta" text-anchor="middle" fill="${o.delta.value >= 0 ? '#1E8449' : '#C0392B'}">${esc(o.delta.text)}</text>`;
   return `<div class="chart-wrap chart-gauge">${svgOpen(W, H)}${g}</svg></div>`;
 }

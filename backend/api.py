@@ -7,6 +7,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from . import database as db, models, security, settings
 from .sync import Worker
@@ -26,6 +27,8 @@ async def lifespan(app):
 
 app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver'])
+# /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
+app.add_middleware(GZipMiddleware,minimum_size=1024)
 
 @app.middleware('http')
 async def secure_headers(request,call_next):
@@ -36,6 +39,10 @@ async def secure_headers(request,call_next):
     response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     if request.url.path.startswith('/api/'):
         response.headers['Cache-Control']='no-store'
+    else:
+        # Page and assets: always revalidate (a cheap 304 when unchanged). Without this, browsers
+        # heuristically cached style.css and kept serving the old layout after an update.
+        response.headers['Cache-Control']='no-cache'
     return response
 
 class Login(BaseModel):

@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gestão | Mercado duBairro</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏪</text></svg>">
-    <link rel="stylesheet" href="assets/style.css">
+    <!-- ?v= busts copies browsers cached before the server sent Cache-Control: no-cache (backend/api.py). -->
+    <link rel="stylesheet" href="assets/style.css?v=20260911-ux1">
 </head>
 <body>
 
@@ -30,30 +31,35 @@
 <!-- App -->
 <div id="app" class="hidden">
 
-    <nav class="sidebar">
-        <img src="assets/logo.png" alt="Mercado duBairro" class="sidebar-logo" data-fallback>
-        <div class="sidebar-title">Painel dos Sócios</div>
+    <!-- Off-canvas drawer below 900px (body.nav-open); fixed column above. -->
+    <nav class="sidebar" id="sidebar" aria-label="Menu principal">
+        <div class="brand">
+            <img src="assets/logo.png" alt="" class="brand-logo" width="44" height="44" data-fallback>
+            <div class="brand-text">
+                <div class="brand-name">Mercado duBairro</div>
+                <div class="brand-sub">Painel dos Sócios</div>
+            </div>
+            <button type="button" class="sidebar-close" data-nav-close aria-label="Fechar menu">✕</button>
+        </div>
         <hr>
 
-        <button class="nav-item active" data-page="resumo" data-nav="resumo">📊 Resumo Executivo</button>
-        <button class="nav-item" data-page="precos" data-nav="precos">💰 Inteligência de Preços</button>
-        <button class="nav-item" data-page="mapa" data-nav="mapa">🗺️ Mapa de Produtos</button>
-        <button class="nav-item" data-page="diagnostico" data-nav="diagnostico">🔍 Diagnóstico de Faturamento</button>
-        <button class="nav-item" data-page="sazonalidade" data-nav="sazonalidade">📈 Sazonalidade e Tendências</button>
-        <button class="nav-item" data-page="visao" data-nav="visao">🔮 Visão Futurista</button>
-        <button class="nav-item" data-page="estoque" data-nav="estoque">📦 Produtos &amp; Estoque</button>
-        <button class="nav-item" data-page="sync" data-nav="sync">🔗 Sincronização Mobne</button>
+        <!-- Real links: the route (#/página/período) lives in the URL, so reload, Voltar and favoritos work. -->
+        <a class="nav-item" href="#/resumo" data-page="resumo">📊 Resumo Executivo</a>
+        <a class="nav-item" href="#/precos" data-page="precos">💰 Inteligência de Preços</a>
+        <a class="nav-item" href="#/mapa" data-page="mapa">🗺️ Mapa de Produtos</a>
+        <a class="nav-item" href="#/diagnostico" data-page="diagnostico">🔍 Diagnóstico de Faturamento</a>
+        <a class="nav-item" href="#/sazonalidade" data-page="sazonalidade">📈 Sazonalidade e Tendências</a>
+        <a class="nav-item" href="#/visao" data-page="visao">🔮 Visão Futurista</a>
+        <a class="nav-item" href="#/estoque" data-page="estoque">📦 Produtos &amp; Estoque</a>
+        <a class="nav-item" href="#/sync" data-page="sync">🔗 Sincronização Mobne</a>
 
         <hr>
         <div class="sidebar-section-title">🎛️ Simulador</div>
         <label class="sim-label" for="custo-fixo-input">Custo Fixo Mensal (R$)</label>
-        <input type="number" id="custo-fixo-input" class="sim-input" step="100">
-
-        <hr>
-        <div class="sidebar-section-title">📅 Período</div>
-        <div id="year-tabs" class="period-tabs"></div>
-        <div id="month-buttons" class="month-grid"></div>
-        <div id="period-status" class="period-status"></div>
+        <input type="number" id="custo-fixo-input" class="sim-input" step="100" min="0" inputmode="decimal"
+               aria-describedby="custo-fixo-help custo-fixo-status">
+        <div id="custo-fixo-help" class="sim-help">Usado no Resultado simulado e no Ponto de equilíbrio.</div>
+        <div id="custo-fixo-status" class="sim-status" role="status" aria-live="polite"></div>
 
         <div class="sidebar-footer">
             <span id="sidebar-user"></span><br>
@@ -61,12 +67,29 @@
             <div class="mt-8">Mercado duBairro &copy; 2026</div>
         </div>
     </nav>
+    <div class="nav-backdrop" data-nav-close hidden></div>
 
-    <main class="main-content" id="content"></main>
+    <div class="main-col">
+        <header class="topbar">
+            <button type="button" class="topbar-menu" data-nav-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Abrir menu">☰</button>
+            <div class="period-control">
+                <button type="button" class="period-step" data-period-step="-1" aria-label="Mês anterior">‹</button>
+                <button type="button" class="period-current" id="period-current" data-period-toggle
+                        aria-haspopup="dialog" aria-expanded="false" aria-controls="period-popover">Período</button>
+                <button type="button" class="period-step" data-period-step="1" aria-label="Próximo mês">›</button>
+                <div id="period-popover" class="period-popover" role="dialog" aria-label="Escolher período" hidden>
+                    <div id="year-tabs" class="period-tabs"></div>
+                    <div id="month-buttons" class="month-grid"></div>
+                </div>
+            </div>
+            <div id="period-status" class="period-status" aria-live="polite"></div>
+        </header>
+        <main class="main-content" id="content"></main>
+    </div>
 </div>
 
-<script src="assets/charts.js"></script>
-<script src="assets/insights.js"></script>
-<script src="assets/app.js"></script>
+<script src="assets/charts.js?v=20260911-ux1"></script>
+<script src="assets/insights.js?v=20260911-ux1"></script>
+<script src="assets/app.js?v=20260911-ux1"></script>
 </body>
 </html>

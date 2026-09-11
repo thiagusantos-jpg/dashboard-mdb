@@ -9,7 +9,9 @@ const MESES_NOMES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
   'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 const DIAS_SEMANA = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
 const DIAS_CURTOS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
-const COR = {yellow: '#FFC107', green: '#27AE60', greenDark: '#1E8449', red: '#E74C3C',
+// Brand yellow is 1.6:1 on white — fine as a fill, invisible as a line or a bar edge.
+// amber (3.6:1) is used for yellow lines and as the outline of yellow bars (WCAG 1.4.11).
+const COR = {yellow: '#FFC107', amber: '#B7791F', green: '#27AE60', greenDark: '#1E8449', red: '#E74C3C',
   blue: '#2E86C1', orange: '#F39C12', gray: '#AAAAAA', lightGray: '#BDBDBD'};
 const EROSAO_LIMIAR = 3;       // pontos de margem, mesmo corte da versão anterior
 const META_MARGEM_REAL = 15;   // % após custo fixo
@@ -369,7 +371,8 @@ function renderDiagnostico(data) {
   const dowChart = comboChart({
     width: chartWidth(1), height: 290, legend: false, labels: byDow.map((d) => d.nome),
     series: [{name: 'Faturamento médio', type: 'bar', values: byDow.map((d) => d.media), fmt: money, labels: true, labelFmt: brl,
-      colors: byDow.map((d) => d.nome === 'Domingo' ? COR.red : COR.yellow), tips: byDow.map((d) => `${d.dias} dia(s) com venda`)}],
+      colors: byDow.map((d) => d.nome === 'Domingo' ? COR.red : COR.yellow),
+      strokes: byDow.map((d) => d.nome === 'Domingo' ? null : COR.amber), tips: byDow.map((d) => `${d.dias} dia(s) com venda`)}],
     yFmt: brlShort, yTitle: 'Fat. médio (R$)',
   });
 
@@ -453,7 +456,7 @@ function renderSazonalidade(data) {
     width: w60, height: 400, labels: MONTHS, tipLabels: MESES_NOMES,
     series: [
       {name: `${R}`, type: 'line', values: S.ref.map((t) => (t ? t.revenue : null)), color: COR.gray, fmt: money, labels: true, labelFmt: brlShort},
-      {name: `${P.y} (real)`, type: 'line', values: S.cur.map((t) => (t && !t.partial ? t.revenue : null)), color: COR.yellow,
+      {name: `${P.y} (real)`, type: 'line', values: S.cur.map((t) => (t && !t.partial ? t.revenue : null)), color: COR.amber,
         marker: 'diamond', markerSize: 7, width: 3, fmt: money, labels: true, labelPos: 'bottom', labelFmt: brlShort},
       partialIdx >= 0 ? {name: `${MONTHS[partialIdx]}/${P.yy} (parcial)`, type: 'line', values: S.cur.map((t) => (t && t.partial ? t.revenue : null)),
         color: COR.orange, marker: 'diamond', markerSize: 7, fmt: money, tips: S.cur.map((t) => (t && t.partial ? `Dados até ${t.end.slice(8)}/${t.end.slice(5, 7)}` : ''))} : null,
@@ -558,8 +561,8 @@ function renderVisao(data) {
   const projChart = comboChart({
     width: chartWidth(1), height: 400, barMode: 'overlay', labels: MONTHS, tipLabels: MESES_NOMES,
     series: [
-      {name: `${P.y} (real)`, type: 'bar', values: closedReal, color: COR.yellow, fmt: money, labels: true, labelFmt: brlShort},
-      {name: `${P.y} (projeção)`, type: 'bar', values: projVals, color: COR.yellow, opacity: 0.35, stroke: COR.yellow, fmt: money, labels: true, labelFmt: brlShort},
+      {name: `${P.y} (real)`, type: 'bar', values: closedReal, color: COR.yellow, stroke: COR.amber, fmt: money, labels: true, labelFmt: brlShort},
+      {name: `${P.y} (projeção)`, type: 'bar', values: projVals, color: COR.yellow, opacity: 0.35, stroke: COR.amber, fmt: money, labels: true, labelFmt: brlShort},
       partialVals.some((v) => v != null) ? {name: `${P.y} (em andamento)`, type: 'bar', values: partialVals, color: COR.orange, opacity: 0.85, fmt: money} : null,
       {name: `${S.R} (referência)`, type: 'line', values: S.ref.map((c) => (c ? c.revenue : null)), color: '#BBBBBB', dash: '4 4', width: 2, fmt: money},
     ],
