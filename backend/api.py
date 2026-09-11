@@ -10,6 +10,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from . import database as db, models, security, settings
+from . import sync
 from .sync import Worker
 
 @asynccontextmanager
@@ -17,7 +18,9 @@ async def lifespan(app):
     db.initialize()
     security.access_password()
     worker=None
-    if os.getenv('MDB_DISABLE_WORKER')!='1':
+    # Serverless: no long-lived process to own a background thread, and each
+    # invocation may be a fresh container — sync runs via /api/cron/sync instead.
+    if not settings.IS_SERVERLESS and os.getenv('MDB_DISABLE_WORKER')!='1':
         # The launcher owns an exclusive process lock; restart incomplete work safely.
         with db.connection() as conn:
             conn.execute("UPDATE jobs SET state='failed',error='Execução interrompida pelo reinício; sincronize novamente.',updated_at=? WHERE state='running'",(db.now(),))
@@ -26,7 +29,7 @@ async def lifespan(app):
     if worker: worker.stop.set()
 
 app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
-app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver'])
+app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver','*.vercel.app'])
 # /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
 app.add_middleware(GZipMiddleware,minimum_size=1024)
 
@@ -103,9 +106,27 @@ class SyncRequest(BaseModel):
     mode:str=Field(pattern='^(recent|history|reconcile)$')
 
 @app.post('/api/companies/{company}/sync',dependencies=[Depends(security.authenticate)],status_code=202)
-def sync(company:int,body:SyncRequest):
+def trigger_sync(company:int,body:SyncRequest):
     authorized_company(company)
-    return {'job_id':db.create_job(company,body.mode)}
+    job_id=db.create_job(company,body.mode)
+    if settings.IS_SERVERLESS:
+        # No background Worker is running here to pick the job off the queue.
+        sync.run(company,body.mode,job_id=job_id)
+    return {'job_id':job_id}
+
+@app.get('/api/cron/sync')
+def cron_sync(request:Request):
+    # Vercel Cron issues a GET request on schedule, with Authorization: Bearer <CRON_SECRET>.
+    # See https://vercel.com/docs/cron-jobs/manage-cron-jobs#securing-cron-jobs.
+    secret=os.environ.get('CRON_SECRET')
+    if not secret or request.headers.get('authorization')!=f'Bearer {secret}':
+        raise HTTPException(401,'Não autorizado.')
+    results=[]
+    for c in db.companies():
+        job_id=db.create_job(c['id'],'recent')
+        sync.run(c['id'],'recent',job_id=job_id)
+        results.append(c['id'])
+    return {'synced':results}
 
 class Config(BaseModel):
     fixed_cost_cents:int=Field(ge=0,le=1000000000)

@@ -13,6 +13,14 @@ _lock=threading.Lock()
 _attempts={}
 
 def access_password():
+    if settings.IS_SERVERLESS:
+        # No local filesystem to persist an auto-generated password to, and no
+        # per-instance state anyway (each invocation may be a fresh container) —
+        # so the deploy must supply this explicitly rather than us inventing one.
+        pw=os.environ.get('MDB_ACCESS_PASSWORD')
+        if not pw:
+            raise HTTPException(500,'MDB_ACCESS_PASSWORD não configurada nesta implantação.')
+        return pw
     path=settings.STATE/'acesso-local.txt'
     if not path.exists():
         try:
