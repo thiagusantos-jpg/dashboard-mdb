@@ -266,6 +266,20 @@ body {
 .kpi-neutral { color: var(--orange) !important; }
 .kpi-unavailable { color: #999 !important; font-style: italic; font-size: 18px !important; }
 
+/* M/M and A/A comparison chips on a kpi-card — see backend/api.py comparison_for() */
+.kpi-deltas { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.delta-chip { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #f0f0f0; color: #888; font-weight: 600; }
+.delta-chip.delta-positive { background: #D5F5E3; color: var(--green-dark); }
+.delta-chip.delta-negative { background: #FADBD8; color: #943126; }
+
+/* Actionable per-product warnings on Resumo Executivo — see backend/api.py dashboard() alerts */
+.alert-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.alert-card { padding: 10px 14px; border-radius: 8px; border-left: 4px solid var(--orange); background: #FDF2E3; color: #7E5109; font-size: 13px; }
+.alert-card.severity-high { border-left-color: var(--red); background: #FDEDEC; color: #922B21; }
+
+.btn-link { background: none; border: none; padding: 0; margin-top: 6px; display: block; color: var(--blue); font-weight: 600; font-size: 13px; cursor: pointer; text-decoration: underline; }
+.btn-link:hover { color: var(--dark); }
+
 /* ============================================================
    SECTION HEADERS / LAYOUT
    ============================================================ */

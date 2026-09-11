@@ -385,32 +385,87 @@ function dataQualityBanner(t) {
     superestimados e não devem ser comparados com meses de custo completo.</div>`;
 }
 
+/* ---------------------------------------------------------------- Resumo Executivo helpers */
+
+// value is a % change (e.g. mom.revenue_change); positiveIsGood=false flips the color (cancel rate, etc.)
+function deltaChip(label, value, positiveIsGood) {
+  if (positiveIsGood == null) positiveIsGood = true;
+  if (value == null) return `<span class="delta-chip">${label}: —</span>`;
+  const good = positiveIsGood ? value >= 0 : value <= 0;
+  const cls = Math.abs(value) < 0.05 ? '' : (good ? 'delta-positive' : 'delta-negative');
+  return `<span class="delta-chip ${cls}">${label}: ${value > 0 ? '+' : ''}${pct(value)}</span>`;
+}
+
+function kpiCard(title, value, valueCls, deltasHtml, subtitle) {
+  return `<div class="kpi-card">
+    <div class="kpi-title">${title}</div>
+    <div class="kpi-value ${valueCls || ''}">${value}</div>
+    ${subtitle ? `<div class="kpi-subtitle">${subtitle}</div>` : ''}
+    ${deltasHtml ? `<div class="kpi-deltas">${deltasHtml}</div>` : ''}
+  </div>`;
+}
+
+function alertsBlock(alerts) {
+  if (!alerts || !alerts.length) return '';
+  return `<div class="alert-list">${alerts.map((a) =>
+    `<div class="alert-card severity-${esc(a.severity)}">⚠️ ${esc(a.message)}</div>`).join('')}</div>`;
+}
+
+// "The month in one sentence" — revenue vs. last month and vs. the same month last year
+// (each silently omitted when there is no reliable base to compare against, see backend/api.py
+// comparison_for()), plus margin and how far revenue landed from the break-even point.
+function resumoNarrative(data) {
+  const t = data.totals, cmp = data.comparison, mom = data.comparison_mom;
+  const [y, m] = data.period.split('-');
+  const bits = [`${MONTHS[parseInt(m, 10) - 1]}/${y} faturou ${money(t.revenue)}`];
+  if (mom && mom.revenue_change != null) bits.push(`${mom.revenue_change >= 0 ? '+' : ''}${pct(mom.revenue_change)} sobre o mês anterior`);
+  if (cmp && cmp.revenue_change != null) bits.push(`${cmp.revenue_change >= 0 ? '+' : ''}${pct(cmp.revenue_change)} sobre ${esc(cmp.period.slice(0, 4))}`);
+  let text = bits.join(', ') + '.';
+  if (t.margin == null) {
+    return text + ' Margem indisponível: há itens vendidos sem custo conhecido no período.';
+  }
+  text += ` Margem de ${pct(t.margin)}`;
+  if (data.break_even_cents == null) return text + '.';
+  return text + (data.break_even_gap_pct >= 0
+    ? `, e o ponto de equilíbrio (${money(data.break_even_cents)}) foi superado com folga de ${pct(data.break_even_gap_pct)}.`
+    : `, e a receita ficou ${pct(Math.abs(data.break_even_gap_pct))} abaixo do ponto de equilíbrio (${money(data.break_even_cents)}).`);
+}
+
 function renderResumo(data) {
-  const t = data.totals;
-  const cmp = data.comparison;
-  const cmpHtml = cmp ? `<div class="kpi-card">
-      <div class="kpi-title">Vs. ${cmp.period.slice(0, 4)} (mesmo período)</div>
-      <div class="kpi-value ${cmp.revenue_change == null ? '' : (cmp.revenue_change >= 0 ? 'kpi-positive' : 'kpi-negative')}">
-        ${cmp.revenue_change == null ? '—' : (cmp.revenue_change >= 0 ? '+' : '') + pct(cmp.revenue_change)}
-      </div>
-      <div class="kpi-subtitle">Receita: ${money(cmp.totals.revenue)}</div>
-    </div>` : `<div class="kpi-card"><div class="kpi-title">Produtos vendidos</div><div class="kpi-value">${num(t.products)}</div></div>`;
+  const t = data.totals, cmp = data.comparison, mom = data.comparison_mom;
+  const deltas = (change) => [deltaChip('M/M', mom && mom[change]), deltaChip('A/A', cmp && cmp[change])].join('');
+  const cancelBase = t.receipts + t.cancelled;
+  const cancelRate = cancelBase ? (t.cancelled / cancelBase) * 100 : null;
 
   const dailyPoints = (data.daily || []).map((d) => ({label: d.date, value: d.revenue / 100, display: money(d.revenue)}));
   const timelinePoints = (data.timeline || []).map((tl) => ({label: tl.period, value: tl.revenue / 100, display: money(tl.revenue)}));
+  const topProfit = (data.products || []).filter((p) => p.profit != null).slice().sort((a, b) => b.profit - a.profit).slice(0, 10);
+  const topProfitSum = topProfit.reduce((s, p) => s + p.profit, 0);
+  const topPoints = topProfit.slice().reverse()
+    .map((p) => ({label: p.name.length > 16 ? p.name.slice(0, 16) + '…' : p.name, value: p.profit / 100, display: money(p.profit)}));
 
   document.getElementById('content').innerHTML = `
     ${headerBlock(data)}
+    ${alertsBlock(data.alerts)}
+    <div class="story-box">💡 ${esc(resumoNarrative(data))}</div>
+
     <div class="kpi-grid kpi-grid-4">
-      <div class="kpi-card"><div class="kpi-title">Receita Líquida</div><div class="kpi-value">${money(t.revenue)}</div>
-        <div class="kpi-subtitle">${num(t.receipts)} documentos · ${num(t.cancelled)} cancelados</div></div>
-      <div class="kpi-card"><div class="kpi-title">Lucro Bruto</div>
-        <div class="kpi-value ${t.profit == null ? 'kpi-unavailable' : (t.profit >= 0 ? 'kpi-positive' : 'kpi-negative')}">${money(t.profit)}</div>
-        <div class="kpi-subtitle">${t.unknown > 0 ? num(t.unknown) + ' itens sem custo — não estimados' : 'Todos os itens com custo'}</div></div>
-      <div class="kpi-card"><div class="kpi-title">Margem</div>
-        <div class="kpi-value ${t.margin == null ? 'kpi-unavailable' : ''}">${pct(t.margin)}</div>
-        <div class="kpi-subtitle">Ticket médio: ${money(t.ticket)}</div></div>
-      ${cmpHtml}
+      ${kpiCard('Faturamento', money(t.revenue), '', deltas('revenue_change'), `${num(t.receipts)} documentos · ${num(t.cancelled)} cancelados`)}
+      ${kpiCard('Lucro Bruto', money(t.profit), t.profit == null ? 'kpi-unavailable' : (t.profit >= 0 ? 'kpi-positive' : 'kpi-negative'),
+        deltas('profit_change'), t.unknown > 0 ? num(t.unknown) + ' itens sem custo — não estimados' : 'Todos os itens com custo')}
+      ${kpiCard('Margem', pct(t.margin), t.margin == null ? 'kpi-unavailable' : '', '', `Ticket médio: ${money(t.ticket)}`)}
+      ${kpiCard('Ticket médio', money(t.ticket), '', deltas('ticket_change'), '')}
+      ${kpiCard('Nº de cupons', num(t.receipts), '', deltas('receipts_change'), '')}
+      ${kpiCard('Taxa de cancelamento', pct(cancelRate), '', '', `${num(t.cancelled)} de ${num(cancelBase)} documentos`)}
+      ${kpiCard('Resultado simulado', money(data.simulated_net), data.simulated_net == null ? 'kpi-unavailable' : (data.simulated_net >= 0 ? 'kpi-positive' : 'kpi-negative'),
+        '', `Custo fixo cadastrado: ${money(data.fixed_cost_cents)}`)}
+      ${kpiCard('Ponto de equilíbrio', money(data.break_even_cents), data.break_even_cents == null ? 'kpi-unavailable' : '',
+        '', data.break_even_gap_pct == null ? '' : `Folga: ${data.break_even_gap_pct >= 0 ? '+' : ''}${pct(data.break_even_gap_pct)}`)}
+    </div>
+    <div class="story-box">
+      Resultado simulado = receita − custo dos itens conhecidos − custo fixo cadastrado. Não é o lucro líquido contábil
+      (despesas reais não confirmadas com o Mobne). Ponto de equilíbrio = custo fixo ÷ margem do período; ambos ficam
+      indisponíveis quando há itens sem custo conhecido, em vez de usar uma margem parcial como se fosse a real.
     </div>
 
     <div class="row">
@@ -427,26 +482,14 @@ function renderResumo(data) {
       </div>
     </div>
 
-    <div class="section-header">Produtos (curva ABC do período)</div>
-    <div class="data-table-container">
-      <table class="data-table"><thead><tr><th>Produto</th><th>Categoria</th><th>ABC</th><th>Classificação</th><th>Receita</th><th>Margem</th><th>Giro</th></tr></thead>
-      <tbody>${(data.products || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td>${p.abc}</td>
-        <td>${esc(p.classification)}</td><td>${money(p.revenue)}</td><td>${pct(p.margin)}</td><td>${pct(p.turnover * 100)}</td></tr>`).join('')}</tbody></table>
-    </div>
+    <div class="section-header">Top 10 produtos por lucro</div>
+    <div class="chart-container chart-box">${svgBarChart(topPoints)}</div>
+    ${topProfit.length ? `<div class="story-box">💡 Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
+      ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.
+      <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de Produtos →</button></div>` : ''}
 
     <div class="section-header">Histórico mensal</div>
     <div class="chart-container chart-box">${svgBarChart(timelinePoints)}</div>
-
-    <div class="section-header">Resultado líquido simulado</div>
-    <div class="story-box">
-      Simulação: receita − custo dos itens conhecidos − custo fixo cadastrado. Não é o lucro líquido contábil
-      (despesas reais não confirmadas com o Mobne) e não deve ser tratado como resultado realizado.
-    </div>
-    <div class="kpi-grid kpi-grid-2">
-      <div class="kpi-card"><div class="kpi-title">Custo fixo mensal cadastrado</div><div class="kpi-value">${money(data.fixed_cost_cents)}</div></div>
-      <div class="kpi-card"><div class="kpi-title">Resultado simulado</div>
-        <div class="kpi-value ${data.simulated_net == null ? 'kpi-unavailable' : (data.simulated_net >= 0 ? 'kpi-positive' : 'kpi-negative')}">${money(data.simulated_net)}</div></div>
-    </div>
   `;
 }
 

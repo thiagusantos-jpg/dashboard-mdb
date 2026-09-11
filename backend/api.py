@@ -72,6 +72,15 @@ def validate_period(period):
     except ValueError:
         raise HTTPException(422,'Período inválido.')
 
+def shift_period(period,delta_months):
+    y,m=map(int,period.split('-'))
+    idx=y*12+(m-1)+delta_months
+    return f'{idx//12:04}-{idx%12+1:02}'
+
+def pct_change(new,old):
+    if new is None or old is None or old==0: return None
+    return round((new/old-1)*100,2)
+
 @app.get('/api/companies/{company}/status',dependencies=[Depends(security.authenticate)])
 def status(company:int):
     authorized_company(company)
@@ -115,18 +124,22 @@ def dashboard(company:int,period:str):
         products=db.dataset(company,'products',db=conn)
         catalog={r['id']:r for r in products['payload']} if products else {}
         data=models.summarize(sales['payload']['receipts'],catalog,sales['payload']['analysis'])
-        prior_period=f'{int(period[:4])-1:04}'+period[4:]
-        prior=db.dataset(company,'sales',prior_period,conn)
-        if prior and not prior['payload'].get('raw_count'):
-            prior=None  # Mobne has no data for this period (e.g. before onboarding); not a same-store comparison
-        comparison=None
-        if prior:
+        def comparison_for(other_period):
+            other=db.dataset(company,'sales',other_period,conn)
+            if not other or not other['payload'].get('raw_count'):
+                return None  # Mobne has no data for this period (e.g. before onboarding); not a same-store comparison
             # Match elapsed days when the selected period is not a closed month.
             last_day=int(sales['payload']['end'][-2:])
-            docs=[r for r in prior['payload']['receipts'] if int(r['date'][-2:])<=last_day]
+            docs=[r for r in other['payload']['receipts'] if int(r['date'][-2:])<=last_day]
             previous=models.summarize(docs)['totals']
-            comparison={'period':prior_period,'totals':previous,
-                'revenue_change':round((data['totals']['revenue']/previous['revenue']-1)*100,2) if previous['revenue'] else None}
+            t=data['totals']
+            return {'period':other_period,'totals':previous,
+                'revenue_change':pct_change(t['revenue'],previous['revenue']),
+                'profit_change':pct_change(t['profit'],previous['profit']),
+                'ticket_change':pct_change(t['ticket'],previous['ticket']),
+                'receipts_change':pct_change(t['receipts'],previous['receipts'])}
+        comparison=comparison_for(f'{int(period[:4])-1:04}'+period[4:])  # vs. same month, prior year
+        comparison_mom=comparison_for(shift_period(period,-1))          # vs. previous calendar month
         fixed=conn.execute('SELECT fixed_cost_cents FROM config WHERE company=?',(company,)).fetchone()
         fixed=fixed['fixed_cost_cents'] if fixed else 1691346
         timeline=[]
@@ -150,12 +163,33 @@ def dashboard(company:int,period:str):
                 'current_cost':models.cents(s['unit_cost']) if s and s['unit_cost'] is not None else None,
                 'last_cost':models.cents(s['last_cost']) if s and s['last_cost'] is not None else None})
     today=datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat()
+    margin=data['totals']['margin']
+    # None when the period has any unknown-cost item, same as simulated_net below — a break-even
+    # point built on a partially-unknown margin would be worse than none at all.
+    break_even_cents=round(fixed/(margin/100)) if margin else None
+    alerts=[]
+    low_stock=[p for p in inventory if p['abc']=='A' and (p['stock'] is None or p['stock']<=0)]
+    if low_stock:
+        names=', '.join(p['name'] for p in low_stock[:5])+('…' if len(low_stock)>5 else '')
+        alerts.append({'severity':'high','type':'estoque',
+            'message':f'{len(low_stock)} produto(s) da curva A com estoque zerado ou negativo no Mobne: {names}.'})
+    underpriced=[p for p in inventory if p['current_price'] is not None and p['current_cost'] is not None
+                 and p['current_price']<p['current_cost']]
+    if underpriced:
+        names=', '.join(p['name'] for p in underpriced[:5])+('…' if len(underpriced)>5 else '')
+        alerts.append({'severity':'high','type':'preco',
+            'message':f'{len(underpriced)} produto(s) vendendo abaixo do custo atual do Mobne: {names}.'})
+    if data['totals']['unknown']>0:
+        alerts.append({'severity':'medium','type':'custo',
+            'message':f'{data["totals"]["unknown"]} item(ns) vendido(s) sem custo conhecido — lucro do período não pôde ser calculado para eles.'})
     return {**data,'period':period,'start':sales['payload']['start'],'end':sales['payload']['end'],
-        'updated_at':sales['updated_at'],'version':sales['version'],'comparison':comparison,
+        'updated_at':sales['updated_at'],'version':sales['version'],'comparison':comparison,'comparison_mom':comparison_mom,
         'reconciliation':sales['payload']['reconciliation'],'raw_count':sales['payload']['raw_count'],
         'inventory':inventory,'stock_updated_at':stock['updated_at'] if stock else None,
         'prices_updated_at':prices['updated_at'] if prices else None,'timeline':timeline,
         'fixed_cost_cents':fixed,'simulated_net':data['totals']['profit']-fixed if data['totals']['profit'] is not None else None,
+        'break_even_cents':break_even_cents,'break_even_gap_pct':pct_change(data['totals']['revenue'],break_even_cents),
+        'alerts':alerts,
         'partial_month':sales['payload']['end']<__import__('backend.sync',fromlist=['month_end']).month_end(period).isoformat(),
         'as_of':today,'scope':'Vendas PDV válidas; referências fiscais e não fiscais deduplicadas.'}
 
