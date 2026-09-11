@@ -661,7 +661,7 @@ function renderResumo(data) {
 const ESTOQUE_FILTERS = [
   {key: '', label: 'Todos', test: () => true},
   {key: 'curva-a', label: 'Curva A', test: (p) => p.abc === 'A'},
-  {key: 'ruptura', label: 'Curva A sem estoque', test: (p) => p.abc === 'A' && (p.stock == null || p.stock <= 0)},
+  {key: 'ruptura', label: 'Curva A sem estoque', test: (p) => p.abc === 'A' && p.stock != null && p.stock <= 0},
   {key: 'estoque-zerado', label: 'Estoque ≤ 0', test: (p) => p.stock != null && p.stock <= 0},
   {key: 'abaixo-custo', label: 'Preço abaixo do custo',
     test: (p) => p.current_price != null && p.current_cost != null && p.current_price < p.current_cost},

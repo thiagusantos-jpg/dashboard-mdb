@@ -53,3 +53,11 @@ test('long-running sync is not mislabeled as an unauthorized company', async () 
   assert.match(x.elements['bootstrap-status'].textContent, /em andamento/);
   assert.equal(x.elements['bootstrap-submit'].disabled, false);
 });
+
+
+test('missing stock is not treated as known stock depletion', () => {
+  const x = setup([]);
+  const matches = vm.runInContext("ESTOQUE_FILTERS.find(f => f.key === 'ruptura').test", x.context);
+  assert.equal(matches({abc: 'A', stock: null}), false);
+  assert.equal(matches({abc: 'A', stock: 0}), true);
+});

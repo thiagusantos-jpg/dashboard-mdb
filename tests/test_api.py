@@ -140,3 +140,13 @@ def test_page_and_assets_are_always_revalidated_by_the_browser():
     client = TestClient(api.app)
     for path in ('/', '/assets/style.css', '/assets/app.js'):
         assert client.get(path).headers.get('cache-control') == 'no-cache', path
+
+
+def test_unsynced_stock_is_not_reported_as_zero_stock(isolated_db):
+    sync_month('2026-01', [raw_receipt(1, '2026-01-05')], [raw_analysis(1, '2026-01-05')])
+    with db.connection() as conn:
+        conn.execute("DELETE FROM datasets WHERE company=? AND resource='stock'", (COMPANY,))
+    d = api.dashboard(COMPANY, '2026-01')
+    assert d['inventory'][0]['stock'] is None
+    assert not any(a['type'] == 'estoque' for a in d['alerts'])
+    assert any(a['type'] == 'integracao' for a in d['alerts'])

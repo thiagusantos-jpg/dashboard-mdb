@@ -209,7 +209,10 @@ def dashboard(company:int,period:str):
     # point built on a partially-unknown margin would be worse than none at all.
     break_even_cents=round(fixed/(margin/100)) if margin else None
     alerts=[]
-    low_stock=[p for p in inventory if p['abc']=='A' and (p['stock'] is None or p['stock']<=0)]
+    low_stock=[p for p in inventory if p['abc']=='A' and p['stock'] is not None and p['stock']<=0]
+    if stock is None:
+        alerts.append({'severity':'medium','type':'integracao',
+            'message':'Estoque ainda não sincronizado. Consulte a integração Mobne para concluir a carga.'})
     if low_stock:
         names=', '.join(p['name'] for p in low_stock[:5])+('…' if len(low_stock)>5 else '')
         alerts.append({'severity':'high','type':'estoque',
