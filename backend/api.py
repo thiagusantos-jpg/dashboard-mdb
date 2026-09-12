@@ -10,8 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
-from . import database as db, models, security, settings
+from . import database as db, models, permissions, security, settings
 from . import sync
+from .routes.users import router as users_router
 from .sync import Worker
 
 @asynccontextmanager
@@ -30,6 +31,7 @@ async def lifespan(app):
     if worker: worker.stop.set()
 
 app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
+app.include_router(users_router)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver','*.vercel.app'])
 # /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
 app.add_middleware(GZipMiddleware,minimum_size=1024)
@@ -62,7 +64,7 @@ def login(body: Login,request:Request,response:Response):
 @app.get('/api/session')
 def session(request:Request,auth=Depends(security.authenticate)):
     raw=request.cookies.get(security.COOKIE,'')
-    return {'csrf':security.csrf(raw),'companies':db.companies(),'user':auth.email}
+    return {'csrf':security.csrf(raw),'companies':permissions.companies_for(auth),'user':auth.email}
 
 @app.post('/api/logout')
 def logout(response:Response,auth=Depends(security.authenticate)):
@@ -94,7 +96,7 @@ def pct_change(new,old):
     if new is None or old is None or old==0: return None
     return round((new/old-1)*100,2)
 
-@app.get('/api/companies/{company}/status',dependencies=[Depends(security.authenticate)])
+@app.get('/api/companies/{company}/status',dependencies=[Depends(permissions.require_permission('dashboard.read'))])
 def status(company:int):
     authorized_company(company)
     periods=db.periods(company)
@@ -108,7 +110,7 @@ def status(company:int):
 class SyncRequest(BaseModel):
     mode:str=Field(pattern='^(recent|history|reconcile)$')
 
-@app.post('/api/companies/{company}/sync',dependencies=[Depends(security.authenticate)],status_code=202)
+@app.post('/api/companies/{company}/sync',dependencies=[Depends(permissions.require_permission('integrations.manage'))],status_code=202)
 def trigger_sync(company:int,body:SyncRequest):
     # No authorized_company() pre-check here on purpose: the very first sync for a company
     # runs against an empty companies table (nothing to check membership against yet) — sync.run()
@@ -121,13 +123,14 @@ def trigger_sync(company:int,body:SyncRequest):
         sync.run(company,body.mode,job_id=job_id)
     return {'job_id':job_id}
 
-@app.get('/api/sync-jobs/{job_id}',dependencies=[Depends(security.authenticate)])
-def sync_job(job_id:int):
+@app.get('/api/sync-jobs/{job_id}')
+def sync_job(job_id:int,auth=Depends(security.authenticate)):
     # The administrator must be able to follow bootstrap before companies exist.
     with db.connection() as conn:
         job=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
     if job is None:
         raise HTTPException(404,'Sincronização não encontrada.')
+    permissions.ensure_permission(auth,'integrations.manage',job['company'])
     return dict(job)
 
 @app.get('/api/cron/sync')
@@ -147,14 +150,14 @@ def cron_sync(request:Request):
 class Config(BaseModel):
     fixed_cost_cents:int=Field(ge=0,le=1000000000)
 
-@app.put('/api/companies/{company}/config',dependencies=[Depends(security.authenticate)])
+@app.put('/api/companies/{company}/config',dependencies=[Depends(permissions.require_permission('settings.manage'))])
 def config(company:int,body:Config):
     authorized_company(company)
     with db.connection() as conn:
         conn.execute('INSERT INTO config VALUES(?,?) ON CONFLICT(company) DO UPDATE SET fixed_cost_cents=excluded.fixed_cost_cents',(company,body.fixed_cost_cents))
     return {'ok':True}
 
-@app.get('/api/companies/{company}/dashboard',dependencies=[Depends(security.authenticate)])
+@app.get('/api/companies/{company}/dashboard',dependencies=[Depends(permissions.require_permission('dashboard.read'))])
 def dashboard(company:int,period:str):
     authorized_company(company); validate_period(period)
     with db.connection() as conn:
