@@ -37,6 +37,7 @@ async function renderSettingsPage() {
     if (section === 'empresa') return await renderCompanySettings();
     if (section === 'usuarios') return await renderUserSettings();
     if (section === 'calendario') return await renderCalendarSettings();
+    if (section === 'integracoes') return await renderIntegrationsSettings();
     return renderPlannedSettings(section);
   } catch (error) {
     document.getElementById('content').innerHTML = settingsShell(
@@ -278,10 +279,88 @@ function renderPlannedSettings(section) {
   const descriptions = {
     metas: 'Metas de faturamento, margem e resultado serão configuradas aqui.',
     alertas: 'Preferências, limites e destinatários dos alertas serão configurados aqui.',
-    integracoes: 'Mobne, Stone/Open Finance e importações manuais serão administradas aqui.',
   };
   document.getElementById('content').innerHTML = settingsShell(
     section,
     `<h2>${esc(SETTINGS_LABELS[section])}</h2><div class="story-box">${esc(descriptions[section])}</div>`
   );
+}
+
+async function renderIntegrationsSettings() {
+  const [connections, cashAccounts] = await Promise.all([
+    api(`/api/companies/${APP.company}/finance/open-finance/connections`),
+    api(`/api/companies/${APP.company}/finance/cash-accounts`),
+  ]);
+  const rows = connections.map((c) => `
+    <tr>
+      <td>${esc(c.provider)}</td>
+      <td>${esc(c.status)}</td>
+      <td>${c.last_balance_cents == null ? '—' : money(c.last_balance_cents)}</td>
+      <td>${c.last_synced_at ? dt(c.last_synced_at) : '—'}</td>
+      <td>${esc(c.last_error || '')}</td>
+      <td>${c.status !== 'revoked' ? `
+        <button type="button" class="btn-secondary" data-of-sync="${esc(c.id)}">Sincronizar</button>
+        <button type="button" class="btn-secondary" data-of-revoke="${esc(c.id)}">Revogar</button>` : ''}</td>
+    </tr>`).join('');
+  const accountOptions = cashAccounts.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
+
+  document.getElementById('content').innerHTML = settingsShell('integracoes', `
+    <div class="settings-heading">
+      <div><h2>Stone Open Finance</h2><p>Conecta uma conta de pagamento Stone para sincronizar saldo e extrato automaticamente.</p></div>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Provedor</th><th>Status</th><th>Último saldo</th><th>Última sincronização</th><th>Erro</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6">Nenhuma conexão configurada.</td></tr>'}</tbody>
+    </table></div>
+    <form id="of-consent-form" class="inline-form">
+      <select id="of-cash-account" class="login-input" required>${accountOptions || '<option value="">Cadastre uma conta de caixa primeiro</option>'}</select>
+      <button type="submit" class="btn-primary">Conectar conta Stone</button>
+      <span id="of-consent-status" class="sim-status" role="status" aria-live="polite"></span>
+    </form>
+    <div id="of-consent-result"></div>`);
+
+  document.getElementById('of-consent-form').addEventListener('submit', onStartStoneConsent);
+  document.querySelectorAll('[data-of-sync]').forEach((btn) => btn.addEventListener('click', onSyncStoneConnection));
+  document.querySelectorAll('[data-of-revoke]').forEach((btn) => btn.addEventListener('click', onRevokeStoneConnection));
+}
+
+async function onStartStoneConsent(event) {
+  event.preventDefault();
+  const status = document.getElementById('of-consent-status');
+  const result = document.getElementById('of-consent-result');
+  status.textContent = 'Gerando link de consentimento…';
+  result.innerHTML = '';
+  try {
+    const started = await api(`/api/companies/${APP.company}/finance/open-finance/consent`, {
+      method: 'POST',
+      body: JSON.stringify({
+        cash_account_id: document.getElementById('of-cash-account').value,
+        return_url: location.origin,
+      }),
+    });
+    status.textContent = '';
+    result.innerHTML = `<div class="story-box">Abra o link para autorizar na Stone: <a href="${esc(started.consent_url)}" target="_blank" rel="noopener">continuar na Stone</a>. Expira em ${dt(started.expires_at)}.</div>`;
+  } catch (e) {
+    status.textContent = 'Erro: ' + e.message;
+  }
+}
+
+async function onSyncStoneConnection(event) {
+  const connectionId = event.currentTarget.dataset.ofSync;
+  try {
+    await api(`/api/companies/${APP.company}/finance/open-finance/connections/${connectionId}/sync`, {method: 'POST'});
+    renderIntegrationsSettings();
+  } catch (e) {
+    alert('Erro ao sincronizar: ' + e.message);
+  }
+}
+
+async function onRevokeStoneConnection(event) {
+  const connectionId = event.currentTarget.dataset.ofRevoke;
+  try {
+    await api(`/api/companies/${APP.company}/finance/open-finance/connections/${connectionId}/revoke`, {method: 'POST'});
+    renderIntegrationsSettings();
+  } catch (e) {
+    alert('Erro ao revogar: ' + e.message);
+  }
 }
