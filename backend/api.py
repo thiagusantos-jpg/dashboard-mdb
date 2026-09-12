@@ -14,6 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from . import database as db, identity, models, permissions, security, settings
 from . import sync
+from .operations.catalog import inventory_catalog
 from .routes.finance_accounts import router as finance_accounts_router
 from .routes.financial_entries import router as financial_entries_router
 from .routes.bank_imports import router as bank_imports_router
@@ -265,15 +266,10 @@ def dashboard(company:int,period:str):
                 'partial':p['end']<__import__('backend.sync',fromlist=['month_end']).month_end(r['period']).isoformat(),**s})
         stock=db.dataset(company,'stock',db=conn)
         prices=db.dataset(company,'prices',db=conn)
-        price_map={r['id']:r for r in (prices['payload'] if prices else []) if r['package']=='1.0' or r['package']=='1'}
-        stock_map={r['id']:r for r in (stock['payload'] if stock else [])}
-        inventory=[]
-        for p in data['products']:
-            s=stock_map.get(p['id']); pr=price_map.get(p['id'])
-            inventory.append({**p,'stock':s['quantity'] if s else None,
-                'current_price':pr['price'] if pr else None,
-                'current_cost':models.cents(s['unit_cost']) if s and s['unit_cost'] is not None else None,
-                'last_cost':models.cents(s['last_cost']) if s and s['last_cost'] is not None else None})
+        # Every active product, sold or not — models.summarize() alone only returns
+        # products that appear in a receipt, hiding unsold stock from every decision
+        # this list feeds (low-stock alerts, replenishment, the Estoque page).
+        inventory=inventory_catalog(company,period,conn)
     today=datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat()
     margin=data['totals']['margin']
     # None when the period has any unknown-cost item, same as simulated_net below — a break-even

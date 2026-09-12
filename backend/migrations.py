@@ -23,6 +23,7 @@ MIGRATIONS: Tuple[Tuple[int, str], ...] = (
     (11, "011_reconciliation.sql"),
     (12, "012_open_finance.sql"),
     (13, "013_receivables.sql"),
+    (14, "014_operation_snapshots.sql"),
 )
 
 
