@@ -265,7 +265,7 @@ function buildPeriodSelector() {
     APP.period = (withData || APP.periods[0]).period;
   }
   current.disabled = false;
-  current.innerHTML = `<span aria-hidden="true">📅</span> ${esc(periodLabel(APP.period))} <span class="caret" aria-hidden="true">▾</span>`;
+  current.innerHTML = `${icon('calendar')} ${esc(periodLabel(APP.period))} <span class="caret" aria-hidden="true">▾</span>`;
   current.setAttribute('aria-label', `Período ${periodLabel(APP.period)} — trocar período`);
   steps.forEach((b) => {
     const target = neighborPeriod(parseInt(b.dataset.periodStep, 10));
@@ -522,7 +522,7 @@ function headerBlock(data) {
   const label = `${MONTHS[parseInt(m, 10) - 1]}/${y}`;
   const partial = data.partial_month ? ` · em andamento (dados até ${data.as_of})` : '';
   return `
-    <div class="page-title">📊 Resumo Executivo</div>
+    <div class="page-title">${icon('bar-chart-3')} Resumo Executivo</div>
     <div class="page-subtitle">Vendas PDV reconciliadas diretamente do Mobne — sem Excel, sem localStorage.</div>
     <span class="periodo-badge">${label}${partial}</span>
     <span class="periodo-badge muted">Atualizado ${dt(data.updated_at)} · v${data.version}</span>
@@ -533,9 +533,9 @@ function headerBlock(data) {
 
 function reconciliationBanner(r) {
   if (r.exact_match) {
-    return `<div class="disclosure-banner">✅ Reconciliado exatamente com a Análise Mobne — ${money(r.receipt_revenue)} conferido, sem divergência.</div>`;
+    return `<div class="disclosure-banner">${icon('circle-check')} Reconciliado exatamente com a Análise Mobne — ${money(r.receipt_revenue)} conferido, sem divergência.</div>`;
   }
-  return `<div class="disclosure-banner warn">⚠️ Diferença de ${money(r.difference)} entre Cupom e Análise Mobne
+  return `<div class="disclosure-banner warn">${icon('triangle-alert')} Diferença de ${money(r.difference)} entre Cupom e Análise Mobne
     (${r.missing_documents} documento${r.missing_documents === 1 ? '' : 's'}: ${r.missing_document_ids.join(', ')}).
     Publicado por estar dentro da tolerância declarada de ${money(r.tolerance_cents)}. Cupom é a receita oficial.</div>`;
 }
@@ -547,7 +547,7 @@ function reconciliationBanner(r) {
 const ZERO_COST_WARN_THRESHOLD = 0.15;
 function dataQualityBanner(t) {
   if (!t.zero_cost_ratio || t.zero_cost_ratio <= ZERO_COST_WARN_THRESHOLD) return '';
-  return `<div class="disclosure-banner warn">⚠️ ${pct(t.zero_cost_ratio * 100)} dos itens vendidos neste período
+  return `<div class="disclosure-banner warn">${icon('triangle-alert')} ${pct(t.zero_cost_ratio * 100)} dos itens vendidos neste período
     estão com custo zero no Mobne (sem histórico de compra) — lucro e margem deste mês provavelmente estão
     superestimados e não devem ser comparados com meses de custo completo.</div>`;
 }
@@ -581,7 +581,7 @@ function alertsBlock(alerts) {
   return `<div class="alert-list">${alerts.map((a) => {
     const f = ALERT_FILTERS[a.type];
     const link = f ? `<a class="alert-action" href="${routeHash('estoque', APP.period, new URLSearchParams({filtro: f}))}">Ver produtos →</a>` : '';
-    return `<div class="alert-card severity-${esc(a.severity)}"><span>⚠️ ${esc(a.message)}</span>${link}</div>`;
+    return `<div class="alert-card severity-${esc(a.severity)}"><span>${icon('triangle-alert')} ${esc(a.message)}</span>${link}</div>`;
   }).join('')}</div>`;
 }
 
@@ -621,7 +621,7 @@ function renderResumo(data) {
   document.getElementById('content').innerHTML = `
     ${headerBlock(data)}
     ${alertsBlock(data.alerts)}
-    <div class="story-box">💡 ${esc(resumoNarrative(data))}</div>
+    <div class="story-box">${icon('lightbulb')} ${esc(resumoNarrative(data))}</div>
 
     <div class="kpi-grid kpi-grid-4">
       ${kpiCard('Faturamento', money(t.revenue), '', deltas('revenue_change'), `${num(t.receipts)} documentos · ${num(t.cancelled)} cancelados`)}
@@ -657,7 +657,7 @@ function renderResumo(data) {
 
     <div class="section-header">Top 10 produtos por lucro</div>
     <div class="chart-container chart-h-330" id="echart-top10"></div>
-    ${topProfit.length ? `<div class="story-box">💡 Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
+    ${topProfit.length ? `<div class="story-box">${icon('lightbulb')} Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
       ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.
       <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de Produtos →</button></div>` : ''}
 
@@ -699,7 +699,7 @@ function renderEstoque(data) {
   const inv = data.inventory || [];
   const active = estoqueFilter().key;
   document.getElementById('content').innerHTML = `
-    <div class="page-title">📦 Produtos &amp; Estoque</div>
+    <div class="page-title">${icon('package')} Produtos &amp; Estoque</div>
     <div class="page-subtitle">Estoque e preço são o retrato ATUAL do Mobne — não representam o histórico do período selecionado.</div>
     <span class="periodo-badge muted">Estoque: ${dt(data.stock_updated_at)}</span>
     <span class="periodo-badge muted">Preços: ${dt(data.prices_updated_at)}</span>
@@ -806,7 +806,7 @@ function renderSyncPage() {
   }).join('');
 
   document.getElementById('content').innerHTML = `
-    <div class="page-title">🔗 Sincronização Mobne</div>
+    <div class="page-title">${icon('link')} Sincronização Mobne</div>
     <div class="page-subtitle">${esc(s.source)} · intervalo automático: ${s.interval_minutes} min</div>
 
     <div class="btn-row">

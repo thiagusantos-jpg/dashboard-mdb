@@ -246,6 +246,22 @@ body {
 .sim-status.ok { color: #7DDE9E; }
 .sim-status.error { color: #F5A39A; }
 
+/* Inline Lucide icons (web/assets/icons.js) replacing the old emoji glyphs —
+   currentColor lets them follow the surrounding text color automatically. */
+.icon { display: inline-block; vertical-align: -3px; flex-shrink: 0; }
+.nav-item .icon, .btn-icon .icon { vertical-align: -4px; margin-right: 6px; }
+
+/* Status dot used for ABC/severity indicators instead of colored emoji circles. */
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.dot-red { background: var(--red); }
+.dot-yellow { background: var(--yellow); }
+.dot-green { background: var(--green); }
+.dot-gray { background: var(--light-gray); border: 1px solid var(--gray); }
+
+/* Screen-reader-only data table alternative for canvas (ECharts) charts. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
 /* ============================================================
    MAIN CONTENT + TOP BAR (period selector lives here, always in view)
    ============================================================ */

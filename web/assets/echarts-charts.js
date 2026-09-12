@@ -60,6 +60,19 @@ function brandTokens() {
   };
 }
 
+// Canvas has no per-point DOM, so a screen reader gets nothing from the chart itself —
+// this appends a visually-hidden (.sr-only, style.css) data table right after the chart
+// container with the same values ECharts just drew, one call per mount* function below.
+function srDataTable(el, caption, headers, rows) {
+  if (!el || !rows || !rows.length) return;
+  const old = el.nextElementSibling;
+  if (old && old.classList.contains('sr-only') && old.tagName === 'TABLE') old.remove();
+  const html = `<table class="sr-only"><caption>${esc(caption)}</caption><thead><tr>${
+    headers.map((h) => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead><tbody>${
+    rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c == null ? '—' : String(c))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  el.insertAdjacentHTML('afterend', html);
+}
+
 function echartsTooltip(chart, formatter) {
   const tip = document.querySelector('.chart-tip');
   if (!tip) return;

@@ -17,11 +17,13 @@ const EROSAO_LIMIAR = 3;       // pontos de margem, mesmo corte da versão anter
 const META_MARGEM_REAL = 15;   // % após custo fixo
 // Same thresholds as backend/models.py summarize(): giro ≥ 60% dos dias, margem ≥ 35%.
 const GIRO_CORTE = 0.6, MARGEM_CORTE = 35;
+// label has no emoji: it also feeds ECharts canvas legends/tooltips, where a glyph's
+// look depends on the OS's emoji font — icon carries the matching Lucide icon for DOM use.
 const CLASSES = [
-  {key: 'Estrela', label: '⭐ Estrela', color: COR.green},
-  {key: 'Gerador de caixa', label: '💰 Gerador de Caixa', color: COR.yellow},
-  {key: 'Oportunidade', label: '🔍 Oportunidade', color: COR.blue},
-  {key: 'Baixo giro', label: '⚠️ Peso Morto', color: COR.red},
+  {key: 'Estrela', label: 'Estrela', icon: 'star', color: COR.green},
+  {key: 'Gerador de caixa', label: 'Gerador de Caixa', icon: 'dollar-sign', color: COR.yellow},
+  {key: 'Oportunidade', label: 'Oportunidade', icon: 'search', color: COR.blue},
+  {key: 'Baixo giro', label: 'Peso Morto', icon: 'triangle-alert', color: COR.red},
 ];
 
 /* ---------------------------------------------------------------- format */
@@ -49,11 +51,11 @@ function periodInfo(data) {
     partial: !!data.partial_month, endDay: parseInt(data.end.slice(8), 10), daysInMonth: new Date(y, m, 0).getDate()};
 }
 
-function insightHeader(icon, title, subtitle, P) {
+function insightHeader(iconName, title, subtitle, P) {
   const partial = P.partial ? ` · parcial até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}` : '';
-  return `<div class="page-title">${icon} ${title}</div>
+  return `<div class="page-title">${icon(iconName)} ${title}</div>
     <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">📅 Analisando: ${P.nome}/${P.y}${partial}</span>
+    <span class="periodo-badge">${icon('calendar')} Analisando: ${P.nome}/${P.y}${partial}</span>
     <hr class="divider">`;
 }
 
@@ -62,13 +64,13 @@ function kpi(title, value, subtitle, subCls, valueCls) {
     subtitle ? `<div class="kpi-subtitle ${subCls || ''}">${subtitle}</div>` : ''}</div>`;
 }
 
-function story(text) { return `<div class="story-box">💡 ${text}</div>`; }
+function story(text) { return `<div class="story-box">${icon('lightbulb')} ${text}</div>`; }
 function section(text) { return `<div class="section-header">${text}</div>`; }
 function chartBox(inner) { return `<div class="chart-container">${inner}</div>`; }
 
 function explain(title, what, how, why, example) {
   return `<div class="tooltip-box">
-    <button type="button" class="tooltip-toggle" data-explain>💡 Como interpretar: ${title}</button>
+    <button type="button" class="tooltip-toggle" data-explain>${icon('lightbulb')} Como interpretar: ${title}</button>
     <div class="tooltip-content">
       <p><strong>O que mostra:</strong> ${what}</p>
       <p><strong>Como ler:</strong> ${how}</p>
@@ -86,7 +88,7 @@ function table(headers, rows) {
 function zeroCostBanner(data) {
   const zero = (data.products || []).filter((p) => p.cost === 0 && p.revenue > 0);
   if (!zero.length) return '';
-  return `<div class="disclosure-banner warn">⚠️ ${num(zero.length)} produto${zero.length === 1 ? '' : 's'} vendido${zero.length === 1 ? '' : 's'}
+  return `<div class="disclosure-banner warn">${icon('triangle-alert')} ${num(zero.length)} produto${zero.length === 1 ? '' : 's'} vendido${zero.length === 1 ? '' : 's'}
     com custo zero no Mobne (${money(sumBy(zero, (p) => p.revenue))} de receita). A margem desses itens aparece como 100% e infla
     os indicadores — revise o custo no cadastro do Mobne.</div>`;
 }
@@ -169,7 +171,7 @@ function renderPrecos(data) {
 
   const cats = (data.categories || []).filter((c) => c.revenue > 0)
     .sort((a, b) => (b.margin == null ? -1e9 : b.margin) - (a.margin == null ? -1e9 : a.margin));
-  const catRows = cats.map((c) => [c.margin == null ? '⚪' : c.margin > 55 ? '🟢' : c.margin > 40 ? '🟡' : '🔴',
+  const catRows = cats.map((c) => [c.margin == null ? dot('gray', 'sem dado') : c.margin > 55 ? dot('green', 'margem saudável') : c.margin > 40 ? dot('yellow', 'margem de atenção') : dot('red', 'margem crítica'),
     esc(c.name), brl(c.revenue), pct1(c.margin)]);
 
   const erosTable = (rows) => table(['Produto', 'Faturamento', 'Margem %', 'Preço atual', 'Custo médio', 'Custo últ. entrada',
@@ -178,7 +180,7 @@ function renderPrecos(data) {
     money(r.last_cost), pct1(r.md), pct1(r.mdu), `${r.erosao >= 0 ? '+' : ''}${dec2(r.erosao)} pts`]));
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('💰', 'Inteligência de Preços', 'Onde estou deixando dinheiro na mesa?', P)}
+    ${insightHeader('dollar-sign', 'Inteligência de Preços', 'Onde estou deixando dinheiro na mesa?', P)}
     ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-3">
       ${kpi('Markdown Médio Ponderado', pct1(mdm), mdm == null ? 'Custo incompleto no período'
@@ -202,17 +204,17 @@ function renderPrecos(data) {
       <div class="col-40">
         ${section(`Ranking Margem por Categoria (${P.label})`)}
         ${table(['Status', 'Categoria', 'Fat.', 'Markdown'], catRows)}
-        ${explain('Ranking por Categoria', `${cats.length} categorias ordenadas por margem. 🟢 > 55% · 🟡 40–55% · 🔴 < 40%.`,
-          'Categorias 🔴 com alto faturamento são as mais urgentes.', 'Renegociar fornecedores ou reajustar preços.')}
+        ${explain('Ranking por Categoria', `${cats.length} categorias ordenadas por margem. ${dot('green')} > 55% · ${dot('yellow')} 40–55% · ${dot('red')} < 40%.`,
+          `Categorias ${dot('red')} com alto faturamento são as mais urgentes.`, 'Renegociar fornecedores ou reajustar preços.')}
       </div>
     </div>
 
-    ${section(`🚨 Alerta de Erosão — Curva A (${P.label})`)}
+    ${section(`${icon('triangle-alert')} Alerta de Erosão — Curva A (${P.label})`)}
     <p class="section-note">Produtos em que o custo da última entrada difere do custo médio em mais de ${EROSAO_LIMIAR} pontos de margem,
       ao preço atual. Custos e preços: retrato atual do Mobne (${dt(data.stock_updated_at)}).</p>
     <div class="tabs">
-      <button type="button" class="tab-btn active" data-tab="tab-subiu">🔴 Custo Subiu (${subiu.length})</button>
-      <button type="button" class="tab-btn" data-tab="tab-caiu">🟢 Custo Caiu (${caiu.length})</button>
+      <button type="button" class="tab-btn active" data-tab="tab-subiu">${dot('red')} Custo Subiu (${subiu.length})</button>
+      <button type="button" class="tab-btn" data-tab="tab-caiu">${dot('green')} Custo Caiu (${caiu.length})</button>
     </div>
     <div id="tab-subiu" class="tab-content active">${subiu.length
       ? erosTable(subiu) + story(`${subiu.length} produtos com custo subindo. Reajustar preço para proteger margem futura.`)
@@ -255,10 +257,11 @@ function renderMapa(data) {
     xTitle: 'Giro (% dos dias com venda)', yTitle: 'Margem (%)', xFmt: (v) => Math.round(v * 100) + '%', yFmt: (v) => v + '%',
     vlines: [{x: GIRO_CORTE}], hlines: [{y: MARGEM_CORTE}],
     annotations: [
-      {x: 0.83, y: ys.max - span * 0.05, text: '⭐ ESTRELAS', color: COR.green},
-      {x: 0.83, y: ys.min + span * 0.05, text: '💰 GERADORES', color: COR.orange},
-      {x: 0.27, y: ys.max - span * 0.05, text: '🔍 OPORTUNIDADES', color: COR.blue},
-      {x: 0.27, y: ys.min + span * 0.05, text: '⚠️ PESO MORTO', color: COR.red},
+      // Canvas-drawn text (ECharts annotation) — no icon element renders here, so plain text.
+      {x: 0.83, y: ys.max - span * 0.05, text: 'ESTRELAS', color: COR.green},
+      {x: 0.83, y: ys.min + span * 0.05, text: 'GERADORES', color: COR.orange},
+      {x: 0.27, y: ys.max - span * 0.05, text: 'OPORTUNIDADES', color: COR.blue},
+      {x: 0.27, y: ys.min + span * 0.05, text: 'PESO MORTO', color: COR.red},
     ],
     empty: 'Nenhum produto com custo conhecido no período.',
   };
@@ -269,16 +272,16 @@ function renderMapa(data) {
   const byRevenue = (arr) => arr.slice().sort((a, b) => b.revenue - a.revenue);
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('🗺️', 'Mapa de Produtos — Matriz de Rentabilidade', 'Quais produtos são estrelas e quais são peso morto?', P)}
+    ${insightHeader('map', 'Mapa de Produtos — Matriz de Rentabilidade', 'Quais produtos são estrelas e quais são peso morto?', P)}
     ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-4">
-      ${kpi('⭐ Estrelas', num(est.length), `${brl(lucro(est))} lucro`)}
-      ${kpi('💰 Geradores', num(ger.length), `${brl(lucro(ger))} lucro`)}
-      ${kpi('🔍 Oportunidades', num(opo.length), `${brl(lucro(opo))} lucro`)}
-      ${kpi('⚠️ Peso Morto', num(pm.length), `${brl(lucro(pm))} lucro`)}
+      ${kpi(`${icon('star')} Estrelas`, num(est.length), `${brl(lucro(est))} lucro`)}
+      ${kpi(`${icon('dollar-sign')} Geradores`, num(ger.length), `${brl(lucro(ger))} lucro`)}
+      ${kpi(`${icon('search')} Oportunidades`, num(opo.length), `${brl(lucro(opo))} lucro`)}
+      ${kpi(`${icon('triangle-alert')} Peso Morto`, num(pm.length), `${brl(lucro(pm))} lucro`)}
     </div>
-    ${explain('Matriz 2×2', `Giro × Margem. ⭐ giro alto e margem alta · 💰 giro alto e margem baixa · 🔍 giro baixo e margem alta · ⚠️ giro baixo e margem baixa. Cortes: giro ≥ ${GIRO_CORTE * 100}% dos dias com venda e margem ≥ ${MARGEM_CORTE}%.`,
-      '⭐ Proteger · 💰 Renegociar custo · 🔍 Dar visibilidade · ⚠️ Avaliar remoção.', 'Permite priorizar decisões sobre cada grupo.',
+    ${explain('Matriz 2×2', `Giro × Margem. ${icon('star')} giro alto e margem alta · ${icon('dollar-sign')} giro alto e margem baixa · ${icon('search')} giro baixo e margem alta · ${icon('triangle-alert')} giro baixo e margem baixa. Cortes: giro ≥ ${GIRO_CORTE * 100}% dos dias com venda e margem ≥ ${MARGEM_CORTE}%.`,
+      `${icon('star')} Proteger · ${icon('dollar-sign')} Renegociar custo · ${icon('search')} Dar visibilidade · ${icon('triangle-alert')} Avaliar remoção.`, 'Permite priorizar decisões sobre cada grupo.',
       `Apenas ${n80} de ${num(prods.length)} produtos geram 80% do lucro.`)}
     ${story(`Apenas ${n80} produtos (de ${num(prods.length)}) geram 80% do lucro. As ${est.length} Estrelas são intocáveis.`)}
     <hr class="divider">
@@ -286,20 +289,20 @@ function renderMapa(data) {
     ${section(`Matriz de Rentabilidade (${P.label})`)}
     <div class="chart-container chart-h-520" id="chart-mapa-matrix"></div>
     ${explain('Scatter Plot Giro vs Margem', 'Cada bolha = produto. X = giro. Y = margem. Tamanho = faturamento.',
-      'Superior direito = ⭐. Inferior direito = 💰. Passe o mouse para ver detalhes; clique na legenda para filtrar grupos.',
+      `Superior direito = ${icon('star')}. Inferior direito = ${icon('dollar-sign')}. Passe o mouse para ver detalhes; clique na legenda para filtrar grupos.`,
       'Ferramenta principal para decisões de mix.')}
 
     <div class="row">
       <div class="col-50">
-        ${section('⭐ Estrelas')}
+        ${section(`${icon('star')} Estrelas`)}
         ${table(heads, rowsOf(byProfit(est)))}
-        ${section('🔍 Oportunidades (Top 15)')}
+        ${section(`${icon('search')} Oportunidades (Top 15)`)}
         ${table(heads, rowsOf(byProfit(opo).slice(0, 15)))}
       </div>
       <div class="col-50">
-        ${section('💰 Geradores de Caixa')}
+        ${section(`${icon('dollar-sign')} Geradores de Caixa`)}
         ${table(heads, rowsOf(byRevenue(ger)))}
-        ${section('⚠️ Peso Morto (Top 15)')}
+        ${section(`${icon('triangle-alert')} Peso Morto (Top 15)`)}
         ${table(heads, rowsOf(byRevenue(pm).slice(0, 15)))}
       </div>
     </div>
@@ -369,7 +372,7 @@ function renderDiagnostico(data) {
   };
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('🔍', 'Diagnóstico de Faturamento', 'Menos clientes, menos gasto, ou mix mudou?', P)}
+    ${insightHeader('search', 'Diagnóstico de Faturamento', 'Menos clientes, menos gasto, ou mix mudou?', P)}
     <div class="kpi-grid kpi-grid-4">
       ${kpi('FATURAMENTO =', brl(fat), 'Cupons × Ticket Médio')}
       ${kpi('Nº Cupons', num(cup), vc == null ? 'Sem comparação' : `${deltaArrow(vc)} ${signedPct(vc)}${vsTxt}`, deltaClass(vc))}
@@ -496,7 +499,7 @@ function renderSazonalidade(data) {
   };
 
   document.getElementById('content').innerHTML = `
-    <div class="page-title">📈 Sazonalidade e Tendências</div>
+    <div class="page-title">${icon('trending-up')} Sazonalidade e Tendências</div>
     <div class="page-subtitle">Padrão de ${R} para planejar ${P.y}</div>
     <hr class="divider">
     ${refNote}
@@ -584,7 +587,7 @@ function renderVisao(data) {
 
   const idxNext = S.index[nx.m - 1];
   const top5 = (data.categories || []).slice().sort((a, b) => b.revenue - a.revenue).slice(0, 5);
-  const emoji = idxNext == null ? '➡️' : idxNext > 1.1 ? '🔥' : idxNext < 0.9 ? '❄️' : '➡️';
+  const trendIcon = idxNext == null ? icon('chevron-right') : idxNext > 1.1 ? icon('flame') : idxNext < 0.9 ? icon('snowflake') : icon('chevron-right');
 
   const eros = erosionRows(data).filter((r) => r.erosao > EROSAO_LIMIAR);
   const prods = data.products || [];
@@ -595,29 +598,29 @@ function renderVisao(data) {
   const netMargin = mg == null || !pace ? null : (pace * mg / 100 - fixed) / pace * 100;
 
   const doList = [];
-  if (eros.length) doList.push(`🔴 <strong>Reajustar preços</strong> de ${eros.length} produtos Curva A com custo subindo`);
-  if (estrelas.length) doList.push(`⭐ <strong>Garantir estoque</strong> dos top Estrelas: ${estrelas.slice(0, 3).map((p) => esc(p.name)).join(', ')}`);
-  if (idxNext != null && idxNext > 1.05) doList.push(`📈 <strong>Reforçar compras</strong> — ${nx.nome} é forte (índice ${dec2(idxNext)})`);
-  else if (idxNext != null && idxNext < 0.95) doList.push(`📢 <strong>Planejar promoções</strong> — ${nx.nome} é fraco (índice ${dec2(idxNext)})`);
-  doList.push(`🎯 <strong>Meta de faturamento</strong>: ${brl(cr)}`);
-  doList.push(`💰 <strong>Meta de lucro líquido</strong>: ${brl(lr)}`);
+  if (eros.length) doList.push(`${icon('triangle-alert')} <strong>Reajustar preços</strong> de ${eros.length} produtos Curva A com custo subindo`);
+  if (estrelas.length) doList.push(`${icon('star')} <strong>Garantir estoque</strong> dos top Estrelas: ${estrelas.slice(0, 3).map((p) => esc(p.name)).join(', ')}`);
+  if (idxNext != null && idxNext > 1.05) doList.push(`${icon('trending-up')} <strong>Reforçar compras</strong> — ${nx.nome} é forte (índice ${dec2(idxNext)})`);
+  else if (idxNext != null && idxNext < 0.95) doList.push(`${icon('megaphone')} <strong>Planejar promoções</strong> — ${nx.nome} é fraco (índice ${dec2(idxNext)})`);
+  doList.push(`${icon('target')} <strong>Meta de faturamento</strong>: ${brl(cr)}`);
+  doList.push(`${icon('dollar-sign')} <strong>Meta de lucro líquido</strong>: ${brl(lr)}`);
   const watchList = [];
-  if (vc != null) watchList.push(`👥 <strong>Fluxo de clientes</strong>: variou ${signedPct(vc)} vs o mesmo período do ano anterior`);
-  watchList.push(`📊 <strong>Margem real</strong> (após custo fixo): manter acima de ${META_MARGEM_REAL}% (atual: ${pct1(netMargin)})`);
-  watchList.push(`🏷️ <strong>Erosão</strong>: ${eros.length} produtos precisam de reajuste`);
-  if (pesoMorto.length > 50) watchList.push(`🗑️ <strong>Peso Morto</strong>: ${num(pesoMorto.length)} produtos a avaliar`);
+  if (vc != null) watchList.push(`${icon('users')} <strong>Fluxo de clientes</strong>: variou ${signedPct(vc)} vs o mesmo período do ano anterior`);
+  watchList.push(`${icon('bar-chart-3')} <strong>Margem real</strong> (após custo fixo): manter acima de ${META_MARGEM_REAL}% (atual: ${pct1(netMargin)})`);
+  watchList.push(`${icon('tag')} <strong>Erosão</strong>: ${eros.length} produtos precisam de reajuste`);
+  if (pesoMorto.length > 50) watchList.push(`${icon('trash-2')} <strong>Peso Morto</strong>: ${num(pesoMorto.length)} produtos a avaliar`);
 
   const basisTxt = nx.basis === 'sazonal'
     ? `Projeção sazonal: ${nx.curto}/${String(S.R).slice(2)} × fator ${dec2(S.factor)}.`
     : `Sem ${nx.curto}/${String(nx.y - 1).slice(2)} para projetar pela sazonalidade — base = ritmo atual de ${P.label}.`;
 
   document.getElementById('content').innerHTML = `
-    <div class="page-title">🔮 Visão Futurista — Cenários e Projeções</div>
+    <div class="page-title">${icon('sparkles')} Visão Futurista — Cenários e Projeções</div>
     <div class="page-subtitle">Baseado nos dados, o que esperar e como se preparar?</div>
-    <span class="periodo-badge">📅 Base: ${P.nome}/${P.y}${P.partial ? ` · parcial até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}` : ''}</span>
+    <span class="periodo-badge">${icon('calendar')} Base: ${P.nome}/${P.y}${P.partial ? ` · parcial até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}` : ''}</span>
     <hr class="divider">
 
-    ${section(`📊 Projeção de Faturamento — ${P.y} Completo`)}
+    ${section(`${icon('bar-chart-3')} Projeção de Faturamento — ${P.y} Completo`)}
     <div class="chart-container chart-h-400" id="chart-visao-proj"></div>
     ${explain(`Projeção ${P.y}`, `Amarelo sólido = real. Amarelo transparente = projeção sazonal. Laranja = mês em andamento. Linha cinza = ${S.R}.`,
       S.factor != null ? `Fator de ajuste: ${dec2(S.factor)} (${P.y} está ${signedPct((S.factor - 1) * 100)} vs ${S.R} nos ${S.pairs} meses comparáveis). Projeção = mês de ${S.R} × fator.`
@@ -625,17 +628,17 @@ function renderVisao(data) {
       'Antecipar faturamento para planejar compras e caixa.')}
     <hr class="divider">
 
-    ${section(`🎯 Cenários para ${nx.nome}/${nx.y}`)}
+    ${section(`${icon('target')} Cenários para ${nx.nome}/${nx.y}`)}
     <div class="kpi-grid kpi-grid-3">
-      ${kpi('😟 Pessimista (−15%)', brl(cp), `Lucro: ${brl(lp)}`, lp != null && lp < 0 ? 'kpi-negative' : 'kpi-neutral')}
-      ${kpi('📊 Realista', brl(cr), `Lucro: ${brl(lr)}`, lr != null && lr < 0 ? 'kpi-negative' : 'kpi-positive')}
-      ${kpi('🚀 Otimista (+15%)', brl(co), `Lucro: ${brl(lo)}`, lo != null && lo < 0 ? 'kpi-negative' : 'kpi-positive')}
+      ${kpi(`${icon('frown')} Pessimista (−15%)`, brl(cp), `Lucro: ${brl(lp)}`, lp != null && lp < 0 ? 'kpi-negative' : 'kpi-neutral')}
+      ${kpi(`${icon('bar-chart-3')} Realista`, brl(cr), `Lucro: ${brl(lr)}`, lr != null && lr < 0 ? 'kpi-negative' : 'kpi-positive')}
+      ${kpi(`${icon('rocket')} Otimista (+15%)`, brl(co), `Lucro: ${brl(lo)}`, lo != null && lo < 0 ? 'kpi-negative' : 'kpi-positive')}
     </div>
     ${explain(`Cenários ${nx.nome}`, '3 cenários sobre a projeção: pessimista (−15%), realista e otimista (+15%). Lucro = faturamento × margem bruta atual − custo fixo mensal.',
       'Se o pessimista já dá lucro, o negócio está seguro.', 'Planejar caixa e definir metas realistas.', basisTxt)}
     <hr class="divider">
 
-    ${section(`🏎️ Velocímetro — ${P.label} vs Metas`)}
+    ${section(`${icon('gauge')} Velocímetro — ${P.label} vs Metas`)}
     ${gaugeOpts ? '<div class="chart-container chart-h-330" id="chart-visao-gauge"></div>'
       : chartBox(chartEmpty('Margem indisponível no período — não é possível calcular o ponto de equilíbrio.'))}
     ${be ? explain('Velocímetro', `Vermelho = abaixo do ponto de equilíbrio (${brl(be)}). Amarelo = acima do equilíbrio. Verde = acima da meta ideal (${brl(ideal)} = 1,5× equilíbrio).`,
@@ -643,23 +646,23 @@ function renderVisao(data) {
       P.partial ? `Realizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}. O ponteiro usa o ritmo diário projetado para o mês inteiro.` : undefined) : ''}
     <hr class="divider">
 
-    ${section('📦 Top 5 Categorias — Performance e Tendência')}
+    ${section(`${icon('package')} Top 5 Categorias — Performance e Tendência`)}
     <div class="kpi-grid kpi-grid-5">
       ${top5.map((c) => `<div class="kpi-card"><div class="kpi-title">${esc(c.name)}</div><div class="kpi-value kpi-value-sm">${brl(c.revenue)}</div>
-        <div class="kpi-subtitle">Margem: ${pct1(c.margin)} | ${emoji} ${nx.curto}: ${dec2(idxNext)}</div></div>`).join('')}
+        <div class="kpi-subtitle">Margem: ${pct1(c.margin)} | ${trendIcon} ${nx.curto}: ${dec2(idxNext)}</div></div>`).join('')}
     </div>
     ${explain('Top 5 Categorias', `As 5 maiores categorias de ${P.label} + tendência sazonal de ${nx.nome} (índice de ${S.R}).`,
-      '🔥 = mês forte (> 1,10). ❄️ = fraco (< 0,90). ➡️ = normal ou sem histórico.', 'Reforçar estoque das 🔥 e promover as ❄️.')}
+      `${icon('flame')} = mês forte (> 1,10). ${icon('snowflake')} = fraco (< 0,90). ${icon('chevron-right')} = normal ou sem histórico.`, `Reforçar estoque das ${icon('flame')} e promover as ${icon('snowflake')}.`)}
     <hr class="divider">
 
-    ${section(`📋 Direcionamento Estratégico — ${nx.nome}/${nx.y}`)}
+    ${section(`${icon('clipboard-list')} Direcionamento Estratégico — ${nx.nome}/${nx.y}`)}
     <div class="row">
       <div class="col-50">
-        <h3 class="action-title">✅ O que FAZER em ${nx.nome}</h3>
+        <h3 class="action-title">${icon('circle-check')} O que FAZER em ${nx.nome}</h3>
         <ul class="action-list">${doList.map((li) => `<li>${li}</li>`).join('')}</ul>
       </div>
       <div class="col-50">
-        <h3 class="action-title">⚠️ O que MONITORAR</h3>
+        <h3 class="action-title">${icon('triangle-alert')} O que MONITORAR</h3>
         <ul class="action-list">${watchList.map((li) => `<li>${li}</li>`).join('')}</ul>
       </div>
     </div>
