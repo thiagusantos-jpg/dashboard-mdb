@@ -24,6 +24,21 @@
         <label for="login-password" class="field-label">Senha</label>
         <input type="password" id="login-password" class="login-input" autocomplete="current-password" required>
         <button type="submit" class="btn-primary" id="login-submit">Entrar</button>
+        <button type="button" class="btn-link" id="forgot-password-link">Esqueci minha senha</button>
+    </form>
+    <form id="reset-password-form" class="login-card hidden">
+        <h1>Redefinir senha</h1>
+        <p>Exige a senha mestra local do dashboard (arquivo <code>.runtime/acesso-local.txt</code> no servidor, ou a variável <code>MDB_ACCESS_PASSWORD</code> em implantações na nuvem) — não seu e-mail.</p>
+        <div id="reset-password-error" class="form-error"></div>
+        <div id="reset-password-success" class="form-success"></div>
+        <label for="reset-email" class="field-label">E-mail da conta</label>
+        <input type="email" id="reset-email" class="login-input" autocomplete="username" maxlength="254" required>
+        <label for="reset-master-password" class="field-label">Senha mestra</label>
+        <input type="password" id="reset-master-password" class="login-input" required>
+        <label for="reset-new-password" class="field-label">Nova senha</label>
+        <input type="password" id="reset-new-password" class="login-input" autocomplete="new-password" minlength="8" maxlength="200" required>
+        <button type="submit" class="btn-primary" id="reset-password-submit">Redefinir senha</button>
+        <button type="button" class="btn-link" id="back-to-login-link">Voltar para o login</button>
     </form>
 </div>
 

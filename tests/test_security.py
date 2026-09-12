@@ -11,6 +11,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "PG", False)
     monkeypatch.setattr(db.settings, "DB_PATH", tmp_path / "security.sqlite3")
     monkeypatch.setattr(security, "access_password", lambda: "bootstrap-password")
+    # The rate limiter's _attempts dict is module-level and keyed by client IP, which
+    # TestClient always reports as the same address — reset it so login attempts in
+    # one test don't count against the next test's budget.
+    monkeypatch.setattr(security, "_attempts", {})
     monkeypatch.setenv("MDB_DISABLE_WORKER", "1")
     db.initialize()
     with TestClient(api.app) as test_client:
@@ -47,3 +51,62 @@ def test_email_is_required_after_first_admin_is_created(client):
         "/api/login",
         json={"email": "admin@loja.test", "password": "bootstrap-password"},
     ).status_code == 200
+
+
+def test_locked_out_admin_can_reset_password_with_the_master_password(client):
+    bootstrap_admin(client)
+    client.cookies.clear()
+
+    response = client.post(
+        "/api/reset-password",
+        json={
+            "email": "admin@loja.test",
+            "master_password": "bootstrap-password",
+            "new_password": "uma-senha-totalmente-nova",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    assert client.post(
+        "/api/login",
+        json={"email": "admin@loja.test", "password": "senha-antiga-esquecida"},
+    ).status_code == 401
+    assert client.post(
+        "/api/login",
+        json={"email": "admin@loja.test", "password": "uma-senha-totalmente-nova"},
+    ).status_code == 200
+
+
+def test_reset_password_rejects_wrong_master_password(client):
+    bootstrap_admin(client)
+    client.cookies.clear()
+
+    response = client.post(
+        "/api/reset-password",
+        json={
+            "email": "admin@loja.test",
+            "master_password": "senha-mestra-errada",
+            "new_password": "uma-senha-totalmente-nova",
+        },
+    )
+    assert response.status_code == 401
+
+    assert client.post(
+        "/api/login",
+        json={"email": "admin@loja.test", "password": "bootstrap-password"},
+    ).status_code == 200
+
+
+def test_reset_password_unknown_email_does_not_leak_master_password_validity(client):
+    bootstrap_admin(client)
+    client.cookies.clear()
+
+    response = client.post(
+        "/api/reset-password",
+        json={
+            "email": "ninguem@loja.test",
+            "master_password": "bootstrap-password",
+            "new_password": "uma-senha-totalmente-nova",
+        },
+    )
+    assert response.status_code == 404

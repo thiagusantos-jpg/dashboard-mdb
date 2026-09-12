@@ -61,6 +61,9 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
 
 function boot() {
   document.getElementById('login-form').addEventListener('submit', onLoginSubmit);
+  document.getElementById('reset-password-form').addEventListener('submit', onResetPasswordSubmit);
+  document.getElementById('forgot-password-link').addEventListener('click', showResetPassword);
+  document.getElementById('back-to-login-link').addEventListener('click', showLoginForm);
   document.getElementById('custo-fixo-input').addEventListener('change', updateCustoFixo);
   document.querySelectorAll('img[data-fallback]').forEach((img) => {
     img.addEventListener('error', () => img.classList.add('hidden'));
@@ -159,7 +162,7 @@ function showLogin(message) {
   document.getElementById('app').classList.add('hidden');
   document.getElementById('login-screen').classList.remove('hidden');
   document.getElementById('login-error').textContent = message || '';
-  document.getElementById('login-email').focus();
+  showLoginForm();
 }
 
 async function onLoginSubmit(ev) {
@@ -184,6 +187,54 @@ async function onLoginSubmit(ev) {
     onAuthenticated(session);
   } catch (e) {
     document.getElementById('login-error').textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function showResetPassword() {
+  document.getElementById('login-form').classList.add('hidden');
+  document.getElementById('reset-password-form').classList.remove('hidden');
+  document.getElementById('reset-password-error').textContent = '';
+  document.getElementById('reset-password-success').textContent = '';
+  document.getElementById('reset-email').value = document.getElementById('login-email').value;
+  document.getElementById('reset-email').focus();
+}
+
+function showLoginForm() {
+  document.getElementById('reset-password-form').classList.add('hidden');
+  document.getElementById('login-form').classList.remove('hidden');
+  document.getElementById('login-email').focus();
+}
+
+async function onResetPasswordSubmit(ev) {
+  ev.preventDefault();
+  const email = document.getElementById('reset-email').value.trim();
+  const masterPassword = document.getElementById('reset-master-password').value;
+  const newPassword = document.getElementById('reset-new-password').value;
+  const btn = document.getElementById('reset-password-submit');
+  const error = document.getElementById('reset-password-error');
+  const success = document.getElementById('reset-password-success');
+  btn.disabled = true;
+  error.textContent = '';
+  success.textContent = '';
+  try {
+    const res = await fetch('/api/reset-password', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, master_password: masterPassword, new_password: newPassword}),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || 'Não foi possível redefinir a senha.');
+    }
+    success.textContent = 'Senha redefinida. Você já pode entrar com a nova senha.';
+    document.getElementById('reset-master-password').value = '';
+    document.getElementById('reset-new-password').value = '';
+    document.getElementById('login-email').value = email;
+    document.getElementById('login-password').value = '';
+  } catch (e) {
+    error.textContent = e.message;
   } finally {
     btn.disabled = false;
   }

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hmac
 import json
 import os
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
-from . import database as db, models, permissions, security, settings
+from . import database as db, identity, models, permissions, security, settings
 from . import sync
 from .routes.finance_accounts import router as finance_accounts_router
 from .routes.financial_entries import router as financial_entries_router
@@ -92,6 +93,26 @@ def login(body: Login,request:Request,response:Response):
     raw=security.login(request,body.password,body.email)
     response.set_cookie(security.COOKIE,raw,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=43200)
     return {'csrf':security.csrf(raw)}
+
+class PasswordReset(BaseModel):
+    email: str=Field(min_length=3,max_length=254)
+    master_password: str=Field(min_length=1,max_length=200)
+    new_password: str=Field(min_length=8,max_length=200)
+
+@app.post('/api/reset-password')
+def reset_password(body: PasswordReset,request:Request):
+    # For the sole administrator locked out of their own dashboard, with no other
+    # admin to ask: whoever holds the same master password already trusted to
+    # bootstrap the first account (backend/security.py: local file or
+    # MDB_ACCESS_PASSWORD) can reset any user's password. No email/SMTP dependency.
+    security.same_origin(request)
+    security.rate_limit(request,key='reset-password')
+    if not hmac.compare_digest(body.master_password,security.access_password()):
+        raise HTTPException(401,'Senha mestra incorreta.')
+    user=identity.reset_password(body.email,body.new_password)
+    if user is None:
+        raise HTTPException(404,'Usuário não encontrado.')
+    return {'ok':True}
 
 @app.get('/api/session')
 def session(request:Request,auth=Depends(security.authenticate)):

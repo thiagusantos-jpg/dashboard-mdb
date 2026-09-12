@@ -157,6 +157,13 @@ body {
     min-height: 16px;
 }
 
+.form-success {
+    color: var(--positive);
+    font-size: 13px;
+    margin-bottom: 12px;
+    min-height: 16px;
+}
+
 /* ============================================================
    SIDEBAR
    ============================================================ */

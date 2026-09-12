@@ -76,13 +76,17 @@ def authenticate(request: Request):
         session_hash=session_hash,
     )
 
+def rate_limit(request, key='login'):
+    ip=request.client.host if request.client else 'local'
+    bucket=f'{key}:{ip}'
+    with _lock:
+        recent=[t for t in _attempts.get(bucket,[]) if t>time.time()-60]
+        if len(recent)>=8: raise HTTPException(429,'Muitas tentativas. Aguarde um minuto.')
+        _attempts[bucket]=recent+[time.time()]
+
 def login(request, password, email: Optional[str] = None):
     same_origin(request)
-    ip=request.client.host if request.client else 'local'
-    with _lock:
-        recent=[t for t in _attempts.get(ip,[]) if t>time.time()-60]
-        if len(recent)>=8: raise HTTPException(429,'Muitas tentativas. Aguarde um minuto.')
-        _attempts[ip]=recent+[time.time()]
+    rate_limit(request)
     if not identity.users_exist():
         if not hmac.compare_digest(password,access_password()):
             raise HTTPException(401,'Senha incorreta.')

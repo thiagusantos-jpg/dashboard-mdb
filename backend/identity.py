@@ -116,6 +116,25 @@ def verify_credentials(email: str, password: str) -> Optional[dict]:
     return user
 
 
+def reset_password(email: str, new_password: str) -> Optional[dict]:
+    user = user_by_email(email)
+    if not user:
+        return None
+    salt = secrets.token_bytes(16)
+    digest = _password_digest(new_password, salt)
+    with db.connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash=?, password_salt=?, updated_at=?, version=version+1
+            WHERE id=?
+            """,
+            (digest.hex(), salt.hex(), db.now(), user["id"]),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+    return user
+
+
 def disable_user(user_id: int) -> None:
     with db.connection() as conn:
         changed = conn.execute(
