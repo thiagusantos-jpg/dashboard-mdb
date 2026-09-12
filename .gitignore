@@ -67,3 +67,6 @@ projeto_dubairro-claude-deploy-vercel-k9YvI/
 
 # Claude Code session-local runtime state (not project config)
 .claude/scheduled_tasks.lock
+
+# Isolated implementation worktrees
+.worktrees/
