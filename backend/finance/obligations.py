@@ -21,6 +21,15 @@ _KINDS = ("entry", "loan_installment")
 # response, never writes it back — "preservar estado original no banco").
 _OPEN_ENTRY_STATUSES = ("open", "overdue", "partially_paid")
 
+# Account natures that represent money coming IN (revenue/financing), never a
+# payable. Obligations returned by this module are exclusively "contas a
+# pagar" — mirrors the precedent already set elsewhere in this codebase:
+# entries.py::result_for filters TO expense natures, entries.py::cash_for
+# filters OUT these same two natures. Without this filter, a manual entry
+# booked against a revenue-nature account (e.g. the `sales` system account)
+# would surface here as a "payable", which it is not.
+_NON_PAYABLE_NATURES = ("revenue", "financing_inflow")
+
 # Fields an item's `allowed_actions` can carry that only make sense for a
 # caller with write access. The route layer (backend/routes/obligations.py)
 # strips these out for a read-only caller; this module always computes the
@@ -75,6 +84,22 @@ def _sort_key(item: dict):
     return (item["due_date"], item["kind"], int(item["id"]))
 
 
+def _compute_status(status: str, due_date: str, open_cents: int) -> str:
+    """Read-time derived overdue status — never persisted.
+
+    Mirrors backend/finance/entries.py::get_entry's idiom (`if status=='open'
+    and due_date<today: status='overdue'`), extended to `partially_paid` per
+    the shared contract's "Status de atraso é calculado por data civil e
+    saldo" (calendar date AND balance): a still-open-ish item whose
+    outstanding balance is positive and whose due date has passed "today" is
+    reported as overdue. A final status (paid/cancelled/reversed) or a
+    zeroed-out balance is never overridden.
+    """
+    if status in ("open", "partially_paid") and open_cents > 0 and due_date < date.today().isoformat():
+        return "overdue"
+    return status
+
+
 def _entry_allowed_actions(status: str, source: str, open_cents: int) -> list:
     actions = ["details"]
     # Matches backend/finance/entry_management.py's editability rules well
@@ -99,6 +124,7 @@ def _installment_allowed_actions(open_cents: int) -> list:
 
 def _entry_rows(company: int) -> list:
     placeholders = ",".join("?" for _ in _OPEN_ENTRY_STATUSES)
+    nature_placeholders = ",".join("?" for _ in _NON_PAYABLE_NATURES)
     with db.connection() as conn:
         rows = conn.execute(
             f"""
@@ -113,14 +139,16 @@ def _entry_rows(company: int) -> list:
             JOIN finance_accounts a ON a.id=e.account_id
             LEFT JOIN financial_events ev ON ev.entry_id=e.id
             WHERE e.company=? AND e.status IN ({placeholders})
+              AND a.nature NOT IN ({nature_placeholders})
             GROUP BY e.id
             """,
-            (company, *_OPEN_ENTRY_STATUSES),
+            (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES),
         ).fetchall()
     items = []
     for row in rows:
         paid_cents = int(row["paid_cents"])
         open_cents = max(0, row["amount_cents"] - paid_cents)
+        status = _compute_status(row["status"], row["due_date"], open_cents)
         items.append({
             "key": f"entry:{row['id']}",
             "kind": "entry",
@@ -132,11 +160,15 @@ def _entry_rows(company: int) -> list:
             "total_cents": row["amount_cents"],
             "paid_cents": paid_cents,
             "open_cents": open_cents,
-            "status": row["status"],
+            "status": status,
             "source": row["source"],
             "loan_id": None,
             "number": row["installment_number"],
             "count": row["installment_count"],
+            # Editability is driven by the *persisted* status (matches
+            # entry_management.py::_allowed_fields, which reads the raw DB
+            # row and has never heard of "overdue") — not the derived display
+            # status computed just above.
             "allowed_actions": _entry_allowed_actions(row["status"], row["source"], open_cents),
             "_sensitive": bool(row["sensitive"]),
         })
@@ -167,6 +199,7 @@ def _loan_installment_rows(company: int) -> list:
         # installment later generates surfaces as its own (already-'paid',
         # so list-excluded) financial_entries row, never a second obligation
         # for the same installment.
+        status = _compute_status(row["status"], row["due_date"], row["total_cents"])
         items.append({
             "key": f"loan_installment:{row['id']}",
             "kind": "loan_installment",
@@ -181,7 +214,7 @@ def _loan_installment_rows(company: int) -> list:
             "total_cents": row["total_cents"],
             "paid_cents": 0,
             "open_cents": row["total_cents"],
-            "status": row["status"],
+            "status": status,
             "source": "loan",
             "loan_id": str(row["loan_id"]),
             "number": row["number"],
@@ -267,13 +300,14 @@ def get_obligation(
     task brief's "preservar acesso ao histórico pago no detalhe".
     """
     if kind == "entry":
+        nature_placeholders = ",".join("?" for _ in _NON_PAYABLE_NATURES)
         with db.connection() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT e.id,e.version,e.description,e.due_date,e.competence,
                        e.amount_cents,e.status,e.source,
-                       e.installment_number,e.installment_count,a.sensitive,
-                       COALESCE(SUM(
+                       e.installment_number,e.installment_count,a.sensitive
+                       ,COALESCE(SUM(
                            CASE WHEN ev.event_type='settled' THEN ev.amount_cents
                                 WHEN ev.event_type='reversed' THEN -ev.amount_cents ELSE 0 END
                        ),0) AS paid_cents
@@ -281,9 +315,10 @@ def get_obligation(
                 JOIN finance_accounts a ON a.id=e.account_id
                 LEFT JOIN financial_events ev ON ev.entry_id=e.id
                 WHERE e.id=? AND e.company=?
+                  AND a.nature NOT IN ({nature_placeholders})
                 GROUP BY e.id
                 """,
-                (item_id, company),
+                (item_id, company, *_NON_PAYABLE_NATURES),
             ).fetchone()
         if not row:
             return None
@@ -291,6 +326,7 @@ def get_obligation(
             return None
         paid_cents = int(row["paid_cents"])
         open_cents = max(0, row["amount_cents"] - paid_cents)
+        status = _compute_status(row["status"], row["due_date"], open_cents)
         return {
             "key": f"entry:{row['id']}",
             "kind": "entry",
@@ -302,11 +338,13 @@ def get_obligation(
             "total_cents": row["amount_cents"],
             "paid_cents": paid_cents,
             "open_cents": open_cents,
-            "status": row["status"],
+            "status": status,
             "source": row["source"],
             "loan_id": None,
             "number": row["installment_number"],
             "count": row["installment_count"],
+            # See _entry_rows: editability tracks the persisted status, not
+            # the derived "overdue" display status.
             "allowed_actions": _entry_allowed_actions(row["status"], row["source"], open_cents),
         }
 
@@ -330,6 +368,7 @@ def get_obligation(
         else:
             paid_cents = 0
         open_cents = max(0, row["total_cents"] - paid_cents)
+        status = _compute_status(row["status"], row["due_date"], open_cents)
         return {
             "key": f"loan_installment:{row['id']}",
             "kind": "loan_installment",
@@ -341,7 +380,7 @@ def get_obligation(
             "total_cents": row["total_cents"],
             "paid_cents": paid_cents,
             "open_cents": open_cents,
-            "status": row["status"],
+            "status": status,
             "source": "loan",
             "loan_id": str(row["loan_id"]),
             "number": row["number"],

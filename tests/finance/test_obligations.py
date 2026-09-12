@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -262,3 +262,123 @@ def test_ids_are_strings_even_beyond_js_safe_integer(obligations_db, monkeypatch
     item = next(i for i in result["items"] if i["key"] == f"entry:{big_id}")
     assert isinstance(item["id"], str)
     assert item["id"] == str(big_id)
+
+
+# --- Nature filtering (Fix round 1 / Finding 1) -----------------------------
+# Obligations are exclusively "contas a pagar". A manual entry booked against
+# a revenue- or financing_inflow-nature account (e.g. an unpaid confirmed
+# sale posted to the `sales` account) must never surface as a payable — this
+# mirrors entries.py::result_for (filters TO expense natures) and
+# entries.py::cash_for (filters OUT revenue/financing_inflow natures).
+
+
+def _revenue_entry():
+    account = accounts.account_by_key(COMPANY, "sales")
+    return create_entry(EntryCommand(
+        company_id=COMPANY, account_id=account["id"], amount_cents=75_000,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Venda a receber",
+    ))
+
+
+def test_revenue_nature_entry_excluded_from_list(obligations_db):
+    _revenue_entry()
+    _partial_entry()
+
+    result = list_obligations(1, include_sensitive=True)
+    assert result["total"] == 1
+    assert all(item["kind"] != "entry" or "Venda" not in item["description"] for item in result["items"])
+
+
+def test_financing_inflow_nature_entry_excluded_from_list(obligations_db):
+    account = accounts.account_by_key(COMPANY, "loan_proceeds")
+    create_entry(EntryCommand(
+        company_id=COMPANY, account_id=account["id"], amount_cents=50_000,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Recebimento de empréstimo",
+    ))
+    result = list_obligations(1, include_sensitive=True)
+    assert result["total"] == 0
+
+
+def test_revenue_nature_entry_excluded_from_get_obligation(obligations_db):
+    entry = _revenue_entry()
+    assert get_obligation(1, "entry", entry["id"], include_sensitive=True) is None
+
+
+# --- Computed overdue status (Fix round 1 / Finding 2) ----------------------
+# "Status de atraso é calculado por data civil e saldo; preservar estado
+# original no banco" — overdue is a read-time derived value, never persisted.
+
+
+def _past_due_entry():
+    account = accounts.account_by_key(COMPANY, "rent")
+    return create_entry(EntryCommand(
+        company_id=COMPANY, account_id=account["id"], amount_cents=30_000,
+        competence="2026-01", source="manual", external_id=None,
+        due_date=date.today() - timedelta(days=1), description="Aluguel atrasado",
+    ))
+
+
+def test_past_due_open_entry_reports_overdue_in_list(obligations_db):
+    entry = _past_due_entry()
+
+    result = list_obligations(1, include_sensitive=True)
+    item = next(i for i in result["items"] if i["id"] == str(entry["id"]))
+    assert item["status"] == "overdue"
+
+
+def test_status_filter_overdue_matches_computed_status_not_raw_db_value(obligations_db):
+    _past_due_entry()
+
+    overdue_result = list_obligations(1, status="overdue", include_sensitive=True)
+    assert len(overdue_result["items"]) == 1
+
+    open_result = list_obligations(1, status="open", include_sensitive=True)
+    assert len(open_result["items"]) == 0
+
+
+def test_past_due_entry_reports_overdue_in_get_obligation(obligations_db):
+    entry = _past_due_entry()
+    item = get_obligation(1, "entry", entry["id"], include_sensitive=True)
+    assert item["status"] == "overdue"
+
+
+def test_past_due_loan_installment_reports_overdue(obligations_db):
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Atrasado", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=98_000,
+        installments=[
+            {
+                "number": 1,
+                "due_date": (date.today() - timedelta(days=3)).isoformat(),
+                "principal_cents": 100_000, "interest_cents": 2_000,
+            },
+        ],
+        start_date=(date.today() - timedelta(days=30)).isoformat(),
+    )
+    position = loans.loan_position(loan["id"])
+    installment_id = position["installments"][0]["id"]
+
+    result = list_obligations(1, include_sensitive=True)
+    item = next(i for i in result["items"] if i["id"] == str(installment_id))
+    assert item["status"] == "overdue"
+
+    detail = get_obligation(1, "loan_installment", installment_id, include_sensitive=True)
+    assert detail["status"] == "overdue"
+
+    overdue_result = list_obligations(1, status="overdue", include_sensitive=True)
+    assert any(i["id"] == str(installment_id) for i in overdue_result["items"])
+    open_result = list_obligations(1, status="open", include_sensitive=True)
+    assert all(i["id"] != str(installment_id) for i in open_result["items"])
+
+
+def test_future_due_entry_does_not_report_overdue(obligations_db):
+    # `_partial_entry()`'s due_date (2026-09-20) is not yet past "today" —
+    # consistent with every other fixed-date fixture in this file (e.g.
+    # `test_get_obligation_entry_detail` already asserts a bare
+    # "partially_paid" for it with no overdue branch).
+    entry = _partial_entry()
+    result = list_obligations(1, include_sensitive=True)
+    item = next(i for i in result["items"] if i["id"] == str(entry["id"]))
+    assert item["status"] == "partially_paid"
