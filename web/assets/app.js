@@ -145,6 +145,8 @@ function onDelegatedClick(ev) {
   if (period) return selectPeriod(period.dataset.period);
   const sync = ev.target.closest('[data-sync]');
   if (sync) return triggerSync(sync.dataset.sync);
+  const createAction = ev.target.closest('[data-create-action]');
+  if (createAction) return onCreateActionFromAlert({currentTarget: createAction});
   if (ev.target.closest('[data-logout]')) return logout();
 }
 
@@ -406,7 +408,7 @@ function closeNav(returnFocus) {
   if (returnFocus) toggle.focus();
 }
 
-const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'reposicao', 'produto',
+const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'reposicao', 'produto', 'acoes',
   'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis', 'sync', 'configuracoes'];
 const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis'];
 const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
@@ -500,7 +502,7 @@ async function renderPage() {
   }
   const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
     diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao,
-    reposicao: renderReposicao, produto: renderProdutoDetalhe};
+    reposicao: renderReposicao, produto: renderProdutoDetalhe, acoes: renderAcoes};
   if (APP.page === 'sync') return renderSyncPage();  // user navigated away mid-fetch
   (renderers[APP.page] || renderResumo)(APP.dashboard);
 }
@@ -633,8 +635,29 @@ function alertsBlock(alerts) {
   return `<div class="alert-list">${alerts.map((a) => {
     const f = ALERT_FILTERS[a.type];
     const link = f ? `<a class="alert-action" href="${routeHash('estoque', APP.period, new URLSearchParams({filtro: f}))}">Ver produtos →</a>` : '';
-    return `<div class="alert-card severity-${esc(a.severity)}"><span>${icon('triangle-alert')} ${esc(a.message)}</span>${link}</div>`;
+    return `<div class="alert-card severity-${esc(a.severity)}"><span>${icon('triangle-alert')} ${esc(a.message)}</span>
+      ${link}
+      <button type="button" class="btn-secondary" data-create-action="${esc(a.type)}" data-action-title="${esc(a.message)}">Criar ação</button></div>`;
   }).join('')}</div>`;
+}
+
+async function onCreateActionFromAlert(event) {
+  const btn = event.currentTarget;
+  const alertKey = btn.dataset.createAction;
+  const title = btn.dataset.actionTitle;
+  btn.disabled = true;
+  btn.textContent = 'Criando…';
+  try {
+    await api(`/api/companies/${APP.company}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({alert_key: alertKey, alert_version: title, title}),
+    });
+    btn.textContent = 'Ação criada ✓';
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Criar ação';
+    alert('Erro ao criar ação: ' + e.message);
+  }
 }
 
 // "The month in one sentence" — revenue vs. last month and vs. the same month last year
