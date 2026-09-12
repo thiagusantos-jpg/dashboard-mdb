@@ -8,6 +8,14 @@ from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
 from ..finance.entries import EntryCommand, create_entry, reverse_entry, settle_entry
+from ..finance.entry_management import (
+    EntryConflictError,
+    EntryNotFoundError,
+    EntryValidationError,
+    cancel_entry,
+    entry_history,
+    update_entry,
+)
 from ..finance.recurrence import create_recurrence, generate_occurrences
 
 
@@ -34,6 +42,22 @@ class Settlement(BaseModel):
 class Reversal(BaseModel):
     reversed_at: date
     reason: str = Field(min_length=1, max_length=500)
+
+
+class EntryUpdate(BaseModel):
+    expected_version: int
+    account_id: Optional[int] = None
+    counterparty_id: Optional[int] = None
+    description: Optional[str] = None
+    amount_cents: Optional[int] = None
+    competence: Optional[str] = None
+    due_date: Optional[date] = None
+    notes: Optional[str] = None
+
+
+class EntryCancel(BaseModel):
+    expected_version: int
+    reason: str
 
 
 class RecurrenceCreate(BaseModel):
@@ -75,6 +99,49 @@ def _require_entry_access(
     if not row:
         raise HTTPException(404, "Lançamento não encontrado.")
     _require_sensitive_if_needed(company, row["account_id"], auth)
+
+
+# --- New B1 routes (edit / cancel / history) -------------------------------
+#
+# NOTE: unlike the routes above (which raise HTTPException with a plain
+# string `detail=`), the three routes below use the shared-contract error
+# body `{code, message, fields}` per the B plan. This intentionally makes
+# this file inconsistent until C2 updates the frontend's `api()` helper to
+# handle both shapes (see master plan, C2 task notes).
+
+_BIGINT_ID_FIELDS = ("id", "account_id", "counterparty_id", "recurrence_id", "created_by", "store")
+
+
+def _stringify_ids(payload: dict) -> dict:
+    result = dict(payload)
+    for field in _BIGINT_ID_FIELDS:
+        if field in result and result[field] is not None:
+            result[field] = str(result[field])
+    return result
+
+
+def _stringify_history_item(item: dict) -> dict:
+    result = dict(item)
+    if result.get("id") is not None:
+        result["id"] = str(result["id"])
+    if result.get("actor_id") is not None:
+        result["actor_id"] = str(result["actor_id"])
+    return result
+
+
+def _error_detail(code: str, message: str, fields=None) -> dict:
+    return {"code": code, "message": message, "fields": fields}
+
+
+def _entry_account_or_404(company: int, entry_id: int) -> int:
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT account_id FROM financial_entries WHERE id=? AND company=?",
+            (entry_id, company),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, _error_detail("not_found", "Lançamento não encontrado."))
+    return row["account_id"]
 
 
 @router.get("/entries")
@@ -231,3 +298,82 @@ def generate_recurrence(
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.patch("/entries/{entry_id}")
+def patch_entry(
+    company: int,
+    entry_id: int,
+    body: EntryUpdate,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.write")
+    ),
+):
+    current_account_id = _entry_account_or_404(company, entry_id)
+    _require_sensitive_if_needed(company, current_account_id, auth)
+    if body.account_id is not None and body.account_id != current_account_id:
+        _require_sensitive_if_needed(company, body.account_id, auth)
+
+    patch = body.dict(exclude_unset=True, exclude={"expected_version"})
+    try:
+        updated = update_entry(
+            company,
+            entry_id,
+            patch,
+            expected_version=body.expected_version,
+            actor_id=auth.user_id,
+        )
+    except EntryNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", str(exc))) from exc
+    except EntryConflictError as exc:
+        raise HTTPException(409, _error_detail("conflict", str(exc))) from exc
+    except EntryValidationError as exc:
+        raise HTTPException(
+            422, _error_detail("invalid_fields", str(exc), exc.fields)
+        ) from exc
+    return _stringify_ids(updated)
+
+
+@router.post("/entries/{entry_id}/cancel")
+def cancel(
+    company: int,
+    entry_id: int,
+    body: EntryCancel,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.write")
+    ),
+):
+    _require_entry_access(company, entry_id, auth)
+    try:
+        cancelled = cancel_entry(
+            company,
+            entry_id,
+            expected_version=body.expected_version,
+            reason=body.reason,
+            actor_id=auth.user_id,
+        )
+    except EntryNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", str(exc))) from exc
+    except EntryConflictError as exc:
+        raise HTTPException(409, _error_detail("conflict", str(exc))) from exc
+    except EntryValidationError as exc:
+        raise HTTPException(
+            422, _error_detail("invalid_fields", str(exc), exc.fields)
+        ) from exc
+    return _stringify_ids(cancelled)
+
+
+@router.get("/entries/{entry_id}/history")
+def get_history(
+    company: int,
+    entry_id: int,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.read")
+    ),
+):
+    _require_entry_access(company, entry_id, auth)
+    try:
+        history = entry_history(company, entry_id)
+    except EntryNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", str(exc))) from exc
+    return [_stringify_history_item(item) for item in history]
