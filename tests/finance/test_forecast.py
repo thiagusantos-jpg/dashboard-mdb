@@ -83,3 +83,75 @@ def test_realized_days_use_ledger_not_forecast_sources(forecast_db):
 def test_invalid_scenario_is_rejected(forecast_db):
     with pytest.raises(ValueError):
         forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), "unicorn", as_of=AS_OF)
+
+
+def test_partial_balance_stays_in_forecast(forecast_db):
+    from backend.finance.entries import settle_entry
+    account = accounts.account_by_key(1, 'rent')
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account['id'], amount_cents=100000,
+        competence='2026-09', due_date=date(2026, 9, 20), source='manual',
+        external_id=None, description='Aluguel'))
+    settle_entry(entry['id'], 40000, paid_at=date(2026, 9, 12))
+    result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
+    amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
+               if i['source'] == 'financial_entries']
+    assert amounts == [-60000]
+
+
+def test_fully_paid_entry_has_no_forecast_balance(forecast_db):
+    from backend.finance.entries import settle_entry
+    account = accounts.account_by_key(1, 'rent')
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account['id'], amount_cents=50000,
+        competence='2026-09', due_date=date(2026, 9, 20), source='manual',
+        external_id=None, description='Aluguel'))
+    settle_entry(entry['id'], 50000, paid_at=date(2026, 9, 12))
+    result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
+    amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
+               if i['source'] == 'financial_entries']
+    assert amounts == []
+
+
+def test_partial_balance_carries_forward_when_overdue(forecast_db):
+    from backend.finance.entries import settle_entry
+    account = accounts.account_by_key(1, 'rent')
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account['id'], amount_cents=100000,
+        competence='2026-09', due_date=date(2026, 9, 5), source='manual',
+        external_id=None, description='Aluguel vencido'))
+    settle_entry(entry['id'], 30000, paid_at=date(2026, 9, 5))
+    result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
+    today_bucket = next(d for d in result['days'] if d['date'] == AS_OF.isoformat())
+    amounts = [i['amount_cents'] for i in today_bucket['items']
+               if i['source'] == 'financial_entries']
+    assert amounts == [-70000]
+
+
+def test_reversed_payment_removes_entry_from_open_forecast(forecast_db):
+    from backend.finance.entries import settle_entry, reverse_entry
+    account = accounts.account_by_key(1, 'rent')
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account['id'], amount_cents=100000,
+        competence='2026-09', due_date=date(2026, 9, 20), source='manual',
+        external_id=None, description='Aluguel'))
+    settle_entry(entry['id'], 40000, paid_at=date(2026, 9, 12))
+    reverse_entry(entry['id'], reversed_at=date(2026, 9, 12), reason='Erro de lançamento')
+    result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
+    amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
+               if i['source'] == 'financial_entries']
+    assert amounts == []
+
+
+def test_future_window_shows_remaining_balance(forecast_db):
+    from backend.finance.entries import settle_entry
+    account = accounts.account_by_key(1, 'rent')
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account['id'], amount_cents=100000,
+        competence='2026-10', due_date=date(2026, 10, 5), source='manual',
+        external_id=None, description='Aluguel de outubro'))
+    settle_entry(entry['id'], 25000, paid_at=date(2026, 9, 12))
+    result = forecast(1, date(2026, 10, 1), date(2026, 10, 10), as_of=AS_OF)
+    day = next(d for d in result['days'] if d['date'] == '2026-10-05')
+    amounts = [i['amount_cents'] for i in day['items'] if i['source'] == 'financial_entries']
+    assert amounts == [-75000]
