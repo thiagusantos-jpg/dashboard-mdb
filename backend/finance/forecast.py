@@ -38,10 +38,19 @@ def _balance_before_on_connection(conn, company: int, day: date) -> int:
 # (grouped by due_date in Python), one for every still-open loan installment
 # the same way — turning O(days) queries into O(1), independent of window
 # size. `forecast()` runs all three (plus, when scenario!='base', a fourth
-# for the scenario baseline) inside a SINGLE `db.connection()`/transaction —
-# "consistência de um snapshot por cálculo": nothing else can write between
-# them and produce a forecast whose days are assembled from different points
-# in time. No caching is introduced anywhere here, per the brief's explicit
+# for the scenario baseline) inside a SINGLE `db.connection(snapshot=True)`
+# block — "consistência de um snapshot por cálculo". `snapshot=True` (see
+# `database.py::connection`) puts the connection in an explicit read
+# transaction (SQLite: `BEGIN DEFERRED`, relying on this project's WAL journal
+# mode so the transaction's view is fixed at its first read; PostgreSQL:
+# `REPEATABLE READ`) before any statement runs, so every one of these
+# SELECTs reads from the exact same point-in-time snapshot — a payment or
+# entry write committed by another connection while this block is running
+# cannot land "between" two of these queries and produce a forecast
+# assembled from two different moments; the whole calculation sees either
+# every effect of that write or none of them. The block never commits (it is
+# read-only by construction) — `connection(snapshot=True)` always rolls back
+# on exit. No caching is introduced anywhere here, per the brief's explicit
 # "não implementar cache sem chave de revisão que inclua pagamentos/catálogos"
 # — this only removes redundant per-day querying.
 
@@ -171,7 +180,7 @@ def forecast(company: int, start: date, end: date, scenario: str = "base", *, as
         raise ValueError("O período final deve ser posterior ao inicial.")
     today = as_of or date.today()
 
-    with db.connection() as conn:
+    with db.connection(snapshot=True) as conn:
         balance = _balance_before_on_connection(conn, company, start)
         # Reused for the response's starting_balance_cents below instead of
         # querying it again with the same arguments (A5 baseline doc flagged

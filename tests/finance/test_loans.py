@@ -350,3 +350,66 @@ def test_cancel_loan_with_disbursement_and_no_payments_is_rejected(loan_db):
     )
     with pytest.raises(loans.LoanConflictError):
         loans.cancel_loan(COMPANY, loan["id"], reason="Tentativa inválida")
+
+
+# --- Task B7 fix round 1: the brief's own literal `len(active_schedules)==1`
+# assertion, checked directly against loan_schedules.status. Both existing
+# adjacent tests (test_renegotiated_loan_shows_only_active_schedule_installment
+# in test_forecast.py, and test_old_schedule_excluded_after_renegotiation in
+# test_obligations.py) only prove installments filtered through
+# `s.status='active'` become invisible — a second row left at
+# `status='active'` after renegotiate/cancel would stay invisible to either
+# query and both tests would still pass. These count `loan_schedules` rows
+# directly to actually pin the invariant down.
+
+
+def _active_schedule_count(loan_id):
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM loan_schedules WHERE loan_id=? AND status='active'",
+            (loan_id,),
+        ).fetchone()
+    return row["c"]
+
+
+def test_renegotiate_leaves_exactly_one_active_schedule(loan_db):
+    loan = make_loan(principal=90_000_00, installments=3)
+    assert _active_schedule_count(loan["id"]) == 1
+
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-12-10", "principal_cents": 90_000_00, "interest_cents": 9_00}],
+        reason="Prazo estendido",
+    )
+
+    # The brief's own literal assertion: exactly one active schedule after a
+    # renegotiation — the old one must be flipped to 'closed', not merely
+    # ignored by query filters, and not left duplicated as 'active'.
+    assert _active_schedule_count(loan["id"]) == 1
+
+
+def test_renegotiate_twice_leaves_exactly_one_active_schedule(loan_db):
+    loan = make_loan(principal=90_000_00, installments=3)
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-12-10", "principal_cents": 90_000_00, "interest_cents": 9_00}],
+        reason="Primeira renegociação",
+    )
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2027-01-10", "principal_cents": 90_000_00, "interest_cents": 5_00}],
+        reason="Segunda renegociação",
+    )
+    assert _active_schedule_count(loan["id"]) == 1
+
+
+def test_cancel_loan_leaves_zero_active_schedules(loan_db):
+    loan = make_loan()
+    assert _active_schedule_count(loan["id"]) == 1
+
+    loans.cancel_loan(COMPANY, loan["id"], reason="Contrato não utilizado")
+
+    # cancel_loan flips the active schedule's status to 'cancelled' (see
+    # backend/finance/loans.py::cancel_loan) — verify no schedule is left
+    # 'active' after a successful cancellation.
+    assert _active_schedule_count(loan["id"]) == 0

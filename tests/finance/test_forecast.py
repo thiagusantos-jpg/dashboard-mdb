@@ -7,6 +7,7 @@ import pytest
 
 from backend import database as db
 from backend.finance import accounts, ledger, loans
+from backend.finance import forecast as forecast_module
 from backend.finance.entries import EntryCommand, create_entry
 from backend.finance.forecast import SCENARIOS, forecast
 
@@ -541,3 +542,69 @@ def test_forecast_optimization_is_equivalent_to_reference_non_base_scenario(fore
     reference = _reference_forecast(COMPANY, date(2026, 9, 1), date(2026, 10, 31), "optimistic", as_of=AS_OF)
 
     assert _normalize(optimized) == _normalize(reference)
+
+
+# --- Task B7 fix round 1: snapshot consistency --------------------------
+
+
+def test_forecast_snapshot_isolation_ignores_concurrent_write_mid_calculation(forecast_db):
+    """"Consistência de um snapshot por cálculo": forecast() must read every
+    one of its several internal SELECTs from a single, fixed point-in-time
+    view — a write another connection commits WHILE forecast() is still
+    running must not appear in that same forecast() call, even though it
+    lands strictly between two of forecast()'s own queries.
+
+    This monkeypatches the FIRST grouped query forecast() runs
+    (_realized_events_by_day_on_connection) so that, as a side effect right
+    after it returns its real result, a brand-new financial entry is created
+    and committed through a completely separate, non-snapshot connection
+    (`create_entry` opens its own `db.connection()`) — a genuine interleaved
+    write from outside forecast()'s snapshot transaction, landing before
+    forecast()'s LATER query (_open_entries_by_due_date_on_connection, which
+    would otherwise pick up this exact entry) runs. If forecast()'s snapshot
+    guarantee holds, the entry must be invisible to this forecast() call
+    entirely (the "before" state) — never a mix where some of forecast()'s
+    queries see it and others don't.
+    """
+    account = accounts.account_by_key(COMPANY, "rent")
+    real_realized = forecast_module._realized_events_by_day_on_connection
+
+    def interleaved_realized(conn, company, start, end):
+        result = real_realized(conn, company, start, end)
+        create_entry(EntryCommand(
+            company_id=COMPANY, account_id=account["id"], amount_cents=77_000,
+            competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+            external_id=None, description="Lançamento concorrente",
+        ))
+        return result
+
+    # Patched by hand (not pytest's `monkeypatch` fixture) so it can be
+    # restored on its own, without also reverting the `forecast_db` fixture's
+    # own monkeypatches (DB_PATH/PG) that share that fixture instance.
+    forecast_module._realized_events_by_day_on_connection = interleaved_realized
+    try:
+        result = forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), "base", as_of=AS_OF)
+    finally:
+        forecast_module._realized_events_by_day_on_connection = real_realized
+
+    amounts = [
+        i["amount_cents"] for d in result["days"] for i in d["items"]
+        if i["source"] == "financial_entries"
+    ]
+    assert amounts == [], (
+        "a write committed by a separate connection strictly between two of "
+        "forecast()'s own queries must not leak into this forecast() call — "
+        "snapshot isolation broken"
+    )
+
+    # Sanity check: the concurrent write really happened (and targeted the
+    # right company/window) — a FRESH forecast() call, whose snapshot is
+    # taken after the concurrent write already committed, must see it. This
+    # proves the assertion above is really about snapshot isolation, not
+    # about the write silently failing.
+    later = forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), "base", as_of=AS_OF)
+    later_amounts = [
+        i["amount_cents"] for d in later["days"] for i in d["items"]
+        if i["source"] == "financial_entries"
+    ]
+    assert -77_000 in later_amounts

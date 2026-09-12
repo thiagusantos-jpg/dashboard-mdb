@@ -54,18 +54,46 @@ class _PGConn:
         self._conn.close()
 
 @contextmanager
-def connection(path=None):
+def connection(path=None, snapshot=False):
+    """`snapshot=True` opens a connection whose statements all read from one
+    consistent point-in-time view of the database, immune to any write another
+    connection commits while this `with` block is still open — used by
+    `forecast.py::forecast()`, which issues several SELECTs that must be
+    assembled from a single moment, not several independent reads. It is
+    read-only by contract: the block is expected to run no writes, and it is
+    always rolled back (never committed) on the way out, successful or not.
+
+    - SQLite: the default `isolation_level=""` only opens an implicit
+      transaction before a write statement, never before a bare SELECT — so
+      without this, each SELECT in a `with connection():` block is its own
+      independent read. Issuing an explicit `BEGIN DEFERRED` immediately
+      after connecting (before any statement runs) starts a real transaction;
+      in this codebase's WAL journal mode (`PRAGMA journal_mode=WAL`, set in
+      `_initialize_sqlite`), a deferred transaction's snapshot is fixed at
+      its first read and does not change even if another connection commits
+      a write afterwards — verified directly against this project's sqlite3
+      build (see `tests/finance/test_forecast.py`'s snapshot-isolation test).
+    - PostgreSQL: a plain `psycopg.connect(...)` here otherwise runs under the
+      server default `READ COMMITTED`, where every statement gets its own
+      fresh snapshot. Setting `REPEATABLE READ` before the first statement
+      gives the whole transaction one snapshot taken at its first query,
+      same guarantee as the SQLite path above.
+    """
     if PG:
         conn = psycopg.connect(settings.DATABASE_URL, row_factory=dict_row)
+        if snapshot:
+            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         db = _PGConn(conn)
     else:
         conn = sqlite3.connect(str(path or settings.DB_PATH), timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
+        if snapshot:
+            conn.execute('BEGIN DEFERRED')
         db = conn
     try:
         yield db
-        db.commit()
+        db.rollback() if snapshot else db.commit()
     except BaseException:
         db.rollback()
         raise
