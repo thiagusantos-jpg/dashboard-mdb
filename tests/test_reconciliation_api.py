@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+from fastapi.testclient import TestClient
+
+from backend import api, database as db, security
+from backend.finance import accounts
+from backend.finance.entries import EntryCommand, create_entry
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "PG", False)
+    monkeypatch.setattr(db.settings, "DB_PATH", tmp_path / "reconciliation-api.sqlite3")
+    monkeypatch.setattr(security, "access_password", lambda: "bootstrap-password")
+    monkeypatch.setenv("MDB_DISABLE_WORKER", "1")
+    security._attempts.clear()
+    db.initialize()
+    with db.connection() as conn:
+        conn.execute("INSERT INTO companies(id,name) VALUES(1,'Loja 1')")
+    with TestClient(api.app) as test_client:
+        login = test_client.post(
+            "/api/login",
+            json={"email": "admin@loja.test", "password": "bootstrap-password"},
+        )
+        assert login.status_code == 200, login.text
+        test_client.headers["x-csrf-token"] = login.json()["csrf"]
+        yield test_client
+
+
+def test_suggest_and_confirm_via_api(client):
+    account = accounts.account_by_key(1, "sales")
+    create_entry(EntryCommand(
+        company_id=1, account_id=account["id"], amount_cents=1_000_00,
+        competence="2026-09", due_date=date(2026, 9, 10), source="manual",
+        external_id=None, description="Venda cartão",
+    ))
+    cash_account = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Stone", "kind": "payment"}
+    ).json()
+    event = client.post(
+        "/api/companies/1/finance/cash-events",
+        json={"cash_account_id": cash_account["id"], "amount_cents": 1_000_00,
+              "occurred_at": "2026-09-12", "description": "Crédito"},
+    ).json()
+
+    response = client.post(
+        "/api/companies/1/finance/reconciliation/suggest",
+        json={"cash_event_id": event["id"]},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "auto_matched"
+
+    groups = client.get("/api/companies/1/finance/reconciliation").json()
+    assert len(groups) == 1
