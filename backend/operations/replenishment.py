@@ -40,16 +40,6 @@ def recommend_one(
     }
 
 
-def _operating_days_elapsed(company: int, as_of: date) -> int:
-    start = as_of.replace(day=1)
-    exceptions = {
-        row["date"]: row["status"]
-        for row in organization.calendar_exceptions(company)
-        if start <= date.fromisoformat(row["date"]) <= as_of
-    }
-    return organization.operating_days(start.isoformat(), as_of.isoformat(), exceptions=exceptions)
-
-
 def _resolve_int(company: int, key: str, product_id, as_of: str, default: int) -> int:
     value = accounts.resolve_parameter(company, key, as_of, product=product_id)
     return int(value) if value is not None else default
@@ -58,7 +48,10 @@ def _resolve_int(company: int, key: str, product_id, as_of: str, default: int) -
 def recommend(company: int, store: Optional[int], as_of: date) -> list:
     period = f"{as_of.year:04}-{as_of.month:02}"
     catalog = inventory_catalog(company, period)
-    open_days = max(_operating_days_elapsed(company, as_of), 1)
+    month_start = as_of.replace(day=1)
+    open_days = max(
+        organization.operating_days_for_company(company, month_start.isoformat(), as_of.isoformat()), 1
+    )
     as_of_iso = as_of.isoformat()
 
     recommendations = []

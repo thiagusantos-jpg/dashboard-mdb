@@ -606,7 +606,8 @@ function renderVisao(data) {
   doList.push(`${icon('dollar-sign')} <strong>Meta de lucro líquido</strong>: ${brl(lr)}`);
   const watchList = [];
   if (vc != null) watchList.push(`${icon('users')} <strong>Fluxo de clientes</strong>: variou ${signedPct(vc)} vs o mesmo período do ano anterior`);
-  watchList.push(`${icon('bar-chart-3')} <strong>Margem real</strong> (após custo fixo): manter acima de ${META_MARGEM_REAL}% (atual: ${pct1(netMargin)})`);
+  const marginGoal = data.margin_goal_pct != null ? data.margin_goal_pct : META_MARGEM_REAL;
+  watchList.push(`${icon('bar-chart-3')} <strong>Margem real</strong> (após custo fixo): manter acima de ${dec2(marginGoal)}% (atual: ${pct1(netMargin)})`);
   watchList.push(`${icon('tag')} <strong>Erosão</strong>: ${eros.length} produtos precisam de reajuste`);
   if (pesoMorto.length > 50) watchList.push(`${icon('trash-2')} <strong>Peso Morto</strong>: ${num(pesoMorto.length)} produtos a avaliar`);
 

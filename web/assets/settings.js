@@ -38,6 +38,7 @@ async function renderSettingsPage() {
     if (section === 'usuarios') return await renderUserSettings();
     if (section === 'calendario') return await renderCalendarSettings();
     if (section === 'integracoes') return await renderIntegrationsSettings();
+    if (section === 'metas') return await renderGoalsSettings();
     return renderPlannedSettings(section);
   } catch (error) {
     document.getElementById('content').innerHTML = settingsShell(
@@ -277,7 +278,6 @@ async function renderCalendarSettings() {
 
 function renderPlannedSettings(section) {
   const descriptions = {
-    metas: 'Metas de faturamento, margem e resultado serão configuradas aqui.',
     alertas: 'Preferências, limites e destinatários dos alertas serão configurados aqui.',
   };
   document.getElementById('content').innerHTML = settingsShell(
@@ -362,5 +362,60 @@ async function onRevokeStoneConnection(event) {
     renderIntegrationsSettings();
   } catch (e) {
     alert('Erro ao revogar: ' + e.message);
+  }
+}
+
+async function renderGoalsSettings() {
+  const progress = await api(`/api/companies/${APP.company}/goals/progress`);
+  document.getElementById('content').innerHTML = settingsShell('metas', `
+    <div class="settings-heading">
+      <div><h2>Metas de faturamento e margem</h2><p>Usadas no Resumo Executivo e na Visão Futurista.</p></div>
+    </div>
+    ${progress ? `
+      <div class="kpi-grid kpi-grid-3">
+        ${kpi('Meta do mês', money(progress.target_cents))}
+        ${kpi('Realizado', money(progress.achieved_cents))}
+        ${kpi('Necessário/dia útil restante', progress.required_per_day == null ? '—' : money(progress.required_per_day))}
+      </div>` : '<div class="story-box">Nenhuma meta de faturamento configurada para o período atual.</div>'}
+    <form id="goals-form" class="settings-form">
+      <div class="form-grid">
+        <div><label class="field-label" for="goal-revenue">Meta de faturamento mensal (R$)</label>
+          <input id="goal-revenue" class="login-input" type="number" min="0" step="0.01"></div>
+        <div><label class="field-label" for="goal-margin">Meta de margem real após custo fixo (%)</label>
+          <input id="goal-margin" class="login-input" type="number" min="0" max="100" step="0.1"></div>
+        <div><label class="field-label" for="goal-effective-from">Válida a partir de</label>
+          <input id="goal-effective-from" class="login-input" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+      </div>
+      <div class="settings-actions">
+        <button class="btn-primary" type="submit">Salvar metas</button>
+        <span id="goals-status" class="sim-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>`);
+  document.getElementById('goals-form').addEventListener('submit', onSaveGoals);
+}
+
+async function onSaveGoals(event) {
+  event.preventDefault();
+  const status = document.getElementById('goals-status');
+  status.textContent = 'Salvando…';
+  const effectiveFrom = document.getElementById('goal-effective-from').value;
+  const revenue = document.getElementById('goal-revenue').value;
+  const margin = document.getElementById('goal-margin').value;
+  try {
+    if (revenue) {
+      await api(`/api/companies/${APP.company}/goals`, {
+        method: 'PUT',
+        body: JSON.stringify({key: 'revenue', value: Math.round(parseFloat(revenue.replace(',', '.')) * 100), effective_from: effectiveFrom}),
+      });
+    }
+    if (margin) {
+      await api(`/api/companies/${APP.company}/goals`, {
+        method: 'PUT',
+        body: JSON.stringify({key: 'margin', value: parseFloat(margin.replace(',', '.')), effective_from: effectiveFrom}),
+      });
+    }
+    renderGoalsSettings();
+  } catch (e) {
+    status.textContent = 'Erro: ' + e.message;
   }
 }
