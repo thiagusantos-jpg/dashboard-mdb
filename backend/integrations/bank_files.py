@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import re
+import secrets
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -17,9 +19,37 @@ from . import records
 MAX_BYTES = 10 * 1024 * 1024
 MAX_ROWS = 50_000
 
+# Provider tag used both as the external_records `source` (existing
+# convention) and as the `bank_cash_links.provider` value for this import
+# path — mirrors the provider-tagging vocabulary used elsewhere in
+# backend/integrations (e.g. open_finance.py/stone_receivables.py's
+# provider-neutral contracts), kept as a plain string since bank_file
+# imports have no per-integration provider name of their own.
+PROVIDER_BANK_FILE = "bank_file"
+
+# How many days around an imported transaction's date to look for a
+# candidate cash_event — mirrors the window_days precedent in
+# backend/finance/reconciliation.py::suggest, but kept tight since a
+# bank-line-to-cash-event match represents the SAME real-world money
+# movement (not an independent entry being reconciled against a credit),
+# so dates should already be very close.
+CANDIDATE_WINDOW_DAYS = 3
+
 
 class BankFileError(ValueError):
     pass
+
+
+class BankImportConflict(ValueError):
+    """Raised when the caller's preview_hash no longer matches the file being
+    committed, or when a `link:<cash_event_id>` decision's candidate no
+    longer validates (scope, account or amount) at commit time — e.g.
+    because a concurrent import or payment consumed it since the preview
+    was generated. Maps to HTTP 409."""
+
+
+def _new_id() -> int:
+    return secrets.randbits(63) or 1
 
 
 @dataclass(frozen=True)
@@ -169,4 +199,274 @@ def import_bank_file(company: int, cash_account_id: int, filename: str, content:
         "total": len(transactions),
         "imported": imported,
         "duplicates": duplicates,
+    }
+
+
+# --- Preview -> decide -> commit flow, teaching the import to recognize an
+# already-recorded payment's cash_event instead of always creating a new one
+# (the "caixa duplicado" bug: a payment made via
+# backend/finance/payments.py::record_payment(..., cash_account_id=...)
+# already creates its own cash_events row for the real-world outflow; later
+# importing the bank statement covering that same movement must offer to
+# LINK to that existing row rather than blindly creating a second one). ----
+
+
+def _linked_cash_event_ids(conn) -> set:
+    return {
+        row["cash_event_id"]
+        for row in conn.execute("SELECT cash_event_id FROM bank_cash_links")
+    }
+
+
+def _reversed_cash_event_ids(conn) -> set:
+    return {
+        row["reversed_event_id"]
+        for row in conn.execute(
+            "SELECT reversed_event_id FROM cash_events WHERE reversed_event_id IS NOT NULL"
+        )
+    }
+
+
+def _candidate_cash_events(
+    conn, company: int, cash_account_id: int, amount_cents: int, around: date,
+) -> list:
+    """Suggest cash_events that MIGHT represent the same real-world movement
+    as an imported bank line: same company/account, exact amount match, and
+    an occurred_at within CANDIDATE_WINDOW_DAYS of the transaction's date.
+    Never a confirmation — only ever surfaced as a suggestion in the preview
+    response; the actual link only happens on the caller's explicit
+    commit-time `link:<cash_event_id>` decision for that line.
+
+    Excludes cash_events already claimed by another bank_cash_links row
+    (any provider/external_id — a real movement is linked at most once) and
+    ones that have themselves been reversed (ledger.reverse_event leaves the
+    original row in place but it no longer represents live, matchable
+    money). Restricted to kind='entry' rows (transfers and reversal rows are
+    never import-linkable) — this is the same `kind` value
+    ledger.post_cash_event always writes, whether the event was created by a
+    payment or by a prior "new"-decision bank import.
+    """
+    start = (around - timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
+    end = (around + timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
+    linked = _linked_cash_event_ids(conn)
+    reversed_ids = _reversed_cash_event_ids(conn)
+    rows = conn.execute(
+        """
+        SELECT id FROM cash_events
+        WHERE company=? AND cash_account_id=? AND kind='entry' AND amount_cents=?
+              AND occurred_at BETWEEN ? AND ?
+        ORDER BY occurred_at,id
+        """,
+        (company, cash_account_id, amount_cents, start, end),
+    ).fetchall()
+    return [row["id"] for row in rows if row["id"] not in linked and row["id"] not in reversed_ids]
+
+
+def _preview_items(conn, company: int, cash_account_id: int, transactions: list) -> list:
+    items = []
+    for tx in transactions:
+        candidates = _candidate_cash_events(
+            conn, company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
+        )
+        # A suggestion is only ever pre-selected when it is UNAMBIGUOUS (a
+        # single matching candidate) — two legitimate, independently-real
+        # outflows that happen to share amount/date must never be silently
+        # fused, so an ambiguous match defaults to "new" just like no match
+        # at all. The caller may still override any line explicitly.
+        decision = f"link:{candidates[0]}" if len(candidates) == 1 else "new"
+        items.append({
+            "external_id": tx.external_id,
+            "date": tx.date,
+            "amount_cents": tx.amount_cents,
+            "description": tx.description,
+            "candidate_cash_event_ids": [str(c) for c in candidates],
+            "decision": decision,
+        })
+    return items
+
+
+def _preview_hash(transactions: list) -> str:
+    # Deliberately hashes only the FILE's own transaction content (external
+    # id/date/amount/description) — not the candidate suggestions, which are
+    # allowed to legitimately change between preview and commit (e.g. a
+    # concurrent import claims a candidate). That kind of staleness is
+    # caught separately, per decision line, inside commit_bank_import's
+    # transaction (scope/account/amount re-validation, and the
+    # already-linked-elsewhere check) — see BankImportConflict. This hash
+    # instead guards against committing decisions against a DIFFERENT file
+    # than the one the caller actually previewed.
+    canonical = [
+        {
+            "external_id": tx.external_id,
+            "date": tx.date,
+            "amount_cents": tx.amount_cents,
+            "description": tx.description,
+        }
+        for tx in transactions
+    ]
+    blob = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def preview_bank_import(company: int, cash_account_id: int, filename: str, content: bytes) -> dict:
+    """Parse a bank file and, for each line, suggest whether it looks like a
+    brand-new movement ("new") or the same real-world outflow as an
+    already-recorded cash_event ("link:<id>") — a SUGGESTION only, never an
+    automatic decision. The caller reviews/overrides `decision` per line and
+    passes the whole set back to commit_bank_import along with
+    `preview_hash`."""
+    transactions = parse_bank_file(content, filename)
+    with db.connection() as conn:
+        items = _preview_items(conn, company, cash_account_id, transactions)
+    dates = [t.date for t in transactions]
+    return {
+        "preview_hash": _preview_hash(transactions),
+        "count": len(transactions),
+        "start": min(dates) if dates else None,
+        "end": max(dates) if dates else None,
+        "total_cents": sum(t.amount_cents for t in transactions),
+        "items": items,
+    }
+
+
+def _parse_decision(raw: str, external_id: str) -> Optional[int]:
+    """Returns None for "new", or the candidate cash_event_id for
+    "link:<id>". Raises BankFileError (-> 422) for anything else."""
+    if raw == "new":
+        return None
+    if raw.startswith("link:"):
+        raw_id = raw[len("link:"):]
+        try:
+            return int(raw_id)
+        except ValueError:
+            pass
+    raise BankFileError(f"Decisão inválida para {external_id!r}: {raw!r}")
+
+
+def commit_bank_import(
+    company: int,
+    cash_account_id: int,
+    filename: str,
+    content: bytes,
+    *,
+    decisions: dict,
+    preview_hash: str,
+) -> dict:
+    """Apply the caller's per-line decisions from a prior preview_bank_import
+    call. `decisions` maps external_id -> "new" | "link:<cash_event_id>"; a
+    line missing from the map defaults to "new" (the safe, conservative
+    choice — a link only ever happens on an explicit decision, never
+    inferred). `preview_hash` must match the CURRENT content of the file
+    being committed (see _preview_hash) or the whole commit is rejected with
+    BankImportConflict (-> 409) before touching anything.
+
+    - decision "new": identical to the historical behavior — creates a
+      fresh cash_events row, still gated by the existing
+      external_records-based duplicate-import check (unchanged).
+    - decision "link:<id>": does NOT create any cash_events row. Re-
+      validates, inside this same transaction, that the candidate still (a)
+      belongs to this company/cash_account_id (scope), (b) matches the
+      transaction's amount_cents exactly (value), and (c) is not already
+      claimed by another bank_cash_links row — any of those failing raises
+      BankImportConflict. If a bank_cash_links row for this exact
+      (company,cash_account_id,provider,external_id) ALREADY exists (a
+      genuine re-submission/retry of a previously-successful link, e.g. the
+      same statement imported again), the existing link is returned as-is
+      instead of erroring or creating a duplicate.
+    """
+    transactions = parse_bank_file(content, filename)
+    if _preview_hash(transactions) != preview_hash:
+        raise BankImportConflict(
+            "A prévia da importação mudou; gere uma nova prévia antes de confirmar."
+        )
+
+    imported = 0
+    duplicates = 0
+    linked = 0
+    with db.connection() as conn:
+        for tx in transactions:
+            version = "1"
+            already_seen = _external_record_exists(company, cash_account_id, tx.external_id, version)
+            payload = {"date": tx.date, "amount_cents": tx.amount_cents, "description": tx.description}
+            records.upsert_external_record(
+                company, PROVIDER_BANK_FILE, cash_account_id, tx.external_id, version, payload,
+                conn=conn,
+            )
+            raw_decision = decisions.get(tx.external_id, "new")
+            candidate_cash_event_id = _parse_decision(raw_decision, tx.external_id)
+
+            if candidate_cash_event_id is None:
+                if already_seen:
+                    duplicates += 1
+                    continue
+                ledger.post_cash_event(
+                    company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
+                    tx.description or f"Importado ({tx.external_id})",
+                    conn=conn,
+                )
+                imported += 1
+                continue
+
+            existing_link = conn.execute(
+                """
+                SELECT * FROM bank_cash_links
+                WHERE company=? AND cash_account_id=? AND provider=? AND external_id=?
+                """,
+                (company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id),
+            ).fetchone()
+            if existing_link:
+                # "Links duplicados retornam registro existente" — a retry of
+                # the exact same successful link, never a second link row.
+                linked += 1
+                continue
+
+            if already_seen:
+                # This external transaction was already imported before
+                # (recorded as its own external_records row) without ever
+                # being linked — retroactively linking it now would leave
+                # that earlier import's own effect (or lack thereof)
+                # inconsistent with this decision, so it is rejected rather
+                # than guessed at.
+                raise BankImportConflict(
+                    f"Esta transação já foi importada anteriormente sem vínculo: {tx.external_id!r}."
+                )
+
+            candidate = conn.execute(
+                "SELECT * FROM cash_events WHERE id=? AND company=? AND cash_account_id=?",
+                (candidate_cash_event_id, company, cash_account_id),
+            ).fetchone()
+            if not candidate:
+                raise BankImportConflict(
+                    f"Candidato de conciliação inválido para {tx.external_id!r}."
+                )
+            if int(candidate["amount_cents"]) != int(tx.amount_cents):
+                raise BankImportConflict(
+                    f"Valor do candidato não corresponde à transação {tx.external_id!r}."
+                )
+            if conn.execute(
+                "SELECT 1 FROM bank_cash_links WHERE cash_event_id=?",
+                (candidate_cash_event_id,),
+            ).fetchone():
+                raise BankImportConflict(
+                    f"Candidato já vinculado a outra transação importada: {tx.external_id!r}."
+                )
+
+            conn.execute(
+                """
+                INSERT INTO bank_cash_links(
+                    id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
+                    candidate_cash_event_id, db.now(),
+                ),
+            )
+            linked += 1
+
+    return {
+        "total": len(transactions),
+        "imported": imported,
+        "duplicates": duplicates,
+        "linked": linked,
     }

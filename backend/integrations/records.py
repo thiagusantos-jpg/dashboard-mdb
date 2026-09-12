@@ -33,52 +33,56 @@ def upsert_external_record(
     external_id,
     version,
     payload,
+    *,
+    conn=None,
 ) -> dict:
+    """Idempotent upsert of one external_records row. When `conn` is given,
+    every read/write happens on the CALLER's connection/transaction with no
+    internal commit (mirrors backend/finance/ledger.py::post_cash_event's
+    established conn= pattern) — needed by
+    backend/integrations/bank_files.py::commit_bank_import, which wraps a
+    whole import inside one atomic transaction alongside bank_cash_links
+    writes. When `conn` is omitted, behavior is EXACTLY as before: three
+    independent short transactions (read, then either the quarantine insert
+    or the record insert), preserving the original guarantee that a
+    conflicting attempt is quarantined even though the enclosing call raises
+    (see the comment below)."""
     account_id = str(account_id)
     external_id = str(external_id)
     version = str(version)
     payload_hash = _canonical_hash(payload)
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     timestamp = db.now()
-    with db.connection() as conn:
-        existing = conn.execute(
+
+    def _read_existing(c):
+        row = c.execute(
             """
             SELECT * FROM external_records
             WHERE company=? AND source=? AND account_id=? AND external_id=? AND version=?
             """,
             (company, source, account_id, external_id, version),
         ).fetchone()
-        if existing:
-            existing = dict(existing)
+        return dict(row) if row else None
 
-    if existing:
-        if existing["payload_hash"] == payload_hash:
-            return existing
-        # The conflicting attempt must survive even though upsert fails, so it's
-        # committed in its own transaction before raising — a `with` block that
-        # raises rolls its own writes back (see backend/database.py connection()).
+    def _insert_quarantine(c):
         quarantine_id = _new_id()
-        with db.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO external_record_quarantine(
-                    id,company,source,account_id,external_id,version,existing_hash,
-                    conflicting_payload_json,conflicting_hash,detected_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    quarantine_id, company, source, account_id, external_id, version,
-                    existing["payload_hash"], payload_json, payload_hash, timestamp,
-                ),
-            )
-        raise ExternalRecordConflict(
-            "Registro externo já existe com um conteúdo diferente para a mesma chave.",
-            quarantine_id,
+        c.execute(
+            """
+            INSERT INTO external_record_quarantine(
+                id,company,source,account_id,external_id,version,existing_hash,
+                conflicting_payload_json,conflicting_hash,detected_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                quarantine_id, company, source, account_id, external_id, version,
+                existing["payload_hash"], payload_json, payload_hash, timestamp,
+            ),
         )
+        return quarantine_id
 
-    record_id = _new_id()
-    with db.connection() as conn:
-        conn.execute(
+    def _insert_record(c):
+        record_id = _new_id()
+        c.execute(
             """
             INSERT INTO external_records(
                 id,company,source,account_id,external_id,version,payload_json,payload_hash,
@@ -90,8 +94,38 @@ def upsert_external_record(
                 payload_json, payload_hash, timestamp, timestamp,
             ),
         )
-        row = dict(conn.execute("SELECT * FROM external_records WHERE id=?", (record_id,)).fetchone())
-    return row
+        return dict(c.execute("SELECT * FROM external_records WHERE id=?", (record_id,)).fetchone())
+
+    if conn is not None:
+        existing = _read_existing(conn)
+        if existing:
+            if existing["payload_hash"] == payload_hash:
+                return existing
+            quarantine_id = _insert_quarantine(conn)
+            raise ExternalRecordConflict(
+                "Registro externo já existe com um conteúdo diferente para a mesma chave.",
+                quarantine_id,
+            )
+        return _insert_record(conn)
+
+    with db.connection() as own_conn:
+        existing = _read_existing(own_conn)
+
+    if existing:
+        if existing["payload_hash"] == payload_hash:
+            return existing
+        # The conflicting attempt must survive even though upsert fails, so it's
+        # committed in its own transaction before raising — a `with` block that
+        # raises rolls its own writes back (see backend/database.py connection()).
+        with db.connection() as own_conn:
+            quarantine_id = _insert_quarantine(own_conn)
+        raise ExternalRecordConflict(
+            "Registro externo já existe com um conteúdo diferente para a mesma chave.",
+            quarantine_id,
+        )
+
+    with db.connection() as own_conn:
+        return _insert_record(own_conn)
 
 
 def external_record_count(company: int = None) -> int:

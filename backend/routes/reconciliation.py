@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
 
 class ConfirmBody(BaseModel):
     entry_ids: list[int] = Field(default_factory=list)
+    payment_ids: list[int] = Field(default_factory=list)
     accept_partial: bool = False
 
 
@@ -76,7 +77,8 @@ def confirm_group(
         raise HTTPException(404, "Grupo de conciliação não encontrado.")
     try:
         return reconciliation.confirm(
-            group_id, body.entry_ids, accept_partial=body.accept_partial, created_by=auth.user_id
+            group_id, body.entry_ids, payment_ids=body.payment_ids,
+            accept_partial=body.accept_partial, created_by=auth.user_id,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

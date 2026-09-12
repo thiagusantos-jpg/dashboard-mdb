@@ -140,7 +140,34 @@ def suggest(company: int, cash_event_id: int, *, tolerance_cents: int = 0, windo
         return _row_to_group(conn, group_id)
 
 
-def confirm(group_id: int, entry_ids: list, *, accept_partial: bool = False, created_by: Optional[int] = None) -> dict:
+def confirm(
+    group_id: int,
+    entry_ids: list,
+    *,
+    payment_ids: Optional[list] = None,
+    accept_partial: bool = False,
+    created_by: Optional[int] = None,
+) -> dict:
+    """Manually resolve a `suggested`/`unmatched` group against whole
+    `financial_entries` (`entry_ids`, the original, unchanged behavior) and/or
+    specific `obligation_payments` rows (`payment_ids`, new).
+
+    `payment_ids` lets a bank credit/debit be matched against ONE SPECIFIC
+    partial-payment slice of an obligation instead of the obligation's
+    entire remaining amount — e.g. an entry paid via two separate 40 000 and
+    60 000 obligation_payments rows (backend/finance/payments.py::
+    record_payment) can have each payment reconciled independently, rather
+    than a single reconciliation forcing the whole 100 000 entry to be
+    treated as one unit ("não consumir a obrigação inteira no primeiro
+    vínculo"). A payment is reversed-out via
+    backend/finance/payments.py::reverse_payment, never through this
+    module, so a reversed payment (`reversed_at IS NOT NULL`) can never be
+    reconciled here. This is purely additive: item_type='financial_entry'
+    and 'cash_event' rows written by every existing caller are completely
+    unaffected, and old groups (which only ever contain those two item
+    types) read back exactly as before via _row_to_group.
+    """
+    payment_ids = payment_ids or []
     timestamp = db.now()
     with db.connection() as conn:
         group = conn.execute("SELECT * FROM reconciliation_groups WHERE id=?", (group_id,)).fetchone()
@@ -171,6 +198,29 @@ def confirm(group_id: int, entry_ids: list, *, accept_partial: bool = False, cre
                 (_new_id(), group_id, "financial_entry", entry_id, entry["amount_cents"], timestamp),
             )
             total += entry["amount_cents"] if entry["nature"] in _INFLOW_NATURES else -entry["amount_cents"]
+
+        linked_payments = _linked_item_ids(conn, "payment")
+        for payment_id in payment_ids:
+            if payment_id in linked_payments:
+                raise ValueError("Um dos pagamentos já está em outra conciliação.")
+            payment = conn.execute(
+                "SELECT * FROM obligation_payments WHERE id=? AND company=?",
+                (payment_id, group["company"]),
+            ).fetchone()
+            if not payment:
+                raise ValueError("Pagamento não encontrado.")
+            if payment["reversed_at"] is not None:
+                raise ValueError("Este pagamento foi estornado e não pode ser conciliado.")
+            conn.execute(
+                "INSERT INTO reconciliation_links(id,group_id,item_type,item_id,amount_cents,created_at) VALUES(?,?,?,?,?,?)",
+                (_new_id(), group_id, "payment", payment_id, payment["amount_cents"], timestamp),
+            )
+            # obligation_payments only ever records money PAID OUT (an
+            # expense/obligation settlement), never a receivable — always an
+            # outflow, unlike a financial_entry whose sign depends on its
+            # account's nature.
+            total += -payment["amount_cents"]
+
         difference = anchor["amount_cents"] - total
         if difference == 0:
             status = "manual_matched"
