@@ -16,6 +16,7 @@ from . import database as db, identity, models, permissions, security, settings
 from . import sync
 from .routes.finance_accounts import router as finance_accounts_router
 from .routes.financial_entries import router as financial_entries_router
+from .routes.cashflow import router as cashflow_router
 from .routes.financial_reports import router as financial_reports_router
 from .routes.loans import router as loans_router
 from .routes.settings import router as settings_router
@@ -67,6 +68,7 @@ app.include_router(finance_accounts_router)
 app.include_router(financial_entries_router)
 app.include_router(financial_reports_router)
 app.include_router(loans_router)
+app.include_router(cashflow_router)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver','*.vercel.app'])
 # /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
 app.add_middleware(GZipMiddleware,minimum_size=1024)
