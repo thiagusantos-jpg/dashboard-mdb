@@ -13,7 +13,8 @@ const ACTION_TRANSITIONS = {
   dismissed: [],
 };
 
-async function renderAcoes() {
+async function renderAcoes(data, token) {
+  token = token || beginPage();
   const title = '📣 Central de Ações';
   const subtitle = 'Alertas viram ações rastreáveis — quem assumiu, o que foi feito, e o resultado observado.';
   document.getElementById('content').innerHTML = `
@@ -24,11 +25,13 @@ async function renderAcoes() {
   try {
     list = await api(`/api/companies/${APP.company}/actions`);
   } catch (e) {
+    if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     document.getElementById('content').innerHTML = `
       <div class="page-title">${title}</div>
       <div class="story-box mt-16">Não foi possível carregar: ${esc(e.message)}</div>`;
     return;
   }
+  if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   const rows = list.map((a) => {
     const transitions = ACTION_TRANSITIONS[a.status] || [];
     const buttons = transitions.map(([to, label]) =>

@@ -31,25 +31,35 @@ function dateBR(iso) {
   return `${d}/${m}/${y}`;
 }
 
-function financeError(title, subtitle, error) {
+/* A GET that failed or timed out offers a manual retry instead of looping on
+ * its own or automatically re-issuing the request (never done for a POST). */
+function financeError(title, subtitle, error, retry) {
   document.getElementById('content').innerHTML = `
     <div class="page-title">${title}</div>
     <div class="page-subtitle">${subtitle}</div>
-    <div class="story-box mt-16">Não foi possível carregar: ${esc(error.message)}</div>`;
+    <div class="story-box mt-16">Não foi possível carregar: ${esc(error.message)}</div>
+    <div class="btn-row"><button type="button" class="btn-primary" id="finance-retry">Tentar novamente</button></div>`;
+  document.getElementById('finance-retry').addEventListener('click', retry);
 }
 
-function renderFinancePage() {
+/* `token` comes from app.js's renderPage() (via beginPage()) for the normal
+ * navigation path; a page re-rendering itself after a save (or a retry click)
+ * has no token yet and mints a fresh one here — that correctly invalidates
+ * any older fetch still in flight for this same route. */
+function renderFinancePage(token) {
+  token = token || beginPage();
   const renderers = {
     financeiro: renderFinanceiro, despesas: renderDespesas, 'contas-pagar': renderContasPagar,
     emprestimos: renderEmprestimos, 'fluxo-caixa': renderFluxoCaixa, conciliacao: renderConciliacao,
     recebiveis: renderRecebiveis,
   };
-  return (renderers[APP.page] || renderFinanceiro)();
+  return (renderers[APP.page] || renderFinanceiro)(token);
 }
 
 /* ---------------------------------------------------------------- Financeiro */
 
-async function renderFinanceiro() {
+async function renderFinanceiro(token) {
+  token = token || beginPage();
   const title = '💵 Financeiro';
   const subtitle = 'Resultado gerencial da competência: receita, custos, despesas e distribuições.';
   document.getElementById('content').innerHTML = `
@@ -60,8 +70,10 @@ async function renderFinanceiro() {
   try {
     result = await api(`/api/companies/${APP.company}/finance/management-result?period=${APP.period}`);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
+    return financeError(title, subtitle, e, () => renderFinanceiro());
   }
+  if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   const kpis = [
     kpi('Receita', money(result.revenue_cents)),
     kpi('CMV', money(result.cogs_cents)),
@@ -97,7 +109,8 @@ async function renderFinanceiro() {
 
 /* ---------------------------------------------------------------- Custos e Despesas */
 
-async function renderDespesas() {
+async function renderDespesas(token) {
+  token = token || beginPage();
   const title = '🧾 Custos e Despesas';
   const subtitle = 'Lançamentos de despesas por competência.';
   document.getElementById('content').innerHTML = `
@@ -111,8 +124,10 @@ async function renderDespesas() {
       api(`/api/companies/${APP.company}/finance/entries?competence=${APP.period}`),
     ]);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;
+    return financeError(title, subtitle, e, () => renderDespesas());
   }
+  if (!APP.pageState.isCurrent(token)) return;
   const expenseAccounts = accounts.filter((a) =>
     ['operating_expense', 'financial_expense', 'tax_expense'].includes(a.nature));
   const options = expenseAccounts.map((a) => `<option value="${esc(a.id)}">${esc(a.code)} — ${esc(a.name)}</option>`).join('');
@@ -162,7 +177,7 @@ async function renderDespesas() {
       <thead><tr><th>Conta</th><th>Descrição</th><th>Valor</th><th>Vencimento</th><th>Status</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5">Nenhuma despesa lançada nesta competência.</td></tr>'}</tbody>
     </table></div>`;
-  document.getElementById('expense-create-form').addEventListener('submit', onCreateExpense);
+  watchForm(document.getElementById('expense-create-form')).addEventListener('submit', onCreateExpense);
 }
 
 async function onCreateExpense(event) {
@@ -181,6 +196,7 @@ async function onCreateExpense(event) {
         description: document.getElementById('expense-description').value.trim(),
       }),
     });
+    clearDirty();
     renderDespesas();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;
@@ -189,7 +205,8 @@ async function onCreateExpense(event) {
 
 /* ---------------------------------------------------------------- Contas a Pagar */
 
-async function renderContasPagar() {
+async function renderContasPagar(token) {
+  token = token || beginPage();
   const title = '📄 Contas a Pagar';
   const subtitle = 'Despesas em aberto, vencidas ou parcialmente pagas, em qualquer competência.';
   document.getElementById('content').innerHTML = `
@@ -203,8 +220,10 @@ async function renderContasPagar() {
       api(`/api/companies/${APP.company}/finance/entries`),
     ]);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;
+    return financeError(title, subtitle, e, () => renderContasPagar());
   }
+  if (!APP.pageState.isCurrent(token)) return;
   const accountsById = Object.fromEntries(accounts.map((a) => [a.id, a]));
   const today = new Date().toISOString().slice(0, 10);
   const pending = entries.filter((e) => ['open', 'partially_paid', 'overdue'].includes(e.status));

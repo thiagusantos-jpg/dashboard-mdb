@@ -9,7 +9,8 @@ const RECONCILIATION_STATUS_LABELS = {
   manual_matched: 'Conciliado manualmente', partial: 'Parcial', divergent: 'Divergente', ignored: 'Ignorado',
 };
 
-async function renderConciliacao() {
+async function renderConciliacao(token) {
+  token = token || beginPage();
   const title = '✅ Conciliação';
   const subtitle = 'Casa lançamentos de caixa com lançamentos financeiros — um crédito pode fechar várias vendas.';
   document.getElementById('content').innerHTML = `
@@ -23,8 +24,10 @@ async function renderConciliacao() {
       api(`/api/companies/${APP.company}/finance/reconciliation`),
     ]);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;
+    return financeError(title, subtitle, e, () => renderConciliacao());
   }
+  if (!APP.pageState.isCurrent(token)) return;
 
   const linkedEventIds = new Set(
     groups.flatMap((g) => g.links.filter((l) => l.item_type === 'cash_event').map((l) => String(l.item_id)))
@@ -75,7 +78,7 @@ async function renderConciliacao() {
     </table></div>`;
 
   const suggestForm = document.getElementById('reconciliation-suggest-form');
-  if (suggestForm) suggestForm.addEventListener('submit', onSuggestReconciliation);
+  if (suggestForm) watchForm(suggestForm).addEventListener('submit', onSuggestReconciliation);
   document.querySelectorAll('[data-confirm-form]').forEach((form) => form.addEventListener('submit', onConfirmReconciliation));
   document.querySelectorAll('[data-undo-form]').forEach((form) => form.addEventListener('submit', onUndoReconciliation));
 }
@@ -91,6 +94,7 @@ async function onSuggestReconciliation(event) {
       method: 'POST',
       body: JSON.stringify({cash_event_id: cashEventId}),
     });
+    clearDirty();
     renderConciliacao();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;

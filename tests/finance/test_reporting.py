@@ -5,6 +5,7 @@ from datetime import date
 import pytest
 
 from backend import database as db
+from backend.finance import accounts
 from backend.finance.accounts import list_accounts, set_parameter
 from backend.finance.entries import EntryCommand, create_entry
 from backend.finance.reporting import management_result
@@ -104,4 +105,75 @@ def test_report_shows_budget_actual_variance_and_source(report_db):
     assert electricity["actual_cents"] == 10_000
     assert electricity["variance_cents"] == -2_000
     assert electricity["source"] == "manual"
+
+
+def test_archived_category_retains_historical_actuals(report_db):
+    account = accounts.create_account(
+        COMPANY, "Manutenção", accounts.AccountNature.OPERATING_EXPENSE
+    )
+    add(account, 100_000, "Reforma do salão")
+
+    before = management_result(COMPANY, "2026-09")["operating_expenses_cents"]
+    accounts.archive_account(
+        COMPANY, account["id"], expected_version=account["version"]
+    )
+    after = management_result(COMPANY, "2026-09")["operating_expenses_cents"]
+
+    assert before == after == 100_000
+
+
+def test_archived_category_with_no_movement_does_not_break_report(report_db):
+    account = accounts.create_account(
+        COMPANY, "Consultoria eventual", accounts.AccountNature.OPERATING_EXPENSE
+    )
+    accounts.archive_account(
+        COMPANY, account["id"], expected_version=account["version"]
+    )
+
+    result = management_result(COMPANY, "2026-09")
+
+    assert all(line["account_id"] != account["id"] for line in result["accounts"])
+
+
+def test_default_categories_still_reported_after_unrelated_archive(report_db):
+    account = accounts.create_account(
+        COMPANY, "Manutenção", accounts.AccountNature.OPERATING_EXPENSE
+    )
+    add(account, 100_000, "Reforma do salão")
+    add(report_db["electricity"], 10_000, "Energia")
+    accounts.archive_account(
+        COMPANY, account["id"], expected_version=account["version"]
+    )
+
+    result = management_result(COMPANY, "2026-09")
+
+    electricity = next(
+        line for line in result["accounts"] if line["system_key"] == "electricity"
+    )
+    assert electricity["actual_cents"] == 10_000
+
+
+def test_archived_category_retains_actuals_for_period_before_archiving(report_db):
+    account = accounts.create_account(
+        COMPANY, "Manutenção", accounts.AccountNature.OPERATING_EXPENSE
+    )
+    create_entry(
+        EntryCommand(
+            company_id=COMPANY,
+            account_id=account["id"],
+            amount_cents=100_000,
+            competence="2026-08",
+            due_date=date(2026, 8, 20),
+            source="manual",
+            external_id=None,
+            description="Reforma do salão",
+        )
+    )
+    accounts.archive_account(
+        COMPANY, account["id"], expected_version=account["version"]
+    )
+
+    result = management_result(COMPANY, "2026-08")
+
+    assert result["operating_expenses_cents"] == 100_000
 

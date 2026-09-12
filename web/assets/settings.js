@@ -30,29 +30,35 @@ function settingsLoading() {
   );
 }
 
-async function renderSettingsPage() {
+async function renderSettingsPage(token) {
+  token = token || beginPage();
   const section = APP.settingsSection || 'empresa';
   settingsLoading();
   try {
-    if (section === 'empresa') return await renderCompanySettings();
-    if (section === 'usuarios') return await renderUserSettings();
-    if (section === 'calendario') return await renderCalendarSettings();
-    if (section === 'integracoes') return await renderIntegrationsSettings();
-    if (section === 'metas') return await renderGoalsSettings();
+    if (section === 'empresa') return await renderCompanySettings(token);
+    if (section === 'usuarios') return await renderUserSettings(token);
+    if (section === 'calendario') return await renderCalendarSettings(token);
+    if (section === 'integracoes') return await renderIntegrationsSettings(token);
+    if (section === 'metas') return await renderGoalsSettings(token);
     return renderPlannedSettings(section);
   } catch (error) {
+    if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     document.getElementById('content').innerHTML = settingsShell(
       section,
-      `<div class="story-box">Não foi possível carregar esta configuração: ${esc(error.message)}</div>`
+      `<div class="story-box">Não foi possível carregar esta configuração: ${esc(error.message)}</div>
+       <div class="btn-row"><button type="button" class="btn-primary" id="settings-retry">Tentar novamente</button></div>`
     );
+    document.getElementById('settings-retry').addEventListener('click', () => renderSettingsPage());
   }
 }
 
-async function renderCompanySettings() {
+async function renderCompanySettings(token) {
+  token = token || beginPage();
   const [profile, stores] = await Promise.all([
     api(`/api/companies/${APP.company}/settings/company`),
     api(`/api/companies/${APP.company}/settings/stores`),
   ]);
+  if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   const address = profile.address || {};
   const contacts = profile.contacts || {};
   const storeRows = stores.length ? stores.map((store) => `
@@ -125,7 +131,7 @@ async function renderCompanySettings() {
       </form>
     </div>`);
 
-  document.getElementById('company-settings-form').addEventListener('submit', async (event) => {
+  watchForm(document.getElementById('company-settings-form')).addEventListener('submit', async (event) => {
     event.preventDefault();
     const status = document.getElementById('company-settings-status');
     status.textContent = 'Salvando…';
@@ -150,6 +156,7 @@ async function renderCompanySettings() {
         }),
       });
       profile.version = saved.version;
+      clearDirty();
       status.className = 'sim-status ok';
       status.textContent = 'Dados salvos.';
     } catch (error) {
@@ -158,7 +165,7 @@ async function renderCompanySettings() {
     }
   });
 
-  document.getElementById('store-create-form').addEventListener('submit', async (event) => {
+  watchForm(document.getElementById('store-create-form')).addEventListener('submit', async (event) => {
     event.preventDefault();
     const status = document.getElementById('store-create-status');
     status.textContent = 'Salvando…';
@@ -167,6 +174,7 @@ async function renderCompanySettings() {
         method: 'POST',
         body: JSON.stringify({name: document.getElementById('settings-store-name').value.trim()}),
       });
+      clearDirty();
       await renderCompanySettings();
     } catch (error) {
       status.className = 'sim-status error';
@@ -175,11 +183,13 @@ async function renderCompanySettings() {
   });
 }
 
-async function renderUserSettings() {
+async function renderUserSettings(token) {
+  token = token || beginPage();
   const [users, roles] = await Promise.all([
     api(`/api/companies/${APP.company}/users`),
     api('/api/roles'),
   ]);
+  if (!APP.pageState.isCurrent(token)) return;
   const rows = users.length ? users.map((user) => `
     <tr><td>${esc(user.name)}</td><td>${esc(user.email)}</td>
       <td>${esc(SETTINGS_ROLE_LABELS[user.role] || user.role)}</td>
@@ -206,7 +216,7 @@ async function renderUserSettings() {
       <div class="settings-actions"><button class="btn-primary" type="submit">Criar usuário</button>
         <span id="settings-user-status" class="sim-status" role="status" aria-live="polite"></span></div>
     </form>`);
-  document.getElementById('settings-user-form').addEventListener('submit', async (event) => {
+  watchForm(document.getElementById('settings-user-form')).addEventListener('submit', async (event) => {
     event.preventDefault();
     const status = document.getElementById('settings-user-status');
     try {
@@ -219,6 +229,7 @@ async function renderUserSettings() {
           role: document.getElementById('settings-user-role').value,
         }),
       });
+      clearDirty();
       await renderUserSettings();
     } catch (error) {
       status.className = 'sim-status error';
@@ -234,8 +245,10 @@ const SETTINGS_ROLE_LABELS = {
   viewer: 'Consulta',
 };
 
-async function renderCalendarSettings() {
+async function renderCalendarSettings(token) {
+  token = token || beginPage();
   const entries = await api(`/api/companies/${APP.company}/settings/calendar`);
+  if (!APP.pageState.isCurrent(token)) return;
   const rows = entries.length ? entries.map((entry) => `
     <tr><td>${esc(entry.date)}</td><td>${entry.status === 'closed' ? 'Fechado' : 'Aberto'}</td>
       <td>${esc(entry.description)}</td><td>v${entry.version}</td></tr>`).join('') :
@@ -255,7 +268,7 @@ async function renderCalendarSettings() {
       <button class="btn-secondary" type="submit">Adicionar data</button>
       <span id="settings-calendar-message" class="sim-status" role="status" aria-live="polite"></span>
     </form>`);
-  document.getElementById('settings-calendar-form').addEventListener('submit', async (event) => {
+  watchForm(document.getElementById('settings-calendar-form')).addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = document.getElementById('settings-calendar-message');
     try {
@@ -268,6 +281,7 @@ async function renderCalendarSettings() {
           expected_version: null,
         }),
       });
+      clearDirty();
       await renderCalendarSettings();
     } catch (error) {
       message.className = 'sim-status error';
@@ -286,11 +300,13 @@ function renderPlannedSettings(section) {
   );
 }
 
-async function renderIntegrationsSettings() {
+async function renderIntegrationsSettings(token) {
+  token = token || beginPage();
   const [connections, cashAccounts] = await Promise.all([
     api(`/api/companies/${APP.company}/finance/open-finance/connections`),
     api(`/api/companies/${APP.company}/finance/cash-accounts`),
   ]);
+  if (!APP.pageState.isCurrent(token)) return;
   const rows = connections.map((c) => `
     <tr>
       <td>${esc(c.provider)}</td>
@@ -319,7 +335,7 @@ async function renderIntegrationsSettings() {
     </form>
     <div id="of-consent-result"></div>`);
 
-  document.getElementById('of-consent-form').addEventListener('submit', onStartStoneConsent);
+  watchForm(document.getElementById('of-consent-form')).addEventListener('submit', onStartStoneConsent);
   document.querySelectorAll('[data-of-sync]').forEach((btn) => btn.addEventListener('click', onSyncStoneConnection));
   document.querySelectorAll('[data-of-revoke]').forEach((btn) => btn.addEventListener('click', onRevokeStoneConnection));
 }
@@ -339,6 +355,7 @@ async function onStartStoneConsent(event) {
       }),
     });
     status.textContent = '';
+    clearDirty();
     result.innerHTML = `<div class="story-box">Abra o link para autorizar na Stone: <a href="${esc(started.consent_url)}" target="_blank" rel="noopener">continuar na Stone</a>. Expira em ${dt(started.expires_at)}.</div>`;
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;
@@ -365,8 +382,10 @@ async function onRevokeStoneConnection(event) {
   }
 }
 
-async function renderGoalsSettings() {
+async function renderGoalsSettings(token) {
+  token = token || beginPage();
   const progress = await api(`/api/companies/${APP.company}/goals/progress`);
+  if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   document.getElementById('content').innerHTML = settingsShell('metas', `
     <div class="settings-heading">
       <div><h2>Metas de faturamento e margem</h2><p>Usadas no Resumo Executivo e na Visão Futurista.</p></div>
@@ -391,7 +410,7 @@ async function renderGoalsSettings() {
         <span id="goals-status" class="sim-status" role="status" aria-live="polite"></span>
       </div>
     </form>`);
-  document.getElementById('goals-form').addEventListener('submit', onSaveGoals);
+  watchForm(document.getElementById('goals-form')).addEventListener('submit', onSaveGoals);
 }
 
 async function onSaveGoals(event) {
@@ -414,6 +433,7 @@ async function onSaveGoals(event) {
         body: JSON.stringify({key: 'margin', value: parseFloat(margin.replace(',', '.')), effective_from: effectiveFrom}),
       });
     }
+    clearDirty();
     renderGoalsSettings();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;

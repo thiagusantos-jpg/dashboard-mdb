@@ -4,7 +4,8 @@
  * plus finance.js's dateBR()/financeError() and loans.js's addMonthsISO(). */
 'use strict';
 
-async function renderRecebiveis() {
+async function renderRecebiveis(token) {
+  token = token || beginPage();
   const title = '🏷️ Recebíveis';
   const subtitle = 'Agenda de recebimentos e taxa efetiva de adquirência a partir do arquivo de conciliação Stone.';
   document.getElementById('content').innerHTML = `
@@ -21,8 +22,10 @@ async function renderRecebiveis() {
       api(`/api/companies/${APP.company}/finance/receivables/effective-fee-report?start=${start}&end=${end}`),
     ]);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;
+    return financeError(title, subtitle, e, () => renderRecebiveis());
   }
+  if (!APP.pageState.isCurrent(token)) return;
 
   const accountOptions = cashAccounts.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
   const settlementRows = settlements.map((s) => `
@@ -60,7 +63,7 @@ async function renderRecebiveis() {
       <tbody>${settlementRows || '<tr><td colspan="5">Nenhum recebível importado ainda.</td></tr>'}</tbody>
     </table></div>`;
 
-  document.getElementById('receivables-import-form').addEventListener('submit', onImportReceivables);
+  watchForm(document.getElementById('receivables-import-form')).addEventListener('submit', onImportReceivables);
 }
 
 async function onImportReceivables(event) {
@@ -84,6 +87,7 @@ async function onImportReceivables(event) {
     }
     const result = await res.json();
     status.textContent = `Importado: ${result.imported} nova(s), ${result.duplicates} já existente(s).`;
+    clearDirty();
     renderRecebiveis();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;

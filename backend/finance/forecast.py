@@ -47,18 +47,31 @@ def _open_entries_due(company: int, day: date, *, due_on_or_before: bool = False
     with db.connection() as conn:
         rows = conn.execute(
             f"""
-            SELECT e.amount_cents,e.description,a.nature
+            SELECT e.id,e.amount_cents,e.description,a.nature,
+                   COALESCE(SUM(
+                       CASE WHEN ev.event_type='settled' THEN ev.amount_cents
+                            WHEN ev.event_type='reversed' THEN -ev.amount_cents ELSE 0 END
+                   ),0) AS paid_cents
             FROM financial_entries e
             JOIN finance_accounts a ON a.id=e.account_id
-            WHERE e.company=? AND e.due_date{comparator}? AND e.status IN ('open','overdue')
+            LEFT JOIN financial_events ev ON ev.entry_id=e.id
+            WHERE e.company=? AND e.due_date{comparator}?
+              AND e.status IN ('open','overdue','partially_paid')
+            GROUP BY e.id
             """,
             (company, day.isoformat()),
         ).fetchall()
     items = []
     for row in rows:
+        # Net out payments already recorded against the entry (settlements minus
+        # any reversals) so a partially-paid entry still shows its remaining,
+        # unpaid balance instead of disappearing from the forecast entirely.
+        remaining = max(0, row["amount_cents"] - row["paid_cents"])
+        if remaining <= 0:
+            continue
         # Revenue-nature entries (e.g. confirmed receivables) are inflows; every
         # other open entry (expenses, taxes, distributions) is money going out.
-        signed = row["amount_cents"] if row["nature"] in ("revenue", "financing_inflow") else -row["amount_cents"]
+        signed = remaining if row["nature"] in ("revenue", "financing_inflow") else -remaining
         items.append({
             "amount_cents": signed,
             "description": row["description"],
@@ -75,7 +88,10 @@ def _open_installments_due(company: int, day: date, *, due_on_or_before: bool = 
             f"""
             SELECT i.total_cents,i.number,l.lender FROM loan_installments i
             JOIN loans l ON l.id=i.loan_id
-            WHERE l.company=? AND i.due_date{comparator}? AND i.status='open'
+            JOIN loan_schedules s ON s.id=i.schedule_id
+            WHERE l.company=? AND i.due_date{comparator}?
+              AND i.schedule_id=l.active_schedule_id
+              AND s.status='active' AND i.status='open'
             """,
             (company, day.isoformat()),
         ).fetchall()

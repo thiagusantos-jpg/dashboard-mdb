@@ -125,14 +125,17 @@
 <!-- Apache ECharts — vendored locally, Apache-2.0, see assets/vendor/echarts/README.md -->
 <script src="assets/vendor/echarts/echarts.min.js?v=6.1.0"></script>
 <script src="assets/echarts-charts.js?v=20260912-ux8"></script>
-<script src="assets/settings.js?v=20260912-admin3"></script>
-<script src="assets/finance.js?v=20260912-finance1"></script>
-<script src="assets/loans.js?v=20260912-loans1"></script>
-<script src="assets/cashflow.js?v=20260912-cashflow1"></script>
-<script src="assets/reconciliation.js?v=20260912-recon1"></script>
+<!-- Page-load coordinator (task A4): defines createPageState(), used by app.js's APP.pageState
+     and by every render function below via begin()/isCurrent() — must load before all of them. -->
+<script src="assets/page-state.js?v=20260912-a4"></script>
+<script src="assets/settings.js?v=20260912-a4"></script>
+<script src="assets/finance.js?v=20260912-a4"></script>
+<script src="assets/loans.js?v=20260912-a4"></script>
+<script src="assets/cashflow.js?v=20260912-a4"></script>
+<script src="assets/reconciliation.js?v=20260912-a4"></script>
 <script src="assets/receivables.js?v=20260912-recv1"></script>
-<script src="assets/product-detail.js?v=20260912-prod1"></script>
-<script src="assets/actions.js?v=20260912-act1"></script>
-<script src="assets/app.js?v=20260912-ux10"></script>
+<script src="assets/product-detail.js?v=20260912-a4"></script>
+<script src="assets/actions.js?v=20260912-a4"></script>
+<script src="assets/app.js?v=20260912-a4"></script>
 </body>
 </html>

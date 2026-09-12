@@ -19,18 +19,62 @@ const APP = {
   pickerYear: null,   // year shown in the period popover (browsing it does not change the period)
   status: null,       // last /status payload
   dashboard: null,    // last /dashboard payload
-  pollTimer: null,
+  statusTimer: null,  // 60s background status/dashboard refresh
+  pollTimer: null,    // 4s polling while a sync job is queued/running
   estoque: {q: '', sort: 'revenue', dir: 'desc'},  // Produtos & Estoque search/sort (filter lives in the route)
+  // Page-load coordinator (page-state.js, loaded before this file): tells a
+  // render whether its response still belongs to the page on screen, and
+  // whether a background refresh may repaint over a form being edited.
+  // The inert fallback only exists so this shell can be loaded on its own in a
+  // unit test; in the browser the <script> tag is asserted by the test suite.
+  pageState: typeof createPageState === 'function' ? createPageState() : {
+    begin: () => null, isCurrent: () => true, markDirty: () => {},
+    isDirty: () => false, canRefresh: () => true, reset: () => {},
+  },
 };
 
 /* ---------------------------------------------------------------- fetch */
+
+// A request that never answers used to hang the page forever with a skeleton.
+const API_TIMEOUT_MS = 30000;
+
+const isAbortError = (e) => !!e && (e.name === 'AbortError' || e.aborted === true);
 
 async function api(path, opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
   if (opts.body) headers['Content-Type'] = 'application/json';
   if (opts.method && opts.method !== 'GET') headers['x-csrf-token'] = APP.csrf || '';
-  const res = await fetch(path, Object.assign({credentials: 'same-origin'}, opts, {headers}));
+  // Caller-supplied opts.signal (a page leaving, a cancelled edit) is composed
+  // with the timeout, so whichever fires first aborts this one request only.
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer = null;
+  if (controller) {
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener('abort', () => controller.abort());
+    }
+    timer = setTimeout(() => controller.abort(), opts.timeout || API_TIMEOUT_MS);
+  }
+  let res;
+  try {
+    res = await fetch(path, Object.assign({credentials: 'same-origin'}, opts,
+      {headers, signal: controller ? controller.signal : opts.signal}));
+  } catch (e) {
+    // An abort is not a session expiry: never show the login screen for it.
+    if (isAbortError(e)) {
+      const cancelled = !!(opts.signal && opts.signal.aborted);
+      const err = new Error(cancelled ? 'Consulta cancelada.'
+        : `A consulta passou de ${Math.round((opts.timeout || API_TIMEOUT_MS) / 1000)} segundos sem resposta.`);
+      err.name = 'AbortError';
+      err.aborted = true;
+      err.timedOut = !cancelled;
+      throw err;
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (res.status === 401) {
     showLogin('Sua sessão expirou. Entre novamente.');
     throw new Error('unauthenticated');
@@ -44,6 +88,67 @@ async function api(path, opts) {
   }
   if (res.status === 204) return null;
   return res.json();
+}
+
+/* ------------------------------------------------- page-load coordination */
+
+/* Every render path starts here. The token identifies this attempt at this
+ * route; anything fetched under an older token is discarded instead of being
+ * written to the DOM. Never re-read APP.page/APP.period after an await to
+ * decide whether a response is still wanted — ask isCurrent(token). */
+function beginPage() {
+  const segment = APP.page === 'configuracoes' ? (APP.settingsSection || 'empresa') : (APP.period || '');
+  return APP.pageState.begin(`${APP.page}/${segment}`);
+}
+
+/* Marks the page dirty while the user edits a form, so no background refresh
+ * replaces the fields under them. addEventListener only — the CSP forbids
+ * inline handlers. Only a boolean is recorded, never the typed values. */
+function watchForm(form) {
+  if (!form) return form;
+  const mark = () => APP.pageState.markDirty(true);
+  form.addEventListener('input', mark);
+  form.addEventListener('change', mark);
+  return form;
+}
+
+// Called after a save actually succeeded, or when the user discards on purpose.
+function clearDirty() { APP.pageState.markDirty(false); }
+
+/* Asked before committing to another route. Cancel = "Continuar editando",
+ * and the caller keeps the original route. */
+function confirmDiscardChanges() {
+  if (APP.pageState.canRefresh()) return true;
+  const discard = confirm('Há alterações não salvas nesta página.\n\n' +
+    'OK — Descartar alterações e sair\nCancelar — Continuar editando');
+  if (discard) clearDirty();
+  return discard;
+}
+
+const REFRESH_BANNER_ID = 'refresh-available';
+
+/* Background refresh found newer data while a form is dirty: announce it
+ * without touching a single field. */
+function showRefreshAvailable() {
+  const content = document.getElementById('content');
+  if (!content || document.getElementById(REFRESH_BANNER_ID)) return;
+  const bar = document.createElement('div');
+  bar.id = REFRESH_BANNER_ID;
+  bar.className = 'disclosure-banner warn';
+  bar.setAttribute('role', 'status');
+  bar.textContent = 'Novos dados disponíveis. Seus campos preenchidos foram mantidos. ';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-link';
+  btn.textContent = 'Atualizar agora (descarta o que não foi salvo)';
+  btn.addEventListener('click', () => { clearDirty(); renderPage(); });
+  bar.appendChild(btn);
+  content.insertBefore(bar, content.firstChild);
+}
+
+function stopTimers() {
+  if (APP.statusTimer) { clearInterval(APP.statusTimer); APP.statusTimer = null; }
+  if (APP.pollTimer) { clearInterval(APP.pollTimer); APP.pollTimer = null; }
 }
 
 /* ---------------------------------------------------------------- format */
@@ -155,7 +260,8 @@ async function refreshSession() {
     const session = await api('/api/session');
     onAuthenticated(session);
   } catch (e) {
-    showLogin();
+    // A timeout is not an expired session — say what actually happened.
+    showLogin(isAbortError(e) ? e.message + ' Verifique a conexão e entre novamente.' : undefined);
   }
 }
 
@@ -243,11 +349,19 @@ async function onResetPasswordSubmit(ev) {
 }
 
 async function logout() {
+  // Stop the background timers and invalidate every request in flight first,
+  // so nothing from this session can paint over the login screen.
+  stopTimers();
+  APP.pageState.reset();
   try { await api('/api/logout', {method: 'POST'}); } catch (e) {}
   location.reload();
 }
 
 async function onAuthenticated(session) {
+  // A repeated login (session expired, bootstrap finishing, tests) must not
+  // leave the previous session's intervals running alongside the new ones.
+  stopTimers();
+  APP.pageState.reset();
   APP.csrf = session.csrf;
   APP.companies = session.companies || [];
   document.getElementById('sidebar-user').textContent = session.user || '';
@@ -262,13 +376,25 @@ async function onAuthenticated(session) {
   onRouteChange();  // applies #/página/período from the URL (reload, favoritos), else the defaults
   // The automatic worker (backend/sync.py Worker) can finish a sync with nobody watching
   // the "sync" page; without this, new months only show up after a manual reload.
-  setInterval(async () => {
+  APP.statusTimer = setInterval(backgroundRefresh, 60000);
+}
+
+/* The 60s tick: polling status is kept apart from rendering, so a status
+ * request that fails (backend restarting, network blip) leaves whatever is on
+ * screen exactly as it is instead of blanking the page. */
+async function backgroundRefresh() {
+  try {
     await refreshStatus();
-    if (APP.page === 'sync') return renderSyncPage();
-    // Redraw only when the data changed — a blind redraw would wipe the Estoque search mid-typing.
-    const info = APP.periods.find((p) => p.period === APP.period);
-    if (!APP.dashboard || (info && info.version !== APP.dashboard.version)) renderPage();
-  }, 60000);
+  } catch (e) {
+    return;  // status indisponível: preserva o conteúdo já renderizado
+  }
+  if (APP.page === 'sync') return renderSyncPage();
+  // Redraw only when the data changed — a blind redraw would wipe the Estoque search mid-typing.
+  const info = APP.periods.find((p) => p.period === APP.period);
+  if (APP.dashboard && !(info && info.version !== APP.dashboard.version)) return;
+  // Never repaint a form being edited; offer the new data instead.
+  if (!APP.pageState.canRefresh()) return showRefreshAvailable();
+  renderPage();
 }
 
 /* ---------------------------------------------------------------- status/period */
@@ -280,7 +406,11 @@ async function refreshStatus() {
   const hasActiveJob = (APP.status.jobs || []).some((j) => j.state === 'queued' || j.state === 'running');
   if (hasActiveJob && !APP.pollTimer) {
     APP.pollTimer = setInterval(async () => {
-      await refreshStatus();
+      try {
+        await refreshStatus();
+      } catch (e) {
+        return;  // uma leitura de status que falhou não apaga a página
+      }
       if (APP.page === 'sync') renderSyncPage();
     }, 4000);
   } else if (!hasActiveJob && APP.pollTimer) {
@@ -446,6 +576,16 @@ function onRouteChange() {
   const r = parseRoute();
   const page = r.page || 'resumo';
   const period = r.period && APP.periods.some((p) => p.period === r.period) ? r.period : APP.period;
+  // Leaving a page with unsaved edits (nav link, Voltar, period change, go())
+  // asks first; "Continuar editando" keeps the original route on screen.
+  const section = page === 'configuracoes' ? r.section : APP.settingsSection;
+  const leaving = page !== APP.page || period !== APP.period ||
+    (page === 'configuracoes' && section !== APP.settingsSection);
+  if (leaving && !confirmDiscardChanges()) {
+    const stay = routeHash(APP.page, APP.page === 'configuracoes' ? APP.settingsSection : APP.period, APP.routeParams);
+    if (location.hash !== stay) history.replaceState(null, '', stay);
+    return;
+  }
   APP.settingsSection = page === 'configuracoes' ? r.section : APP.settingsSection;
   const hash = routeHash(page, page === 'configuracoes' ? APP.settingsSection : period, r.params);
   if (location.hash !== hash) history.replaceState(null, '', hash);  // normalize, no extra history entry
@@ -470,17 +610,23 @@ async function renderPage() {
   // Every render replaces #content's innerHTML somewhere below, which would orphan any
   // ECharts canvas mounted in the previous render (Fase 2 prototype, echarts-charts.js).
   if (typeof disposeEcharts === 'function') disposeEcharts();
-  if (APP.page === 'configuracoes') return renderSettingsPage();
+  // Claimed before any dispatch, so even a synchronous page (sync) invalidates
+  // a fetch still in flight for the page the user just left.
+  const token = beginPage();
+  if (APP.page === 'configuracoes') return renderSettingsPage(token);
   if (APP.page === 'sync') return renderSyncPage();
   // Finance pages read their own /finance/* endpoints by competence — they don't need
   // the Mobne /dashboard payload this function fetches below for every other page.
-  if (FINANCE_PAGES.includes(APP.page)) return renderFinancePage();
+  if (FINANCE_PAGES.includes(APP.page)) return renderFinancePage(token);
   if (!APP.period) {
     return renderEmptyState('Nenhum período sincronizado ainda. Vá em "Sincronização Mobne" e clique em Sincronizar agora.');
   }
+  // Identity of this request, captured before the await: APP may already point
+  // at another company/period by the time the response arrives.
+  const company = APP.company, period = APP.period, page = APP.page;
   // Every data page reads the same /dashboard payload; reuse it until the period or its version changes.
-  const info = APP.periods.find((p) => p.period === APP.period);
-  const cached = APP.dashboard && APP.dashboard.period === APP.period && APP.dashboardCompany === APP.company &&
+  const info = APP.periods.find((p) => p.period === period);
+  const cached = APP.dashboard && APP.dashboard.period === period && APP.dashboardCompany === company &&
     (!info || info.version === APP.dashboard.version);
   if (!cached) {
     document.getElementById('content').innerHTML = `
@@ -490,27 +636,43 @@ async function renderPage() {
         <div class="kpi-grid kpi-grid-4">${'<div class="skeleton-card"></div>'.repeat(4)}</div>
         <div class="skeleton-block"></div>
       </div>`;
+    let payload;
     try {
-      APP.dashboard = await api(`/api/companies/${APP.company}/dashboard?period=${APP.period}`);
-      APP.dashboardCompany = APP.company;
+      payload = await api(`/api/companies/${company}/dashboard?period=${period}`);
     } catch (e) {
+      if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
       APP.dashboard = null;
       if (e.status === 404) return renderEmptyState(e.message);
-      return renderEmptyState('Não foi possível carregar os dados: ' + e.message);
+      // GET only: retry re-runs this same render on demand, never automatically.
+      return renderRetryState('Não foi possível carregar os dados: ' + e.message);
     }
+    if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
+    APP.dashboard = payload;
+    APP.dashboardCompany = company;
     document.getElementById('custo-fixo-input').value = (APP.dashboard.fixed_cost_cents / 100).toFixed(2);
   }
+  if (!APP.pageState.isCurrent(token)) return;
   const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
     diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao,
     reposicao: renderReposicao, produto: renderProdutoDetalhe, acoes: renderAcoes};
   if (APP.page === 'sync') return renderSyncPage();  // user navigated away mid-fetch
-  (renderers[APP.page] || renderResumo)(APP.dashboard);
+  (renderers[page] || renderResumo)(APP.dashboard);
 }
 
 function renderEmptyState(message) {
   document.getElementById('content').innerHTML = `
     <div class="page-title">Mercado duBairro</div>
     <div class="story-box mt-16">${esc(message)}</div>`;
+}
+
+/* A failed or timed-out read offers the user the retry instead of looping on
+ * its own. Only the page's own GETs are re-issued — a POST is never resent. */
+function renderRetryState(message) {
+  document.getElementById('content').innerHTML = `
+    <div class="page-title">Mercado duBairro</div>
+    <div class="story-box mt-16">${esc(message)}</div>
+    <div class="btn-row"><button type="button" class="btn-primary" id="retry-page">Tentar novamente</button></div>`;
+  document.getElementById('retry-page').addEventListener('click', () => renderPage());
 }
 
 // A brand-new database has no company yet — the first sync registers companies,

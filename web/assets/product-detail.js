@@ -2,7 +2,8 @@
  * and uses its shared api(), esc(), money(), num(), pct(), dt(), APP globals. */
 'use strict';
 
-async function renderReposicao(data) {
+async function renderReposicao(data, token) {
+  token = token || beginPage();
   document.getElementById('content').innerHTML = `
     <div class="page-title">${icon('target')} Reposição</div>
     <div class="page-subtitle">Sugestão de compra por produto, com todos os números que formam a conta.</div>
@@ -11,11 +12,13 @@ async function renderReposicao(data) {
   try {
     recommendations = await api(`/api/companies/${APP.company}/replenishment?as_of=${APP.period}-01`);
   } catch (e) {
+    if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     document.getElementById('content').innerHTML = `
       <div class="page-title">${icon('target')} Reposição</div>
       <div class="story-box mt-16">Não foi possível carregar: ${esc(e.message)}</div>`;
     return;
   }
+  if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   const rows = recommendations.map((r) => `
     <tr>
       <td><a href="#/produto/${esc(APP.period)}?id=${esc(r.product_id)}">${esc(r.name)}</a></td>
@@ -38,7 +41,8 @@ async function renderReposicao(data) {
     </table></div>`;
 }
 
-async function renderProdutoDetalhe() {
+async function renderProdutoDetalhe(data, token) {
+  token = token || beginPage();
   const productId = APP.routeParams.get('id');
   document.getElementById('content').innerHTML = `
     <div class="page-title">${icon('package')} Produto</div>
@@ -53,11 +57,13 @@ async function renderProdutoDetalhe() {
   try {
     detail = await api(`/api/companies/${APP.company}/products/${productId}?period=${APP.period}`);
   } catch (e) {
+    if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     document.getElementById('content').innerHTML = `
       <div class="page-title">${icon('package')} Produto</div>
       <div class="story-box mt-16">Não foi possível carregar: ${esc(e.message)}</div>`;
     return;
   }
+  if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   const p = detail.product;
   const r = detail.replenishment;
   const historyRows = detail.history.map((h) => `
