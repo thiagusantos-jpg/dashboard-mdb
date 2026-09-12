@@ -45,6 +45,17 @@ def operating_days(
     return total
 
 
+def operating_days_for_company(company: int, start: str, end: str, *, store: Optional[int] = None) -> int:
+    """operating_days() with this company's own registered calendar exceptions
+    (Task 4) — the only caller-supplied input is the date range."""
+    overrides = {
+        row["date"]: row["status"]
+        for row in calendar_exceptions(company, store)
+        if start <= row["date"] <= end
+    }
+    return operating_days(start, end, exceptions=overrides)
+
+
 def _profile(row) -> Optional[dict]:
     if not row:
         return None

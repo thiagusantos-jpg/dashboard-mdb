@@ -14,14 +14,21 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from . import database as db, identity, models, permissions, security, settings
 from . import sync
+from .finance import accounts
+from .operations.catalog import inventory_catalog
+from .operations.goals import current_goal_progress
 from .routes.finance_accounts import router as finance_accounts_router
 from .routes.financial_entries import router as financial_entries_router
+from .routes.actions import router as actions_router
 from .routes.bank_imports import router as bank_imports_router
 from .routes.cashflow import router as cashflow_router
 from .routes.financial_reports import router as financial_reports_router
+from .routes.goals import router as goals_router
 from .routes.loans import router as loans_router
 from .routes.open_finance import router as open_finance_router
+from .routes.products import router as products_router
 from .routes.receivables import router as receivables_router
+from .routes.replenishment import router as replenishment_router
 from .routes.reconciliation import router as reconciliation_router
 from .routes.settings import router as settings_router
 from .routes.users import router as users_router
@@ -77,6 +84,10 @@ app.include_router(reconciliation_router)
 app.include_router(bank_imports_router)
 app.include_router(open_finance_router)
 app.include_router(receivables_router)
+app.include_router(replenishment_router)
+app.include_router(products_router)
+app.include_router(goals_router)
+app.include_router(actions_router)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver','*.vercel.app'])
 # /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
 app.add_middleware(GZipMiddleware,minimum_size=1024)
@@ -265,15 +276,10 @@ def dashboard(company:int,period:str):
                 'partial':p['end']<__import__('backend.sync',fromlist=['month_end']).month_end(r['period']).isoformat(),**s})
         stock=db.dataset(company,'stock',db=conn)
         prices=db.dataset(company,'prices',db=conn)
-        price_map={r['id']:r for r in (prices['payload'] if prices else []) if r['package']=='1.0' or r['package']=='1'}
-        stock_map={r['id']:r for r in (stock['payload'] if stock else [])}
-        inventory=[]
-        for p in data['products']:
-            s=stock_map.get(p['id']); pr=price_map.get(p['id'])
-            inventory.append({**p,'stock':s['quantity'] if s else None,
-                'current_price':pr['price'] if pr else None,
-                'current_cost':models.cents(s['unit_cost']) if s and s['unit_cost'] is not None else None,
-                'last_cost':models.cents(s['last_cost']) if s and s['last_cost'] is not None else None})
+        # Every active product, sold or not — models.summarize() alone only returns
+        # products that appear in a receipt, hiding unsold stock from every decision
+        # this list feeds (low-stock alerts, replenishment, the Estoque page).
+        inventory=inventory_catalog(company,period,conn)
     today=datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat()
     margin=data['totals']['margin']
     # None when the period has any unknown-cost item, same as simulated_net below — a break-even
@@ -304,6 +310,8 @@ def dashboard(company:int,period:str):
         'prices_updated_at':prices['updated_at'] if prices else None,'timeline':timeline,
         'fixed_cost_cents':fixed,'simulated_net':data['totals']['profit']-fixed if data['totals']['profit'] is not None else None,
         'break_even_cents':break_even_cents,'break_even_gap_pct':pct_change(data['totals']['revenue'],break_even_cents),
+        'margin_goal_pct':accounts.resolve_parameter(company,'goal:margin',today),
+        'revenue_goal':current_goal_progress(company,date.today()),
         'alerts':alerts,
         'partial_month':sales['payload']['end']<__import__('backend.sync',fromlist=['month_end']).month_end(period).isoformat(),
         'as_of':today,'scope':'Vendas PDV válidas; referências fiscais e não fiscais deduplicadas.'}

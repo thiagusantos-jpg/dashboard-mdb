@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from . import database as db, models, settings
 from .mobne import MobneClient, MobneError
+from .operations.snapshots import snapshot_catalogs
 
 def month_end(period):
     year,month=map(int,period.split('-'))
@@ -109,6 +110,9 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
                 db.put_dataset(company,resource,'current',payload,conn)
             if resource=='categories': cats={r['id']:r['name'] for r in payload}
             db.update_job(job_id,completed=len(periods)+i+1)
+        # One row per product per day — the point-in-time history the previous
+        # design lost by only ever keeping the latest stock/price dataset.
+        snapshot_catalogs(company,today)
         if failed_periods:
             ok=len(periods)-len(failed_periods)
             db.update_job(job_id,state='completed_with_errors',
