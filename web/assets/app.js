@@ -406,7 +406,7 @@ function closeNav(returnFocus) {
   if (returnFocus) toggle.focus();
 }
 
-const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque',
+const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'reposicao', 'produto',
   'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis', 'sync', 'configuracoes'];
 const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis'];
 const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
@@ -499,7 +499,8 @@ async function renderPage() {
     document.getElementById('custo-fixo-input').value = (APP.dashboard.fixed_cost_cents / 100).toFixed(2);
   }
   const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
-    diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao};
+    diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao,
+    reposicao: renderReposicao, produto: renderProdutoDetalhe};
   if (APP.page === 'sync') return renderSyncPage();  // user navigated away mid-fetch
   (renderers[APP.page] || renderResumo)(APP.dashboard);
 }
@@ -800,7 +801,7 @@ function renderEstoqueTable() {
   const body = rows.map((p) => {
     const noStock = p.stock != null && p.stock <= 0;
     const underCost = p.current_price != null && p.current_cost != null && p.current_price < p.current_cost;
-    return `<tr><td>${esc(p.name)}</td><td>${esc(p.category)}</td>
+    return `<tr><td><a href="#/produto/${esc(APP.period)}?id=${esc(p.id)}">${esc(p.name)}</a></td><td>${esc(p.category)}</td>
       <td class="num ${noStock ? 'cell-alert' : ''}">${p.stock == null ? '—' : num(p.stock)}</td>
       <td class="num ${underCost ? 'cell-alert' : ''}">${money(p.current_price)}</td>
       <td class="num">${money(p.current_cost)}</td><td class="num">${money(p.revenue)}</td>
