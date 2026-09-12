@@ -11,7 +11,9 @@ MIGRATION_DIRECTORY = Path(__file__).with_name("migrations")
 # The first two schema versions predate the SQL migration runner and remain
 # installed by backend.database so existing databases keep their history.
 # New migrations start at version 3 and must be appended in order.
-MIGRATIONS: Tuple[Tuple[int, str], ...] = ()
+MIGRATIONS: Tuple[Tuple[int, str], ...] = (
+    (3, "003_users.sql"),
+)
 
 
 class MigrationError(RuntimeError):

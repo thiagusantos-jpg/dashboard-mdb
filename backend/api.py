@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
@@ -49,21 +50,23 @@ async def secure_headers(request,call_next):
     return response
 
 class Login(BaseModel):
+    email: Optional[str]=Field(default=None,max_length=254)
     password: str=Field(min_length=1,max_length=200)
 
 @app.post('/api/login')
 def login(body: Login,request:Request,response:Response):
-    raw=security.login(request,body.password)
+    raw=security.login(request,body.password,body.email)
     response.set_cookie(security.COOKIE,raw,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=43200)
     return {'csrf':security.csrf(raw)}
 
 @app.get('/api/session')
-def session(raw=Depends(security.authenticate)):
-    return {'csrf':security.csrf(raw),'companies':db.companies(),'user':'Administrador local'}
+def session(request:Request,auth=Depends(security.authenticate)):
+    raw=request.cookies.get(security.COOKIE,'')
+    return {'csrf':security.csrf(raw),'companies':db.companies(),'user':auth.email}
 
 @app.post('/api/logout')
-def logout(response:Response,raw=Depends(security.authenticate)):
-    with db.connection() as conn: conn.execute('DELETE FROM sessions WHERE hash=?',(security.fingerprint(raw),))
+def logout(response:Response,auth=Depends(security.authenticate)):
+    with db.connection() as conn: conn.execute('DELETE FROM sessions WHERE hash=?',(auth.session_hash,))
     response.delete_cookie(security.COOKIE)
     return {'ok':True}
 

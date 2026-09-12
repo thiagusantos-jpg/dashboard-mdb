@@ -158,11 +158,12 @@ function showLogin(message) {
   document.getElementById('app').classList.add('hidden');
   document.getElementById('login-screen').classList.remove('hidden');
   document.getElementById('login-error').textContent = message || '';
-  document.getElementById('login-password').focus();
+  document.getElementById('login-email').focus();
 }
 
 async function onLoginSubmit(ev) {
   ev.preventDefault();
+  const email = document.getElementById('login-email').value.trim();
   const pass = document.getElementById('login-password').value;
   const btn = document.getElementById('login-submit');
   btn.disabled = true;
@@ -171,7 +172,7 @@ async function onLoginSubmit(ev) {
     const res = await fetch('/api/login', {
       method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({password: pass}),
+      body: JSON.stringify({email, password: pass}),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

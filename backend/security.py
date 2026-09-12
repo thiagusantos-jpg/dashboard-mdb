@@ -5,12 +5,22 @@ import secrets
 import os
 import time
 import threading
-from . import settings, database as db
+from dataclasses import dataclass
+from typing import Optional
+
+from . import settings, database as db, identity
 from fastapi import HTTPException, Request
 
 COOKIE='mdb_session'
 _lock=threading.Lock()
 _attempts={}
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    user_id: int
+    email: str
+    session_hash: str
 
 def access_password():
     if settings.IS_SERVERLESS:
@@ -45,27 +55,57 @@ def authenticate(request: Request):
     raw=request.cookies.get(COOKIE,'')
     if not raw:
         raise HTTPException(401,'Faça login para acessar o dashboard.')
+    session_hash=fingerprint(raw)
     with db.connection() as conn:
-        row=conn.execute('SELECT expires FROM sessions WHERE hash=?',(fingerprint(raw),)).fetchone()
+        row=conn.execute(
+            '''SELECT s.expires,s.user_id,u.email
+               FROM sessions s
+               JOIN users u ON u.id=s.user_id AND u.active=1
+               WHERE s.hash=?''',
+            (session_hash,),
+        ).fetchone()
     if row is None or row['expires']<time.time():
         raise HTTPException(401,'Sua sessão expirou. Entre novamente.')
     if request.method not in ('GET','HEAD'):
         same_origin(request)
         if not hmac.compare_digest(request.headers.get('x-csrf-token',''),csrf(raw)):
             raise HTTPException(403,'Atualize a página e tente novamente.')
-    return raw
+    return AuthContext(
+        user_id=row['user_id'],
+        email=row['email'],
+        session_hash=session_hash,
+    )
 
-def login(request, password):
+def login(request, password, email: Optional[str] = None):
     same_origin(request)
     ip=request.client.host if request.client else 'local'
     with _lock:
         recent=[t for t in _attempts.get(ip,[]) if t>time.time()-60]
         if len(recent)>=8: raise HTTPException(429,'Muitas tentativas. Aguarde um minuto.')
         _attempts[ip]=recent+[time.time()]
-    if not hmac.compare_digest(password,access_password()):
-        raise HTTPException(401,'Senha incorreta.')
+    if not identity.users_exist():
+        if not hmac.compare_digest(password,access_password()):
+            raise HTTPException(401,'Senha incorreta.')
+        try:
+            identity.create_user(
+                email or 'admin@mercadodubairro.local',
+                password,
+                'Administrador local',
+                is_admin=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(422,str(exc)) from exc
+    elif not email:
+        raise HTTPException(401,'Informe seu e-mail e senha.')
+
+    user=identity.verify_credentials(email or 'admin@mercadodubairro.local',password)
+    if user is None:
+        raise HTTPException(401,'E-mail ou senha incorretos.')
     raw=secrets.token_urlsafe(32)
     with db.connection() as conn:
         conn.execute('DELETE FROM sessions WHERE expires<?',(time.time(),))
-        conn.execute('INSERT INTO sessions VALUES(?,?)',(fingerprint(raw),time.time()+43200))
+        conn.execute(
+            'INSERT INTO sessions(hash,expires,user_id) VALUES(?,?,?)',
+            (fingerprint(raw),time.time()+43200,user['id']),
+        )
     return raw

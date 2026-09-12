@@ -20,10 +20,11 @@ def test_migrate_twice_is_safe(isolated_db):
     db.initialize()
 
     with db.connection() as conn:
-        assert migrations.current_version(conn) == 2
+        latest = migrations.MIGRATIONS[-1][0]
+        assert migrations.current_version(conn) == latest
         assert [row["version"] for row in conn.execute(
             "SELECT version FROM schema_versions ORDER BY version"
-        )] == [1, 2]
+        )] == list(range(1, latest + 1))
 
 
 def test_refuses_database_newer_than_application(isolated_db):
