@@ -179,47 +179,45 @@ def _loan_installment_rows(company: int) -> list:
     with db.connection() as conn:
         rows = conn.execute(
             """
-            SELECT i.id,i.number,i.due_date,i.total_cents,i.status,i.loan_id,l.lender,
+            SELECT i.id,i.number,i.due_date,i.total_cents,i.status,i.loan_id,i.version,
+                   i.paid_principal_cents,i.paid_interest_cents,l.lender,
                    (SELECT COUNT(*) FROM loan_installments WHERE schedule_id=i.schedule_id) AS count
             FROM loan_installments i
             JOIN loans l ON l.id=i.loan_id
             JOIN loan_schedules s ON s.id=i.schedule_id
             WHERE l.company=? AND i.schedule_id=l.active_schedule_id
-              AND s.status='active' AND i.status='open'
+              AND s.status='active' AND i.status IN ('open','partially_paid')
             """,
             (company,),
         ).fetchall()
     items = []
     for row in rows:
-        # Never a partially-paid installment in this state: pay_installment()
-        # only ever transitions an installment straight to 'paid' — there is
-        # no intermediate persisted status — so an 'open' row here always has
-        # paid_cents=0. `total_cents` already bakes principal+interest into
-        # ONE number for the whole installment; the interest a paid
-        # installment later generates surfaces as its own (already-'paid',
-        # so list-excluded) financial_entries row, never a second obligation
-        # for the same installment.
-        status = _compute_status(row["status"], row["due_date"], row["total_cents"])
+        # Task B3 added real partial-payment support for installments: a row
+        # here can now sit at status='partially_paid' with a genuine nonzero
+        # paid_cents (paid_principal_cents/paid_interest_cents), so the sum
+        # below is unconditional — mirrors
+        # payments.py::_loan_installment_obligation_item's computation
+        # exactly, which is the source of truth for this logic.
+        paid_cents = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
+        open_cents = max(0, row["total_cents"] - paid_cents)
+        status = _compute_status(row["status"], row["due_date"], open_cents)
         items.append({
             "key": f"loan_installment:{row['id']}",
             "kind": "loan_installment",
             "id": str(row["id"]),
-            "version": 1,  # placeholder: loan_installments has no `version`
-            # column yet — added by task B3's migration, which defaults new
-            # rows to 1. Synced here so B2 ships the field the shared
-            # contract requires without owning that schema change.
+            "version": int(row["version"]),
             "description": f"Parcela {row['number']}/{row['count']} — {row['lender']}",
             "due_date": row["due_date"],
             "competence": None,
             "total_cents": row["total_cents"],
-            "paid_cents": 0,
-            "open_cents": row["total_cents"],
+            "paid_cents": paid_cents,
+            "open_cents": open_cents,
             "status": status,
             "source": "loan",
             "loan_id": str(row["loan_id"]),
             "number": row["number"],
             "count": row["count"],
-            "allowed_actions": _installment_allowed_actions(row["total_cents"]),
+            "allowed_actions": _installment_allowed_actions(open_cents),
             "_sensitive": False,  # loans carry no account/sensitive linkage
         })
     return items
@@ -352,7 +350,7 @@ def get_obligation(
         with db.connection() as conn:
             row = conn.execute(
                 """
-                SELECT i.id,i.number,i.due_date,i.total_cents,i.status,i.loan_id,l.lender,
+                SELECT i.id,i.number,i.due_date,i.total_cents,i.status,i.loan_id,i.version,l.lender,
                        i.paid_principal_cents,i.paid_interest_cents,
                        (SELECT COUNT(*) FROM loan_installments WHERE schedule_id=i.schedule_id) AS count
                 FROM loan_installments i
@@ -363,17 +361,19 @@ def get_obligation(
             ).fetchone()
         if not row:
             return None
-        if row["status"] == "paid":
-            paid_cents = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
-        else:
-            paid_cents = 0
+        # Real partial-payment support (task B3): paid_principal_cents/
+        # paid_interest_cents hold genuine partial amounts whenever
+        # status='partially_paid', not just when status='paid' — sum them
+        # unconditionally, matching
+        # payments.py::_loan_installment_obligation_item.
+        paid_cents = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
         open_cents = max(0, row["total_cents"] - paid_cents)
         status = _compute_status(row["status"], row["due_date"], open_cents)
         return {
             "key": f"loan_installment:{row['id']}",
             "kind": "loan_installment",
             "id": str(row["id"]),
-            "version": 1,  # see note in _loan_installment_rows: B3 placeholder.
+            "version": int(row["version"]),
             "description": f"Parcela {row['number']}/{row['count']} — {row['lender']}",
             "due_date": row["due_date"],
             "competence": None,

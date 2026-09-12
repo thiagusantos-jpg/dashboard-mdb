@@ -5,9 +5,10 @@ from datetime import date, timedelta
 import pytest
 
 from backend import database as db
-from backend.finance import accounts, loans
+from backend.finance import accounts, ledger, loans
 from backend.finance.entries import EntryCommand, create_entry, settle_entry
 from backend.finance.obligations import get_obligation, list_obligations
+from backend.finance.payments import record_payment
 
 
 COMPANY = 1
@@ -382,3 +383,111 @@ def test_future_due_entry_does_not_report_overdue(obligations_db):
     result = list_obligations(1, include_sensitive=True)
     item = next(i for i in result["items"] if i["id"] == str(entry["id"]))
     assert item["status"] == "partially_paid"
+
+
+# --- Partially-paid loan installments (B3 follow-up fix) --------------------
+# Task B3 added real partial-payment support for loan installments
+# (backend/finance/payments.py::record_payment), but obligations.py was left
+# untouched per that task's scope — leaving a partially-paid installment
+# (real, nonzero open_cents) silently dropped from list_obligations (still
+# filtered to status='open') and its paid_cents miscomputed in both
+# list_obligations and get_obligation. This section proves that gap is
+# closed: a partially-paid installment stays visible with the correct
+# open_cents/paid_cents/status in both the list and detail views, and that a
+# fully-paid installment's `version` field reflects the real stored column
+# (bumped by the payment), not the old hardcoded placeholder of 1.
+
+
+def _bank_account():
+    return ledger.create_account(COMPANY, "Banco X", "bank")
+
+
+def _future_two_installment_loan():
+    # Due dates deliberately in the future relative to "today" (mirrors
+    # tests/finance/test_payments.py::two_installment_loan) so the derived
+    # 'overdue' status (obligations._compute_status) never kicks in here —
+    # unlike _two_installment_loan() above, whose first installment
+    # (due_date="2026-09-10") is in the past as of this suite's "today" and
+    # would otherwise make a partially-paid balance report 'overdue' instead
+    # of 'partially_paid', which is not what these tests are about.
+    return loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=200_000, net_disbursement_cents=195_000,
+        installments=[
+            {"number": 1, "due_date": "2026-10-10", "principal_cents": 100_000, "interest_cents": 5_000},
+            {"number": 2, "due_date": "2026-11-10", "principal_cents": 100_000, "interest_cents": 5_000},
+        ],
+        start_date="2026-09-01",
+    )
+
+
+def test_partially_paid_installment_appears_in_list_with_correct_balances(obligations_db):
+    bank = _bank_account()
+    loan = _future_two_installment_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    assert installment["id"] is not None
+
+    result = record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=50_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="partial-1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=0,
+    )
+    assert result["obligation"]["status"] == "partially_paid"
+
+    listed = list_obligations(COMPANY, include_sensitive=True)
+    item = next(i for i in listed["items"] if i["id"] == str(installment["id"]))
+    # Must NOT have silently dropped off the payable list.
+    assert item["status"] == "partially_paid"
+    assert item["paid_cents"] == 50_000
+    assert item["open_cents"] == 105_000 - 50_000
+    assert item["total_cents"] == 105_000
+
+    # The still-open balance must be reflected in the aggregate total too.
+    other_installment_open = 105_000  # the untouched second installment
+    assert listed["open_cents"] == (105_000 - 50_000) + other_installment_open
+
+
+def test_get_obligation_on_partially_paid_installment_returns_correct_values(obligations_db):
+    bank = _bank_account()
+    loan = _future_two_installment_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=50_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="partial-2",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=0,
+    )
+
+    detail = get_obligation(COMPANY, "loan_installment", installment["id"], include_sensitive=True)
+    assert detail is not None
+    assert detail["status"] == "partially_paid"
+    assert detail["paid_cents"] == 50_000
+    assert detail["open_cents"] == 105_000 - 50_000
+    assert detail["allowed_actions"] == ["details", "pay"]
+
+
+def test_fully_paid_installment_version_reflects_real_stored_version(obligations_db):
+    bank = _bank_account()
+    loan = _future_two_installment_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    assert installment["id"] is not None
+
+    first = record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=50_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="version-1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=0,
+    )
+    second = record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 11), expected_version=first["obligation"]["version"],
+        idempotency_key="version-2", cash_account_id=bank["id"],
+        principal_cents=50_000, interest_cents=5_000,
+    )
+    assert second["obligation"]["status"] == "paid"
+    # Two payments each bump loan_installments.version by 1 (starting at 1),
+    # so the real stored value is 3 — not the old hardcoded placeholder of 1.
+    assert second["obligation"]["version"] == 3
+
+    detail = get_obligation(COMPANY, "loan_installment", installment["id"], include_sensitive=True)
+    assert detail["version"] == 3
+    assert detail["version"] != 1
