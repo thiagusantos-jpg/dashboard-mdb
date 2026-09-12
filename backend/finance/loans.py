@@ -107,7 +107,7 @@ def record_disbursement(loan_id: int, amount_cents: int, disbursed_at: date) -> 
     return dict(row)
 
 
-def pay_installment(
+def pay_installment_legacy_unsafe(
     installment_id: int,
     *,
     principal_cents: int,
@@ -115,6 +115,34 @@ def pay_installment(
     paid_at: date,
     created_by: Optional[int] = None,
 ) -> dict:
+    """LEGACY / UNSAFE — do not call this for new code.
+
+    This is the pre-B3 "pay an installment" implementation. It is no longer
+    reachable from any HTTP route: both routes that used to call into it
+    (`POST /entries/{id}/settlements` and `POST /loans/installments/{id}/payments`)
+    were rewritten in task B3 to reject with 409, so live traffic never hits this
+    function anymore. The real, safe payment path is
+    `record_payment()` in `backend/finance/payments.py`, which delegates to
+    `pay_installment_on_connection()` below.
+
+    Why it still exists: it is still directly invoked by
+    `tests/finance/test_loans.py`, `tests/finance/test_forecast.py`,
+    `tests/test_obligations_api.py`, `tests/finance/test_obligations.py`, and
+    `tests/finance/test_payments.py` as a fixture-setup shortcut (to create an
+    already-paid installment without going through the full `record_payment`
+    flow), and by `backfill_legacy_payments()`'s own historical-data assumptions.
+    It is kept, renamed and documented here rather than deleted, so its
+    divergence from the safe path is visible to the next reader instead of silent.
+
+    KNOWN BUG — do not use for anything that matters: unlike
+    `pay_installment_on_connection`, this function does **not** validate that
+    `principal_cents`/`interest_cents` stay within the installment's remaining
+    per-component balance. It unconditionally marks the installment `status='paid'`
+    after a single call, even if the amounts paid don't actually cover the
+    installment's remaining principal/interest. `pay_installment_on_connection`
+    fixes this (partial payments, per-component balance checks, version-gated
+    concurrency) and should be used for any real payment recording.
+    """
     if principal_cents < 0 or interest_cents < 0:
         raise ValueError("Os valores pagos não podem ser negativos.")
     with db.connection() as conn:
@@ -180,7 +208,7 @@ def pay_installment_on_connection(
     connection/transaction — no commit here, and no interest-entry creation
     (that's the caller's job, sharing the same connection; see
     backend/finance/payments.py::record_payment, which is this function's
-    only caller). Unlike the legacy `pay_installment()` below, this:
+    only caller). Unlike the legacy `pay_installment_legacy_unsafe()` above, this:
 
     - accepts a partial payment (principal_cents/interest_cents need not
       cover the whole installment) and only flips status to 'paid' once both

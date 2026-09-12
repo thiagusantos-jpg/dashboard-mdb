@@ -170,7 +170,7 @@ def test_renegotiated_loan_keeps_paid_installment_query_working(forecast_db):
         start_date="2026-09-01",
     )
     first = loans.loan_position(loan["id"])["installments"][0]
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         first["id"], principal_cents=100_000, interest_cents=10_000,
         paid_at=date(2026, 9, 15),
     )
@@ -213,7 +213,7 @@ def test_renegotiated_loan_excludes_orphaned_unpaid_installment_from_closed_sche
         start_date="2026-09-01",
     )
     first, second = loans.loan_position(loan["id"])["installments"]
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         first["id"], principal_cents=50_000, interest_cents=5_000,
         paid_at=date(2026, 9, 10),
     )

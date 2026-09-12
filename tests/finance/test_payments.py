@@ -440,7 +440,7 @@ def test_backfill_is_idempotent_across_two_runs(payments_db):
 
     loan = two_installment_loan()
     installment = loans.loan_position(loan["id"])["installments"][0]
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         installment["id"], principal_cents=100_000, interest_cents=5_000,
         paid_at=date(2026, 9, 10),
     )

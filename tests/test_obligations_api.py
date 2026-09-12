@@ -257,7 +257,7 @@ def test_get_obligation_detail_preserves_paid_installment_history(client):
     # always reject (no cash link) — use the module function directly to
     # set up this fixture's "already paid" installment, same as before B3
     # this test relied on the (now-removed) success path of that route.
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         installment_id, principal_cents=100_000, interest_cents=5_000,
         paid_at=date(2026, 9, 10),
     )

@@ -212,7 +212,7 @@ def test_get_obligation_preserves_access_to_paid_installment_history(obligations
     loan = _two_installment_loan()
     position = loans.loan_position(loan["id"])
     first = position["installments"][0]
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         first["id"], principal_cents=100_000, interest_cents=5_000, paid_at=date(2026, 9, 10),
     )
 

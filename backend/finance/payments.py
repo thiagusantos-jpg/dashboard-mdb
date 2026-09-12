@@ -247,8 +247,8 @@ def _ensure_interest_settlement(
 
     Competence/due_date default to the installment's own due date ("padrão
     do vencimento da parcela"), not paid_at, which differs from the legacy
-    loans.pay_installment()'s behavior (paid_at's month) — legacy callers are
-    unaffected since they don't go through this path.
+    loans.pay_installment_legacy_unsafe()'s behavior (paid_at's month) —
+    legacy callers are unaffected since they don't go through this path.
 
     Returns (interest_entry_id, financial_event_id) — either may be None
     when interest_cents==0 for this call and no interest entry exists yet.
@@ -347,8 +347,8 @@ def record_payment(
     # function opens its own `with db.connection()` below — calling it from
     # inside that transaction would nest a second sqlite3 connection against
     # the same file mid-write, which is unsafe. Only needed when this call
-    # actually carries an interest amount (mirrors loans.pay_installment's
-    # own `if interest_cents:` guard).
+    # actually carries an interest amount (mirrors
+    # loans.pay_installment_legacy_unsafe's own `if interest_cents:` guard).
     interest_account_id = None
     if kind == "loan_installment" and interest_cents:
         interest_account_id = accounts.account_by_key(company, "loan_interest")["id"]
@@ -488,6 +488,14 @@ def record_payment(
                     )
                 except EntryVersionConflict as exc:
                     raise PaymentConflictError(str(exc)) from exc
+                # settle_entry_on_connection returns only the event id, not a
+                # row — fetch the post-payment raw row ourselves so the audit
+                # trail can store a symmetric before/after pair (see step 7).
+                after_raw = dict(
+                    conn.execute(
+                        "SELECT * FROM financial_entries WHERE id=?", (obligation_id,)
+                    ).fetchone()
+                )
             else:
                 interest_entry_id, financial_event_id = _ensure_interest_settlement(
                     conn,
@@ -500,7 +508,10 @@ def record_payment(
                     interest_account_id=interest_account_id,
                 )
                 try:
-                    pay_installment_on_connection(
+                    # pay_installment_on_connection returns the post-payment
+                    # raw loan_installments row — reused below (step 7) as the
+                    # audit trail's `after` snapshot.
+                    after_raw = pay_installment_on_connection(
                         conn,
                         obligation_id,
                         principal_cents=principal_cents,
@@ -535,6 +546,17 @@ def record_payment(
             # entry payment this also makes the payment show up in the
             # existing GET /entries/{id}/history endpoint (entry_history()
             # filters entity_type='financial_entry').
+            #
+            # `before`/`after` are both raw table-row snapshots (financial_entries
+            # or loan_installments), matching the symmetric shape
+            # entry_management.update_entry()/cancel_entry() already use for
+            # their own audit rows (see entry_management.py's `_insert_audit`
+            # calls) — NOT the `_obligation_item`-shaped dict built below for
+            # the HTTP response (`after_item`), which uses a different field
+            # vocabulary (amount_cents vs total_cents/paid_cents/open_cents,
+            # string ids, allowed_actions/key with no `before` counterpart).
+            # Keeping the audit trail symmetric lets a UI render a field-level
+            # diff the same way for every action, "pay" included.
             entity_type = "financial_entry" if kind == "entry" else "loan_installment"
             before_snapshot = dict(entry) if kind == "entry" else installment
             after_item = _obligation_item(conn, company, kind, obligation_id)
@@ -546,7 +568,7 @@ def record_payment(
                 entity_id=obligation_id,
                 action="pay",
                 before=before_snapshot,
-                after=after_item,
+                after=after_raw,
                 reason="",
                 actor_id=actor_id,
                 timestamp=timestamp,
@@ -623,8 +645,9 @@ def backfill_legacy_payments(company: Optional[int] = None) -> dict:
     timestamp = db.now()
 
     with db.connection() as conn:
-        # Loan-interest entries (source='loan', created by loans.pay_installment
-        # or by this module's own _ensure_interest_settlement) are excluded
+        # Loan-interest entries (source='loan', created by
+        # loans.pay_installment_legacy_unsafe or by this module's own
+        # _ensure_interest_settlement) are excluded
         # here: their settlement is bundled into the loan_installment payment
         # row below (financial_event_id/interest_entry_id), exactly like a
         # live record_payment(kind='loan_installment') call does — one

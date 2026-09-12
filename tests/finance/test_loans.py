@@ -56,7 +56,7 @@ def test_installment_splits_principal_and_interest(loan_db):
     loan = make_loan(principal=90_000_00, installments=3)
     installment = loans.loan_position(loan["id"])["installments"][0]
 
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         installment["id"],
         principal_cents=30_000_00,
         interest_cents=6_00,
@@ -73,13 +73,13 @@ def test_installment_splits_principal_and_interest(loan_db):
 def test_paying_an_installment_twice_fails(loan_db):
     loan = make_loan()
     installment = loans.loan_position(loan["id"])["installments"][0]
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         installment["id"], principal_cents=33_333_00,
         interest_cents=6_00, paid_at=date(2026, 10, 10),
     )
 
     with pytest.raises(ValueError):
-        loans.pay_installment(
+        loans.pay_installment_legacy_unsafe(
             installment["id"], principal_cents=1_00,
             interest_cents=0, paid_at=date(2026, 10, 11),
         )
@@ -88,7 +88,7 @@ def test_paying_an_installment_twice_fails(loan_db):
 def test_renegotiation_closes_schedule_and_keeps_paid_installments(loan_db):
     loan = make_loan(principal=90_000_00, installments=3)
     first = loans.loan_position(loan["id"])["installments"][0]
-    loans.pay_installment(
+    loans.pay_installment_legacy_unsafe(
         first["id"], principal_cents=30_000_00, interest_cents=6_00,
         paid_at=date(2026, 10, 10),
     )
