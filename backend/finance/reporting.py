@@ -39,7 +39,7 @@ def management_result(company: int, period: str, store: Optional[int] = None) ->
     actual_by_id = {row["id"]: dict(row) for row in rows}
     account_lines = []
     on_date = period + "-01"
-    for account in list_accounts(company):
+    for account in list_accounts(company, include_archived=True):
         actual = actual_by_id.get(account["id"])
         budget = resolve_parameter(
             company,
