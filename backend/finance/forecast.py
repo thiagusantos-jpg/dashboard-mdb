@@ -88,7 +88,10 @@ def _open_installments_due(company: int, day: date, *, due_on_or_before: bool = 
             f"""
             SELECT i.total_cents,i.number,l.lender FROM loan_installments i
             JOIN loans l ON l.id=i.loan_id
-            WHERE l.company=? AND i.due_date{comparator}? AND i.status='open'
+            JOIN loan_schedules s ON s.id=i.schedule_id
+            WHERE l.company=? AND i.due_date{comparator}?
+              AND i.schedule_id=l.active_schedule_id
+              AND s.status='active' AND i.status='open'
             """,
             (company, day.isoformat()),
         ).fetchall()

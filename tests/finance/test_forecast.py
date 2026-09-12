@@ -143,6 +143,55 @@ def test_reversed_payment_removes_entry_from_open_forecast(forecast_db):
     assert amounts == []
 
 
+def test_renegotiated_loan_shows_only_active_schedule_installment(forecast_db):
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=95_000,
+        installments=[{"number": 1, "due_date": "2026-09-20", "principal_cents": 100_000, "interest_cents": 10_000}],
+        start_date="2026-09-01",
+    )
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-09-25", "principal_cents": 100_000, "interest_cents": 5_000}],
+        reason="Prazo estendido",
+    )
+
+    result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
+    amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
+               if i['source'] == 'loan_installments']
+    assert amounts == [-105000]
+
+
+def test_renegotiated_loan_keeps_paid_installment_query_working(forecast_db):
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=95_000,
+        installments=[{"number": 1, "due_date": "2026-09-20", "principal_cents": 100_000, "interest_cents": 10_000}],
+        start_date="2026-09-01",
+    )
+    first = loans.loan_position(loan["id"])["installments"][0]
+    loans.pay_installment(
+        first["id"], principal_cents=100_000, interest_cents=10_000,
+        paid_at=date(2026, 9, 15),
+    )
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-09-25", "principal_cents": 50_000, "interest_cents": 5_000}],
+        reason="Nova parcela",
+    )
+
+    result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
+    amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
+               if i['source'] == 'loan_installments']
+    assert amounts == [-55000]
+
+    position = loans.loan_position(loan["id"])
+    paid = [i for i in position["installments"] if i["status"] == "paid"]
+    open_ = [i for i in position["installments"] if i["status"] == "open"]
+    assert len(paid) == 1
+    assert len(open_) == 1
+
+
 def test_future_window_shows_remaining_balance(forecast_db):
     from backend.finance.entries import settle_entry
     account = accounts.account_by_key(1, 'rent')
