@@ -112,3 +112,40 @@ def test_importing_a_payments_bank_line_offers_a_link_suggestion(client):
 
     balance = client.get("/api/companies/1/finance/cash-balance").json()
     assert balance["balance_cents"] == -40_000
+
+
+def test_commit_errors_use_the_code_message_fields_contract(client):
+    """Task B5 fix round 1, Finding 5: every new 422/409 raised by this
+    route must carry {code,message,fields}, not a bare string."""
+    cash_account = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Stone", "kind": "payment"}
+    ).json()
+    content = (
+        "Data,Descricao,Valor,FITID\n2026-09-12,Pagamento fornecedor,-40.00,BANK-0001\n"
+    ).encode("utf-8")
+    preview = client.post(
+        f"/api/companies/1/finance/cash-accounts/{cash_account['id']}/bank-imports/preview",
+        files={"file": ("extrato.csv", content, "text/csv")},
+    ).json()
+
+    # Malformed `decisions` JSON -> 422 {code,message,fields}.
+    bad_decisions = client.post(
+        f"/api/companies/1/finance/cash-accounts/{cash_account['id']}/bank-imports",
+        files={"file": ("extrato.csv", content, "text/csv")},
+        data={"preview_hash": preview["preview_hash"], "decisions": "not-json"},
+    )
+    assert bad_decisions.status_code == 422, bad_decisions.text
+    body = bad_decisions.json()["detail"]
+    assert body["code"] == "invalid_fields"
+    assert body["fields"] == ["decisions"]
+
+    # Stale preview_hash -> 409 {code,message,fields}.
+    stale = client.post(
+        f"/api/companies/1/finance/cash-accounts/{cash_account['id']}/bank-imports",
+        files={"file": ("extrato.csv", content, "text/csv")},
+        data={"preview_hash": "not-the-real-hash", "decisions": "{}"},
+    )
+    assert stale.status_code == 409, stale.text
+    stale_body = stale.json()["detail"]
+    assert stale_body["code"] == "conflict"
+    assert isinstance(stale_body["message"], str) and stale_body["message"]

@@ -330,6 +330,49 @@ def test_reconciled_payment_cannot_be_reversed_until_undone(payments_db):
     assert result["obligation"]["status"] == "open"
 
 
+def test_payment_reconciled_via_payment_ids_path_cannot_be_reversed_until_undone(payments_db):
+    """The reconciliation lock above only ever checked item_type='cash_event'
+    anchored at the payment's OWN cash_event_id — the shape suggest()
+    writes. A payment reconciled through the NEWER, caller-driven
+    confirm(..., payment_ids=[...]) path (task B5) is anchored as
+    item_type='payment' pointing at the payment's OWN id instead, against a
+    DIFFERENT cash_event entirely — a shape the guard previously never
+    checked, so reversal wrongly succeeded and left a stale
+    reconciliation_links row pointing at a now-reversed payment."""
+    bank = bank_account()
+    entry = expense_entry(100_000)
+    paid = record_payment(
+        COMPANY, "entry", entry["id"], amount_cents=40_000, paid_at=date(2026, 9, 10),
+        expected_version=1, idempotency_key="pay-1", cash_account_id=bank["id"],
+    )
+    payment_id = _payment_id_int(paid["payment_id"])
+
+    # A DIFFERENT, unrelated cash movement anchors the group — not the
+    # payment's own cash_event_id — and this payment is linked into it as
+    # one specific partial-payment slice.
+    stray_debit = ledger.post_cash_event(
+        COMPANY, bank["id"], -40_000, date(2026, 9, 11), "Débito a explicar"
+    )
+    group = reconciliation.suggest(COMPANY, stray_debit["id"])
+    assert group["status"] == "unmatched"
+    confirmed = reconciliation.confirm(group["id"], [], payment_ids=[payment_id])
+    assert confirmed["status"] == "manual_matched"
+
+    with pytest.raises(PaymentConflictError):
+        reverse_payment(
+            COMPANY, payment_id, reason="Tentando estornar conciliado via payment_ids",
+            reversed_at=date(2026, 9, 12), expected_version=2, idempotency_key="undo-1",
+        )
+
+    reconciliation.undo(group["id"], reason="Conciliação errada")
+
+    result = reverse_payment(
+        COMPANY, payment_id, reason="Agora pode",
+        reversed_at=date(2026, 9, 12), expected_version=2, idempotency_key="undo-2",
+    )
+    assert result["obligation"]["status"] == "open"
+
+
 # --- Validation --------------------------------------------------------
 
 

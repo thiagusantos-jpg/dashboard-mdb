@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from .. import database as db, permissions
 from ..integrations import bank_files
 from ..integrations.bank_files import BankFileError, BankImportConflict
+from .obligations import _error_detail
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
@@ -37,7 +38,9 @@ async def preview_bank_import(company: int, cash_account_id: int, file: UploadFi
     try:
         return bank_files.preview_bank_import(company, cash_account_id, file.filename, content)
     except BankFileError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise HTTPException(
+            422, _error_detail("invalid_file", str(exc), ["file"])
+        ) from exc
 
 
 @router.post(
@@ -58,15 +61,27 @@ async def commit_bank_import(
     try:
         decisions_map = json.loads(decisions) if decisions else {}
     except (TypeError, ValueError) as exc:
-        raise HTTPException(422, "Campo decisions inválido (é esperado um JSON).") from exc
+        raise HTTPException(
+            422,
+            _error_detail(
+                "invalid_fields", "Campo decisions inválido (é esperado um JSON).", ["decisions"]
+            ),
+        ) from exc
     if not isinstance(decisions_map, dict):
-        raise HTTPException(422, "Campo decisions inválido (é esperado um objeto).")
+        raise HTTPException(
+            422,
+            _error_detail(
+                "invalid_fields", "Campo decisions inválido (é esperado um objeto).", ["decisions"]
+            ),
+        )
     try:
         return bank_files.commit_bank_import(
             company, cash_account_id, file.filename, content,
             decisions=decisions_map, preview_hash=preview_hash,
         )
     except BankImportConflict as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, _error_detail("conflict", str(exc), [])) from exc
     except BankFileError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise HTTPException(
+            422, _error_detail("invalid_file", str(exc), ["file"])
+        ) from exc

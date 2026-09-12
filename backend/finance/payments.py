@@ -733,20 +733,44 @@ def reverse_payment(
             # desfazer conciliação explicitamente". A link row only exists
             # while the reconciliation group is live; reconciliation.undo()
             # deletes it, which is what frees this payment for reversal.
+            #
+            # Two independent shapes anchor a live reconciliation against
+            # this payment (backend/finance/reconciliation.py::confirm):
+            # - item_type='cash_event', item_id=<payment's own cash_event_id>
+            #   — the payment's cash_event itself is the group's anchor
+            #   (reconciliation.suggest's original path).
+            # - item_type='payment', item_id=<this payment's id> — this
+            #   payment was linked as ONE partial-payment slice explaining a
+            #   DIFFERENT cash movement (the new confirm(..., payment_ids=
+            #   [...]) path). Missing this check would let a payment
+            #   reconciled this way be reversed anyway, leaving a stale
+            #   reconciliation_links row pointing at a now-reversed payment
+            #   — the same state reconciliation.confirm already refuses to
+            #   create in the other direction (a reversed payment can never
+            #   be linked in the first place).
+            linked_as_cash_event = None
             if payment["cash_event_id"] is not None:
-                linked = conn.execute(
+                linked_as_cash_event = conn.execute(
                     """
                     SELECT 1 FROM reconciliation_links
                     WHERE item_type='cash_event' AND item_id=?
                     """,
                     (payment["cash_event_id"],),
                 ).fetchone()
-                if linked:
-                    raise PaymentConflictError(
-                        "Este pagamento está conciliado. Desfaça a conciliação "
-                        "antes de estornar o pagamento.",
-                        fields=["cash_event_id"],
-                    )
+            linked_as_payment = conn.execute(
+                """
+                SELECT 1 FROM reconciliation_links
+                WHERE item_type='payment' AND item_id=?
+                """,
+                (payment_id,),
+            ).fetchone()
+            if linked_as_cash_event or linked_as_payment:
+                fields = ["cash_event_id"] if linked_as_cash_event else ["id"]
+                raise PaymentConflictError(
+                    "Este pagamento está conciliado. Desfaça a conciliação "
+                    "antes de estornar o pagamento.",
+                    fields=fields,
+                )
 
             kind = payment["obligation_kind"]
             obligation_id = payment["obligation_id"]

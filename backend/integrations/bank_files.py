@@ -6,6 +6,7 @@ import io
 import json
 import re
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -50,6 +51,21 @@ class BankImportConflict(ValueError):
 
 def _new_id() -> int:
     return secrets.randbits(63) or 1
+
+
+def _is_unique_violation(exc: BaseException) -> bool:
+    """True for a UNIQUE-constraint violation on either backend this
+    codebase targets. psycopg is only importable when `db.PG` is set (see
+    backend/database.py's own `if PG: import psycopg` guard) — this
+    project's SQLite-only dev/test environment never has the package
+    installed at all, so it must only be imported lazily, on the Postgres
+    path."""
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    if db.PG:
+        import psycopg
+        return isinstance(exc, psycopg.errors.IntegrityError)
+    return False
 
 
 @dataclass(frozen=True)
@@ -164,16 +180,32 @@ def _parse_csv(content: bytes) -> list:
     return transactions
 
 
-def _external_record_exists(company: int, account_id, external_id: str, version: str) -> bool:
-    with db.connection() as conn:
-        row = conn.execute(
+def _external_record_exists(
+    company: int, account_id, external_id: str, version: str, *, conn=None,
+) -> bool:
+    """When `conn` is given, the read happens on the CALLER's own connection
+    (same established pattern as records.upsert_external_record's own
+    `conn=` parameter) — required inside commit_bank_import's single
+    transaction, where a SEPARATE connection would never see this same
+    transaction's own uncommitted writes from earlier lines in the same
+    file (e.g. a repeated external_id within one file: without sharing the
+    connection, the second occurrence would wrongly read `already_seen =
+    False` and take the "new" branch too, creating a second cash_events row
+    for what is really one already-recorded bank line)."""
+    def _query(c):
+        row = c.execute(
             """
             SELECT 1 FROM external_records
             WHERE company=? AND source='bank_file' AND account_id=? AND external_id=? AND version=?
             """,
             (company, str(account_id), external_id, version),
         ).fetchone()
-    return row is not None
+        return row is not None
+
+    if conn is not None:
+        return _query(conn)
+    with db.connection() as own_conn:
+        return _query(own_conn)
 
 
 def import_bank_file(company: int, cash_account_id: int, filename: str, content: bytes) -> dict:
@@ -229,6 +261,7 @@ def _reversed_cash_event_ids(conn) -> set:
 
 def _candidate_cash_events(
     conn, company: int, cash_account_id: int, amount_cents: int, around: date,
+    *, linked: set, reversed_ids: set,
 ) -> list:
     """Suggest cash_events that MIGHT represent the same real-world movement
     as an imported bank line: same company/account, exact amount match, and
@@ -245,11 +278,16 @@ def _candidate_cash_events(
     never import-linkable) — this is the same `kind` value
     ledger.post_cash_event always writes, whether the event was created by a
     payment or by a prior "new"-decision bank import.
+
+    `linked`/`reversed_ids` are computed ONCE by the caller (_preview_items)
+    for the whole file, not re-queried per line — each is an unfiltered
+    full-table scan, and this function runs once per imported transaction
+    (up to MAX_ROWS=50,000 per file), so recomputing them per line made
+    preview cost quadratic in file size for no benefit (both sets are the
+    same for every line in one preview call).
     """
     start = (around - timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
     end = (around + timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
-    linked = _linked_cash_event_ids(conn)
-    reversed_ids = _reversed_cash_event_ids(conn)
     rows = conn.execute(
         """
         SELECT id FROM cash_events
@@ -263,10 +301,13 @@ def _candidate_cash_events(
 
 
 def _preview_items(conn, company: int, cash_account_id: int, transactions: list) -> list:
+    linked = _linked_cash_event_ids(conn)
+    reversed_ids = _reversed_cash_event_ids(conn)
     items = []
     for tx in transactions:
         candidates = _candidate_cash_events(
             conn, company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
+            linked=linked, reversed_ids=reversed_ids,
         )
         # A suggestion is only ever pre-selected when it is UNAMBIGUOUS (a
         # single matching candidate) — two legitimate, independently-real
@@ -386,7 +427,9 @@ def commit_bank_import(
     with db.connection() as conn:
         for tx in transactions:
             version = "1"
-            already_seen = _external_record_exists(company, cash_account_id, tx.external_id, version)
+            already_seen = _external_record_exists(
+                company, cash_account_id, tx.external_id, version, conn=conn,
+            )
             payload = {"date": tx.date, "amount_cents": tx.amount_cents, "description": tx.description}
             records.upsert_external_record(
                 company, PROVIDER_BANK_FILE, cash_account_id, tx.external_id, version, payload,
@@ -451,17 +494,32 @@ def commit_bank_import(
                     f"Candidato já vinculado a outra transação importada: {tx.external_id!r}."
                 )
 
-            conn.execute(
-                """
-                INSERT INTO bank_cash_links(
-                    id,company,cash_account_id,provider,external_id,cash_event_id,created_at
-                ) VALUES(?,?,?,?,?,?,?)
-                """,
-                (
-                    _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
-                    candidate_cash_event_id, db.now(),
-                ),
-            )
+            # The SELECT above is a fast pre-check, not the actual guarantee —
+            # under Postgres READ COMMITTED, two concurrent commits could
+            # both pass it before either INSERTs. The real, race-proof
+            # guarantee is bank_cash_links's own UNIQUE(cash_event_id)
+            # constraint (migration 019): a violation here means someone
+            # else claimed this candidate in the interim, mapped to the same
+            # BankImportConflict the pre-check above already raises for the
+            # non-racy case.
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO bank_cash_links(
+                        id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
+                        candidate_cash_event_id, db.now(),
+                    ),
+                )
+            except Exception as exc:
+                if not _is_unique_violation(exc):
+                    raise
+                raise BankImportConflict(
+                    f"Candidato já vinculado a outra transação importada: {tx.external_id!r}."
+                ) from exc
             linked += 1
 
     return {

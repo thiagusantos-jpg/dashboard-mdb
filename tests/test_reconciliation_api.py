@@ -55,3 +55,33 @@ def test_suggest_and_confirm_via_api(client):
 
     groups = client.get("/api/companies/1/finance/reconciliation").json()
     assert len(groups) == 1
+
+
+def test_confirm_with_unknown_payment_id_returns_404_error_contract(client):
+    """Task B5 fix round 1, Finding 5: a payment_id outside scope must be a
+    404 {code,message,fields} error (a missing resource), not a bare-string
+    422 — the plan's Global Constraints require every new 422/409/403/404 to
+    use this shape."""
+    cash_account = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Stone", "kind": "payment"}
+    ).json()
+    event = client.post(
+        "/api/companies/1/finance/cash-events",
+        json={"cash_account_id": cash_account["id"], "amount_cents": 12_345,
+              "occurred_at": "2026-09-12", "description": "Débito sem par"},
+    ).json()
+    group = client.post(
+        "/api/companies/1/finance/reconciliation/suggest",
+        json={"cash_event_id": event["id"]},
+    ).json()
+    assert group["status"] == "unmatched"
+
+    response = client.post(
+        f"/api/companies/1/finance/reconciliation/{group['id']}/confirm",
+        json={"payment_ids": [999999999]},
+    )
+    assert response.status_code == 404, response.text
+    body = response.json()["detail"]
+    assert body["code"] == "not_found"
+    assert isinstance(body["message"], str) and body["message"]
+    assert body["fields"] == ["payment_ids"]

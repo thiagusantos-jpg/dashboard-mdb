@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
 from ..finance import reconciliation
+from .obligations import _error_detail
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
@@ -81,7 +82,15 @@ def confirm_group(
             accept_partial=body.accept_partial, created_by=auth.user_id,
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        message = str(exc)
+        if message == "Pagamento não encontrado.":
+            # A payment_id outside this company's/scope's reach is a missing
+            # resource, not an invalid-fields error — same contract as
+            # obligations.py's own 404 for "Obrigação não encontrada.".
+            raise HTTPException(
+                404, _error_detail("not_found", message, ["payment_ids"])
+            ) from exc
+        raise HTTPException(422, _error_detail("invalid_fields", message, [])) from exc
 
 
 @router.post(

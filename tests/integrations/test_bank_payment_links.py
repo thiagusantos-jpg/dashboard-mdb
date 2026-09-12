@@ -108,6 +108,20 @@ def test_import_linking_existing_payment_avoids_duplicate_cash_and_stays_idempot
     assert after_second_import_balance == before_import_balance
     assert external_transaction_id == "BANK-0001"
 
+    # The brief's own literal 3rd assertion — read the PERSISTED
+    # bank_cash_links row back from the database (not just the CSV parser's
+    # own echo of external_id) and confirm it points at the payment's real
+    # cash_event_id.
+    with db.connection() as conn:
+        link_row = conn.execute(
+            "SELECT * FROM bank_cash_links WHERE company=? AND cash_account_id=? AND external_id=?",
+            (COMPANY, cash_account["id"], external_transaction_id),
+        ).fetchone()
+    assert link_row is not None
+    linked_external_id = link_row["external_id"]
+    assert linked_external_id == external_transaction_id
+    assert str(link_row["cash_event_id"]) == str(cash_event_id)
+
 
 def test_recommitting_the_exact_same_link_decision_returns_existing_link(cash_account):
     entry = expense_entry(100_000)
@@ -135,6 +149,17 @@ def test_recommitting_the_exact_same_link_decision_returns_existing_link(cash_ac
     assert first["linked"] == 1
     assert second["linked"] == 1
     assert ledger.account_balance(cash_account["id"]) == -40_000
+
+    # Committing the identical decision twice must not create a SECOND
+    # bank_cash_links row for the same cash_event_id — "linked == 1" both
+    # times would still pass even if a second row were wrongly inserted, so
+    # this counts the actual persisted rows directly.
+    with db.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM bank_cash_links WHERE cash_event_id=?",
+            (cash_event_id,),
+        ).fetchone()["c"]
+    assert count == 1
 
 
 def test_two_legitimate_equal_payments_are_not_auto_merged(cash_account):
@@ -200,6 +225,74 @@ def test_stale_preview_hash_is_rejected_with_conflict(cash_account):
             COMPANY, cash_account["id"], "extrato.csv", other_statement,
             decisions={}, preview_hash=preview["preview_hash"],
         )
+
+
+def test_repeated_external_id_within_one_file_creates_only_one_cash_event(cash_account):
+    """A file with the SAME external_id twice (e.g. a duplicated OFX FITID
+    line) must only ever create ONE cash_events row for it — the duplicate
+    check inside commit_bank_import must see this SAME transaction's own
+    earlier write to external_records, not a stale read from a separate
+    connection blind to the outer transaction's in-flight inserts."""
+    content = (
+        "Data,Descricao,Valor,FITID\n"
+        "2026-09-12,Pagamento fornecedor,-40.00,BANK-DUP\n"
+        "2026-09-12,Pagamento fornecedor,-40.00,BANK-DUP\n"
+    ).encode("utf-8")
+
+    preview = bank_files.preview_bank_import(COMPANY, cash_account["id"], "extrato.csv", content)
+    assert preview["count"] == 2
+
+    commit = bank_files.commit_bank_import(
+        COMPANY, cash_account["id"], "extrato.csv", content,
+        decisions={"BANK-DUP": "new"}, preview_hash=preview["preview_hash"],
+    )
+    assert commit["imported"] == 1
+    assert commit["duplicates"] == 1
+
+    with db.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM cash_events WHERE company=? AND cash_account_id=? AND amount_cents=?",
+            (COMPANY, cash_account["id"], -4_000),
+        ).fetchone()["c"]
+    assert count == 1
+    assert ledger.account_balance(cash_account["id"]) == -4_000
+
+
+def test_bank_cash_links_cash_event_id_is_unique_at_the_database_level(cash_account):
+    """The "linked at most once" invariant must be enforced by the database
+    itself (migration 019's UNIQUE(cash_event_id)), not only by an
+    application-level check-then-insert — the latter alone races under
+    concurrent commits at Postgres READ COMMITTED. A direct second insert
+    for the same cash_event_id, bypassing commit_bank_import entirely, must
+    be rejected by the schema."""
+    entry = expense_entry(100_000)
+    payment = record_payment(
+        COMPANY, "entry", entry["id"], amount_cents=40_000, paid_at=date(2026, 9, 12),
+        expected_version=1, idempotency_key="pay-1", cash_account_id=cash_account["id"],
+    )
+    cash_event_id = payment["cash_event_id"]
+
+    import secrets
+    with db.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO bank_cash_links(
+                id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (secrets.randbits(63), COMPANY, cash_account["id"], "bank_file", "BANK-A", cash_event_id, db.now()),
+        )
+
+    with pytest.raises(Exception):
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO bank_cash_links(
+                    id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (secrets.randbits(63), COMPANY, cash_account["id"], "bank_file", "BANK-B", cash_event_id, db.now()),
+            )
 
 
 def test_link_decision_revalidates_candidate_scope_and_amount(cash_account):
