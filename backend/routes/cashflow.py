@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
 from ..finance import ledger
+from ..finance.forecast import forecast as compute_forecast
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
@@ -125,6 +126,18 @@ def create_transfer(
 def consolidated_balance(company: int):
     _require_company(company)
     return {"company": company, "balance_cents": ledger.consolidated_balance(company)}
+
+
+@router.get(
+    "/forecast",
+    dependencies=[Depends(permissions.require_permission("finance.read"))],
+)
+def get_forecast(company: int, start: date, end: date, scenario: str = "base"):
+    _require_company(company)
+    try:
+        return compute_forecast(company, start, end, scenario)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post(

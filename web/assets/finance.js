@@ -41,7 +41,7 @@ function financeError(title, subtitle, error) {
 function renderFinancePage() {
   const renderers = {
     financeiro: renderFinanceiro, despesas: renderDespesas, 'contas-pagar': renderContasPagar,
-    emprestimos: renderEmprestimos,
+    emprestimos: renderEmprestimos, 'fluxo-caixa': renderFluxoCaixa,
   };
   return (renderers[APP.page] || renderFinanceiro)();
 }

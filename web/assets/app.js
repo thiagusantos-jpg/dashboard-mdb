@@ -407,8 +407,8 @@ function closeNav(returnFocus) {
 }
 
 const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque',
-  'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'sync', 'configuracoes'];
-const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar', 'emprestimos'];
+  'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'sync', 'configuracoes'];
+const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa'];
 const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
   'configuracoes/metas', 'configuracoes/alertas', 'configuracoes/integracoes'];
 const SETTINGS_SECTIONS = SETTINGS_ROUTES.map((route) => route.split('/')[1]);

@@ -57,3 +57,14 @@ def test_transfer_between_accounts_keeps_consolidated_balance(client):
     by_name = {a["name"]: a["balance_cents"] for a in accounts}
     assert by_name["Stone"] == 0
     assert by_name["Banco Y"] == 5_000_00
+
+
+def test_forecast_endpoint_returns_days_and_lowest(client):
+    response = client.get(
+        "/api/companies/1/finance/forecast",
+        params={"start": "2026-09-01", "end": "2026-09-30", "scenario": "base"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["days"]) == 30
+    assert "lowest" in body
