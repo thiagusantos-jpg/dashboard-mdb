@@ -28,7 +28,8 @@ function buildEqualInstallments(principalCents, interestPerInstallmentCents, cou
   return installments;
 }
 
-async function renderEmprestimos() {
+async function renderEmprestimos(token) {
+  token = token || beginPage();
   const title = '🏦 Empréstimos';
   const subtitle = 'Contratos, parcelas e posição de dívida por credor.';
   document.getElementById('content').innerHTML = `
@@ -39,8 +40,10 @@ async function renderEmprestimos() {
   try {
     positions = await api(`/api/companies/${APP.company}/finance/loans`);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;
+    return financeError(title, subtitle, e, () => renderEmprestimos());
   }
+  if (!APP.pageState.isCurrent(token)) return;
   const cards = positions.map(loanCard).join('') || '<div class="story-box">Nenhum empréstimo cadastrado.</div>';
   document.getElementById('content').innerHTML = `
     <div class="page-title">${title}</div>
@@ -74,7 +77,7 @@ async function renderEmprestimos() {
         </div>
       </form>
     </div>`;
-  document.getElementById('loan-create-form').addEventListener('submit', onCreateLoan);
+  watchForm(document.getElementById('loan-create-form')).addEventListener('submit', onCreateLoan);
   document.querySelectorAll('[data-pay-form]').forEach((form) => form.addEventListener('submit', onPayInstallment));
 }
 
@@ -130,6 +133,7 @@ async function onCreateLoan(event) {
         installments: buildEqualInstallments(principalCents, interestCents, count, firstDue),
       }),
     });
+    clearDirty();
     renderEmprestimos();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;

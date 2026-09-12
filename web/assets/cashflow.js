@@ -11,7 +11,8 @@ function forecastWindow() {
   return {start, end: addMonthsISO(start, 3)};
 }
 
-async function renderFluxoCaixa() {
+async function renderFluxoCaixa(token) {
+  token = token || beginPage();
   const title = '📈 Fluxo de Caixa';
   const subtitle = 'Contas, saldo consolidado e projeção de caixa realizada e prevista (90 dias).';
   document.getElementById('content').innerHTML = `
@@ -27,8 +28,10 @@ async function renderFluxoCaixa() {
       api(`/api/companies/${APP.company}/finance/forecast?start=${start}&end=${end}&scenario=base`),
     ]);
   } catch (e) {
-    return financeError(title, subtitle, e);
+    if (!APP.pageState.isCurrent(token)) return;
+    return financeError(title, subtitle, e, () => renderFluxoCaixa());
   }
+  if (!APP.pageState.isCurrent(token)) return;
 
   const accountRows = accounts.map((a) => `
     <tr>
@@ -110,8 +113,8 @@ async function renderFluxoCaixa() {
       <tbody>${movementRows || '<tr><td colspan="4">Nenhuma movimentação prevista.</td></tr>'}</tbody>
     </table></div>`;
 
-  document.getElementById('cash-account-form').addEventListener('submit', onCreateCashAccount);
-  document.getElementById('cash-event-form').addEventListener('submit', onCreateCashEvent);
+  watchForm(document.getElementById('cash-account-form')).addEventListener('submit', onCreateCashAccount);
+  watchForm(document.getElementById('cash-event-form')).addEventListener('submit', onCreateCashEvent);
 }
 
 async function onCreateCashAccount(event) {
@@ -126,6 +129,7 @@ async function onCreateCashAccount(event) {
         kind: document.getElementById('cash-account-kind').value,
       }),
     });
+    clearDirty();
     renderFluxoCaixa();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;
@@ -147,6 +151,7 @@ async function onCreateCashEvent(event) {
         description: document.getElementById('cash-event-description').value.trim(),
       }),
     });
+    clearDirty();
     renderFluxoCaixa();
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;
