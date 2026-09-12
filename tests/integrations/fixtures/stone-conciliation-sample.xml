@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<StoneConciliationFile>
+  <Header>
+    <GenerationDateTime>20260912050000</GenerationDateTime>
+    <StoneCode>12345678</StoneCode>
+    <ReferenceDate>20260910</ReferenceDate>
+  </Header>
+  <FinancialTransactions>
+    <Transaction>
+      <AcquirerTransactionKey>NSU-0001</AcquirerTransactionKey>
+      <BrandId>1</BrandId>
+      <AuthorizedAmount>1000.00</AuthorizedAmount>
+      <CapturedAmount>1000.00</CapturedAmount>
+      <Installments>
+        <Installment>
+          <InstallmentNumber>1</InstallmentNumber>
+          <GrossAmount>1000.00</GrossAmount>
+          <MdrAmount>25.00</MdrAmount>
+          <NetAmount>975.00</NetAmount>
+          <PrevisionPaymentDate>20260912</PrevisionPaymentDate>
+        </Installment>
+      </Installments>
+    </Transaction>
+    <Transaction>
+      <AcquirerTransactionKey>NSU-0002</AcquirerTransactionKey>
+      <BrandId>2</BrandId>
+      <AuthorizedAmount>600.00</AuthorizedAmount>
+      <CapturedAmount>600.00</CapturedAmount>
+      <Installments>
+        <Installment>
+          <InstallmentNumber>1</InstallmentNumber>
+          <GrossAmount>300.00</GrossAmount>
+          <MdrAmount>9.00</MdrAmount>
+          <NetAmount>291.00</NetAmount>
+          <PrevisionPaymentDate>20260912</PrevisionPaymentDate>
+        </Installment>
+        <Installment>
+          <InstallmentNumber>2</InstallmentNumber>
+          <GrossAmount>300.00</GrossAmount>
+          <MdrAmount>9.00</MdrAmount>
+          <NetAmount>291.00</NetAmount>
+          <PrevisionPaymentDate>20261012</PrevisionPaymentDate>
+        </Installment>
+      </Installments>
+    </Transaction>
+  </FinancialTransactions>
+</StoneConciliationFile>
