@@ -13,11 +13,16 @@ from .entries import (
     EntryVersionConflict,
     _paid_cents,
     create_entry_on_connection,
+    reverse_settlement_on_connection,
     settle_entry_on_connection,
 )
 from .entry_management import _insert_audit
-from .ledger import post_cash_event
-from .loans import InstallmentVersionConflict, pay_installment_on_connection
+from .ledger import post_cash_event, reverse_event
+from .loans import (
+    InstallmentVersionConflict,
+    pay_installment_on_connection,
+    reverse_installment_payment_on_connection,
+)
 
 
 _KINDS = ("entry", "loan_installment")
@@ -115,6 +120,19 @@ def _replay_or_conflict(row, request_hash: str) -> dict:
             fields=["idempotency_key"],
         )
     return json.loads(row["response_json"])
+
+
+def _reversal_request_hash(*, payment_id: int, reason: str, reversed_at: date) -> str:
+    # Deliberately excludes expected_version, mirroring _request_hash's own
+    # rationale above: a genuine idempotent replay must return the original
+    # response even if a retry's expected_version is now stale.
+    payload = {
+        "payment_id": payment_id,
+        "reason": reason,
+        "reversed_at": reversed_at.isoformat(),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 # --- Obligation snapshots, computed on the SAME connection/transaction -----
@@ -611,6 +629,295 @@ def record_payment(
         if row is None:
             raise
         return _replay_or_conflict(row, request_hash)
+
+
+# --- Undoing one specific payment, without cancelling the obligation -------
+
+
+def _reversal_replay_or_conflict(row, request_hash: str) -> dict:
+    if row["reversal_request_hash"] != request_hash:
+        raise PaymentConflictError(
+            "Chave de idempotência já usada com dados diferentes.",
+            fields=["idempotency_key"],
+        )
+    return json.loads(row["reversal_response_json"])
+
+
+def reverse_payment(
+    company: int,
+    payment_id: int,
+    *,
+    reason: str,
+    reversed_at: date,
+    expected_version: int,
+    idempotency_key: str,
+    actor_id: Optional[int] = None,
+) -> dict:
+    """Undo ONE specific `obligation_payments` row without cancelling the
+    whole obligation: the entry/installment reopens to its pre-payment
+    balance (only THIS payment's contribution is netted back out — other,
+    separate payments against the same obligation are untouched), and:
+
+    - a cash_event this payment OWNED (`owns_cash_event=1`) receives a
+      compensating inverse cash_events row (ledger.reverse_event) — never
+      deleted/mutated;
+    - a cash_event this payment merely LINKED to an externally-imported bank
+      transaction (`owns_cash_event=0`) is left completely untouched; it
+      becomes available for a future allocation again purely because this
+      payment's own `reversed_at` gets set (see record_payment's
+      existing_cash_event_id "already allocated" check, which filters on
+      `obligation_payments.reversed_at IS NULL`) — there is no separate
+      "unlink" step.
+
+    Deliberately does NOT reuse entries.reverse_entry(), which reverts an
+    entry's ENTIRE remaining balance and permanently marks it 'reversed' —
+    wrong for undoing one payment among possibly several partial ones. See
+    entries.reverse_settlement_on_connection / loans.
+    reverse_installment_payment_on_connection for the actual (inverse,
+    partial) mechanics.
+
+    A payment whose cash_event is already linked into a live reconciliation
+    (backend/finance/reconciliation.py) is rejected (409) — the caller must
+    call reconciliation.undo() explicitly first; this function never does
+    that automatically.
+
+    Idempotent: `idempotency_key` is a SEPARATE namespace from the
+    payment's own creation key (stored in the same row's
+    `reversal_idempotency_key` column, following the identical replay/
+    conflict pattern as `record_payment`'s own idempotency check above).
+    Reversing an already-reversed payment (`reversed_at IS NOT NULL`) with a
+    DIFFERENT idempotency key is a distinct 409 ("dupla reversão"), not a
+    replay.
+    """
+    clean_reason = (reason or "").strip()
+    if not (3 <= len(clean_reason) <= 500):
+        raise PaymentValidationError(
+            "O motivo deve ter entre 3 e 500 caracteres.", fields=["reason"]
+        )
+    if not idempotency_key or not str(idempotency_key).strip():
+        raise PaymentValidationError(
+            "Informe a chave de idempotência.", fields=["idempotency_key"]
+        )
+    idempotency_key = str(idempotency_key).strip()
+
+    request_hash = _reversal_request_hash(
+        payment_id=payment_id, reason=clean_reason, reversed_at=reversed_at
+    )
+
+    try:
+        with db.connection() as conn:
+            # 1. Idempotency lookup — a genuine replay returns verbatim,
+            # skipping every check below (including a stale version), same
+            # semantics as record_payment's own check.
+            existing = conn.execute(
+                """
+                SELECT * FROM obligation_payments
+                WHERE company=? AND reversal_idempotency_key=?
+                """,
+                (company, idempotency_key),
+            ).fetchone()
+            if existing:
+                return _reversal_replay_or_conflict(existing, request_hash)
+
+            # 2. Load the payment row and validate its own state.
+            payment = conn.execute(
+                "SELECT * FROM obligation_payments WHERE id=? AND company=?",
+                (payment_id, company),
+            ).fetchone()
+            if not payment:
+                raise PaymentNotFoundError("Pagamento não encontrado.")
+            if payment["reversed_at"] is not None:
+                raise PaymentConflictError("Este pagamento já foi estornado.")
+
+            # 3. Reconciliation lock — "bloquear pagamento conciliado até
+            # desfazer conciliação explicitamente". A link row only exists
+            # while the reconciliation group is live; reconciliation.undo()
+            # deletes it, which is what frees this payment for reversal.
+            if payment["cash_event_id"] is not None:
+                linked = conn.execute(
+                    """
+                    SELECT 1 FROM reconciliation_links
+                    WHERE item_type='cash_event' AND item_id=?
+                    """,
+                    (payment["cash_event_id"],),
+                ).fetchone()
+                if linked:
+                    raise PaymentConflictError(
+                        "Este pagamento está conciliado. Desfaça a conciliação "
+                        "antes de estornar o pagamento.",
+                        fields=["cash_event_id"],
+                    )
+
+            kind = payment["obligation_kind"]
+            obligation_id = payment["obligation_id"]
+
+            # 4. Undo the entry's/installment's OWN contribution — the
+            # version-conditioned UPDATE inside these helpers is the real
+            # concurrency gate (mirrors record_payment's step 5).
+            if kind == "entry":
+                entry = conn.execute(
+                    "SELECT * FROM financial_entries WHERE id=? AND company=?",
+                    (obligation_id, company),
+                ).fetchone()
+                if not entry:
+                    raise PaymentNotFoundError("Lançamento não encontrado.")
+                try:
+                    reverse_settlement_on_connection(
+                        conn,
+                        obligation_id,
+                        payment["amount_cents"],
+                        reversed_at=reversed_at,
+                        reason=clean_reason,
+                        created_by=actor_id,
+                        expected_version=expected_version,
+                    )
+                except EntryVersionConflict as exc:
+                    raise PaymentConflictError(str(exc)) from exc
+                except ValueError as exc:
+                    raise PaymentConflictError(str(exc)) from exc
+                after_raw = dict(
+                    conn.execute(
+                        "SELECT * FROM financial_entries WHERE id=?", (obligation_id,)
+                    ).fetchone()
+                )
+                before_snapshot = dict(entry)
+                entity_type = "financial_entry"
+            else:
+                installment = conn.execute(
+                    """
+                    SELECT i.*, l.company AS loan_company FROM loan_installments i
+                    JOIN loans l ON l.id=i.loan_id
+                    WHERE i.id=?
+                    """,
+                    (obligation_id,),
+                ).fetchone()
+                if not installment or installment["loan_company"] != company:
+                    raise PaymentNotFoundError("Parcela não encontrada.")
+                installment = dict(installment)
+
+                # Undo any interest-entry settlement THIS payment
+                # contributed. The interest entry is a SHARED
+                # financial_entries row (payments.py::_ensure_interest_settlement
+                # creates it once, then multiple partial installment
+                # payments each settle their own slice of it) — a payment's
+                # own `financial_event_id` is only set when THAT call
+                # actually settled interest, so a payment that paid only
+                # principal (financial_event_id NULL) leaves the shared
+                # entry untouched here.
+                if payment["financial_event_id"] is not None and payment["interest_entry_id"] is not None:
+                    interest_entry = conn.execute(
+                        "SELECT * FROM financial_entries WHERE id=?",
+                        (payment["interest_entry_id"],),
+                    ).fetchone()
+                    if interest_entry and interest_entry["status"] not in {"cancelled", "reversed"}:
+                        # No caller-supplied version for the shared interest
+                        # entry: reverse_payment's single expected_version
+                        # parameter guards the installment itself, mirroring
+                        # how _ensure_interest_settlement's own
+                        # settle_entry_on_connection call carries no
+                        # expected_version either.
+                        try:
+                            reverse_settlement_on_connection(
+                                conn,
+                                payment["interest_entry_id"],
+                                payment["interest_cents"] or 0,
+                                reversed_at=reversed_at,
+                                reason=clean_reason,
+                                created_by=actor_id,
+                            )
+                        except ValueError as exc:
+                            raise PaymentConflictError(str(exc)) from exc
+
+                try:
+                    after_raw = reverse_installment_payment_on_connection(
+                        conn,
+                        obligation_id,
+                        principal_cents=payment["principal_cents"] or 0,
+                        interest_cents=payment["interest_cents"] or 0,
+                        expected_version=expected_version,
+                    )
+                except InstallmentVersionConflict as exc:
+                    raise PaymentConflictError(str(exc)) from exc
+                before_snapshot = installment
+                entity_type = "loan_installment"
+
+            # 5. Compensate the cash side. A cash_event this payment OWNED
+            # gets a genuine inverse entry (never deleted/mutated); one it
+            # merely LINKED (an imported bank transaction) is left alone —
+            # clearing this row's reversed_at below is what frees it for a
+            # future allocation.
+            if payment["owns_cash_event"] and payment["cash_event_id"] is not None:
+                reverse_event(
+                    payment["cash_event_id"],
+                    reason=clean_reason,
+                    created_by=actor_id,
+                    occurred_at=reversed_at,
+                    conn=conn,
+                )
+
+            # 6. Audit trail — same symmetric raw-row before/after
+            # convention as record_payment's "pay" action (see that
+            # function's step 7 for the rationale).
+            after_item = _obligation_item(conn, company, kind, obligation_id)
+            timestamp = db.now()
+            _insert_audit(
+                conn,
+                company=company,
+                entity_type=entity_type,
+                entity_id=obligation_id,
+                action="reverse_payment",
+                before=before_snapshot,
+                after=after_raw,
+                reason=clean_reason,
+                actor_id=actor_id,
+                timestamp=timestamp,
+            )
+
+            # 7. Build the response and persist the reversal onto the SAME
+            # obligation_payments row (no new row — a payment is reversed
+            # at most once, so a 1:1 extension of the payment row is
+            # simpler than a separate table).
+            response = {
+                "payment_id": str(payment_id),
+                "obligation": after_item,
+                "cash_event_id": (
+                    str(payment["cash_event_id"])
+                    if payment["cash_event_id"] is not None
+                    else None
+                ),
+                "reversed_at": reversed_at.isoformat(),
+            }
+            conn.execute(
+                """
+                UPDATE obligation_payments
+                SET reversed_at=?, reversal_reason=?, reversed_by=?,
+                    reversal_idempotency_key=?, reversal_request_hash=?,
+                    reversal_response_json=?
+                WHERE id=?
+                """,
+                (
+                    reversed_at.isoformat(), clean_reason, actor_id,
+                    idempotency_key, request_hash,
+                    json.dumps(response, ensure_ascii=False), payment_id,
+                ),
+            )
+            return response
+    except PaymentError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - only recover a true idempotency race
+        if not _is_unique_violation(exc):
+            raise
+        with db.connection() as conn2:
+            row = conn2.execute(
+                """
+                SELECT * FROM obligation_payments
+                WHERE company=? AND reversal_idempotency_key=?
+                """,
+                (company, idempotency_key),
+            ).fetchone()
+        if row is None:
+            raise
+        return _reversal_replay_or_conflict(row, request_hash)
 
 
 # --- Backfill of historical payments ----------------------------------------

@@ -139,21 +139,37 @@ def transfer(
     return {"transfer_group": group_id, "events": [dict(row) for row in rows]}
 
 
-def reverse_event(event_id: int, *, reason: str, created_by: Optional[int] = None) -> dict:
+def reverse_event(
+    event_id: int,
+    *,
+    reason: str,
+    created_by: Optional[int] = None,
+    occurred_at: Optional[date] = None,
+    conn=None,
+) -> dict:
+    """Insert an inverse cash_events row for `event_id` (never deletes or
+    mutates the original). When `conn` is given, writes happen on the
+    caller's connection/transaction with no internal commit (for callers —
+    backend/finance/payments.py::reverse_payment — that need this to be part
+    of one larger atomic operation); otherwise behaves exactly as before,
+    opening and committing its own connection. `occurred_at`, when given, is
+    an explicit civil date for the reversal row instead of today's date."""
     clean_reason = reason.strip()
     if not clean_reason:
         raise ValueError("Informe o motivo do estorno.")
     reversal_id = _new_id()
     timestamp = db.now()
-    with db.connection() as conn:
-        event = conn.execute("SELECT * FROM cash_events WHERE id=?", (event_id,)).fetchone()
+    occurred = occurred_at.isoformat() if occurred_at is not None else timestamp[:10]
+
+    def _write(c) -> dict:
+        event = c.execute("SELECT * FROM cash_events WHERE id=?", (event_id,)).fetchone()
         if not event:
             raise ValueError("Lançamento não encontrado.")
-        if conn.execute(
+        if c.execute(
             "SELECT 1 FROM cash_events WHERE reversed_event_id=?", (event_id,)
         ).fetchone():
             raise ValueError("Este lançamento já foi revertido.")
-        conn.execute(
+        c.execute(
             """
             INSERT INTO cash_events(
                 id,company,cash_account_id,amount_cents,occurred_at,description,
@@ -162,11 +178,16 @@ def reverse_event(event_id: int, *, reason: str, created_by: Optional[int] = Non
             """,
             (
                 reversal_id, event["company"], event["cash_account_id"], -event["amount_cents"],
-                timestamp[:10], f"Estorno: {clean_reason}", "reversal", event_id, created_by, timestamp,
+                occurred, f"Estorno: {clean_reason}", "reversal", event_id, created_by, timestamp,
             ),
         )
-        row = conn.execute("SELECT * FROM cash_events WHERE id=?", (reversal_id,)).fetchone()
-    return dict(row)
+        row = c.execute("SELECT * FROM cash_events WHERE id=?", (reversal_id,)).fetchone()
+        return dict(row)
+
+    if conn is not None:
+        return _write(conn)
+    with db.connection() as own_conn:
+        return _write(own_conn)
 
 
 def account_balance(cash_account_id: int) -> int:

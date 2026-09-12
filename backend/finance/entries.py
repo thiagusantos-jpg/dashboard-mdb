@@ -256,6 +256,96 @@ def settle_entry(
     return get_entry(entry_id)
 
 
+def reverse_settlement_on_connection(
+    conn,
+    entry_id: int,
+    amount_cents: int,
+    *,
+    reversed_at: date,
+    reason: str,
+    created_by: Optional[int] = None,
+    expected_version: Optional[int] = None,
+) -> int:
+    """Insert a compensating 'reversed' financial_events row for EXACTLY
+    `amount_cents` — one specific payment's contribution, never the entry's
+    entire remaining/paid balance — and recompute the entry's paid/open/
+    status accordingly, on the caller's connection/transaction (no commit
+    here). This is the inverse of settle_entry_on_connection, and is
+    deliberately NOT `reverse_entry()` above: that function reverts the
+    entry's whole current balance and permanently marks it 'reversed',
+    which is correct for cancelling an entry outright but wrong for undoing
+    one payment among possibly several against a partially-paid entry.
+
+    Used by backend/finance/payments.py::reverse_payment for both (a) the
+    'entry' kind's own settlement, and (b) partially un-settling a loan
+    installment's shared interest entry (see loans.py's
+    reverse_installment_payment_on_connection and payments.py's
+    _ensure_interest_settlement, which created that shared entry).
+
+    Same optimistic-concurrency contract as settle_entry_on_connection:
+    when `expected_version` is given, the state-advancing UPDATE is
+    conditioned on it and a rowcount of 0 raises `EntryVersionConflict`.
+
+    Returns the id of the inserted financial_events 'reversed' row.
+    """
+    if amount_cents <= 0:
+        raise ValueError("O valor do estorno deve ser maior que zero.")
+    entry = conn.execute(
+        "SELECT * FROM financial_entries WHERE id=?", (entry_id,)
+    ).fetchone()
+    if not entry:
+        raise ValueError("Lançamento não encontrado.")
+    if entry["status"] in {"cancelled", "reversed"}:
+        raise ValueError(
+            "Este lançamento já foi cancelado ou revertido integralmente."
+        )
+    timestamp = db.now()
+    event_id = _new_id()
+    conn.execute(
+        """
+        INSERT INTO financial_events(
+            id,entry_id,event_type,amount_cents,occurred_at,reason,created_by,created_at
+        ) VALUES(?,?,?,?,?,?,?,?)
+        """,
+        (
+            event_id,
+            entry_id,
+            "reversed",
+            amount_cents,
+            reversed_at.isoformat(),
+            reason.strip(),
+            created_by,
+            timestamp,
+        ),
+    )
+    new_paid = _paid_cents(conn, entry_id)
+    if new_paid <= 0:
+        status = "open"
+    elif new_paid >= entry["amount_cents"]:
+        status = "paid"
+    else:
+        status = "partially_paid"
+    if expected_version is None:
+        conn.execute(
+            """
+            UPDATE financial_entries SET status=?,version=version+1,updated_at=?
+            WHERE id=?
+            """,
+            (status, timestamp, entry_id),
+        )
+    else:
+        changed = conn.execute(
+            """
+            UPDATE financial_entries SET status=?,version=version+1,updated_at=?
+            WHERE id=? AND version=?
+            """,
+            (status, timestamp, entry_id, expected_version),
+        )
+        if changed.rowcount != 1:
+            raise EntryVersionConflict("Versão desatualizada; recarregue o lançamento.")
+    return event_id
+
+
 def reverse_entry(
     entry_id: int,
     *,

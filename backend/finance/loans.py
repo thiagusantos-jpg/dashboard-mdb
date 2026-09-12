@@ -282,6 +282,78 @@ def pay_installment_on_connection(
     return dict(row)
 
 
+def reverse_installment_payment_on_connection(
+    conn,
+    installment_id: int,
+    *,
+    principal_cents: int,
+    interest_cents: int,
+    expected_version: Optional[int] = None,
+) -> dict:
+    """Undo ONE specific payment's contribution to an installment's running
+    `paid_principal_cents`/`paid_interest_cents` totals — decrements by
+    exactly this payment's amounts, never resets to zero, so an earlier or
+    later SEPARATE payment on the same installment (pay_installment_on_connection
+    supports partial payments, so multiple obligation_payments rows can
+    target one installment) is left untouched. This is the inverse of
+    pay_installment_on_connection; its only caller is
+    backend/finance/payments.py::reverse_payment.
+
+    Any compensation for a shared interest financial_entries row (created by
+    payments.py::_ensure_interest_settlement) is the caller's responsibility
+    via entries.reverse_settlement_on_connection — this function only ever
+    touches the loan_installments row itself.
+
+    Same optimistic-concurrency contract as pay_installment_on_connection:
+    when `expected_version` is given, the UPDATE is conditioned on it and a
+    rowcount of 0 raises `InstallmentVersionConflict`.
+    """
+    if principal_cents < 0 or interest_cents < 0:
+        raise ValueError("Os valores estornados não podem ser negativos.")
+    installment = conn.execute(
+        "SELECT * FROM loan_installments WHERE id=?", (installment_id,)
+    ).fetchone()
+    if not installment:
+        raise ValueError("Parcela não encontrada.")
+    paid_principal = int(installment["paid_principal_cents"] or 0)
+    paid_interest = int(installment["paid_interest_cents"] or 0)
+    new_paid_principal = max(0, paid_principal - principal_cents)
+    new_paid_interest = max(0, paid_interest - interest_cents)
+    fully_paid = (
+        new_paid_principal == installment["principal_cents"]
+        and new_paid_interest == installment["interest_cents"]
+    )
+    if fully_paid:
+        status = "paid"
+    elif new_paid_principal > 0 or new_paid_interest > 0:
+        status = "partially_paid"
+    else:
+        status = "open"
+    timestamp = db.now()
+
+    set_sql = (
+        "status=?,paid_principal_cents=?,paid_interest_cents=?,version=version+1,updated_at=?"
+    )
+    params = [status, new_paid_principal, new_paid_interest, timestamp]
+    if expected_version is None:
+        conn.execute(
+            f"UPDATE loan_installments SET {set_sql} WHERE id=?",
+            (*params, installment_id),
+        )
+    else:
+        changed = conn.execute(
+            f"UPDATE loan_installments SET {set_sql} WHERE id=? AND version=?",
+            (*params, installment_id, expected_version),
+        )
+        if changed.rowcount != 1:
+            raise InstallmentVersionConflict("Versão desatualizada; recarregue a parcela.")
+
+    row = conn.execute(
+        "SELECT * FROM loan_installments WHERE id=?", (installment_id,)
+    ).fetchone()
+    return dict(row)
+
+
 def renegotiate(loan_id: int, installments: list, *, reason: str) -> dict:
     """Close the active schedule and open a new one. Paid installments stay
     attached to the closed schedule — renegotiation only replaces what's still owed."""

@@ -25,6 +25,12 @@ class PaymentCreate(BaseModel):
     interest_cents: Optional[int] = None
 
 
+class PaymentReversalCreate(BaseModel):
+    reason: str
+    reversed_at: date
+    expected_version: int
+
+
 def _error_detail(code: str, message: str, fields=None) -> dict:
     return {"code": code, "message": message, "fields": fields}
 
@@ -183,6 +189,59 @@ def add_payment(
             existing_cash_event_id=body.existing_cash_event_id,
             principal_cents=body.principal_cents,
             interest_cents=body.interest_cents,
+            actor_id=auth.user_id,
+        )
+    except payments.PaymentNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", exc.message)) from exc
+    except payments.PaymentConflictError as exc:
+        raise HTTPException(409, _error_detail("conflict", exc.message, exc.fields)) from exc
+    except payments.PaymentValidationError as exc:
+        raise HTTPException(
+            422, _error_detail("invalid_fields", exc.message, exc.fields)
+        ) from exc
+    return result
+
+
+@router.post("/payments/{payment_id}/reverse")
+def reverse_obligation_payment(
+    company: int,
+    payment_id: str,
+    body: PaymentReversalCreate,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    auth: security.AuthContext = Depends(permissions.require_permission("finance.write")),
+):
+    try:
+        numeric_id = int(payment_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422, _error_detail("invalid_fields", "Identificador inválido.", ["id"])
+        )
+
+    with db.connection() as conn:
+        exists = conn.execute("SELECT 1 FROM companies WHERE id=?", (company,)).fetchone()
+    if not exists:
+        raise HTTPException(404, _error_detail("not_found", "Empresa não encontrada."))
+
+    # Mirror the same sensitive-account gate applied to creating a payment
+    # (_require_entry_payment_access) — undoing a payment against a
+    # sensitive-account entry must not be reachable without
+    # finance.sensitive.read either.
+    with db.connection() as conn:
+        payment_row = conn.execute(
+            "SELECT obligation_kind,obligation_id FROM obligation_payments WHERE id=? AND company=?",
+            (numeric_id, company),
+        ).fetchone()
+    if payment_row and payment_row["obligation_kind"] == "entry":
+        _require_entry_payment_access(company, payment_row["obligation_id"], auth)
+
+    try:
+        result = payments.reverse_payment(
+            company,
+            numeric_id,
+            reason=body.reason,
+            reversed_at=body.reversed_at,
+            expected_version=body.expected_version,
+            idempotency_key=idempotency_key,
             actor_id=auth.user_id,
         )
     except payments.PaymentNotFoundError as exc:
