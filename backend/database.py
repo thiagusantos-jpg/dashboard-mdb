@@ -33,6 +33,9 @@ class _PGCursor:
         return self._cur.fetchall()
     def __iter__(self):
         return iter(self._cur)
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
 
 class _PGConn:
     def __init__(self, conn):

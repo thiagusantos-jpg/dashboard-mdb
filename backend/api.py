@@ -12,6 +12,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from . import database as db, models, permissions, security, settings
 from . import sync
+from .routes.settings import router as settings_router
 from .routes.users import router as users_router
 from .sync import Worker
 
@@ -32,6 +33,7 @@ async def lifespan(app):
 
 app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
 app.include_router(users_router)
+app.include_router(settings_router)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver','*.vercel.app'])
 # /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
 app.add_middleware(GZipMiddleware,minimum_size=1024)

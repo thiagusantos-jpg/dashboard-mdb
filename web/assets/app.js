@@ -14,6 +14,7 @@ const APP = {
   periods: [],       // [{period, updated_at, version, documents}], newest first
   period: null,
   page: 'resumo',
+  settingsSection: 'empresa',
   routeParams: new URLSearchParams(),  // ?query part of the #/página/período route (e.g. filtro=ruptura)
   pickerYear: null,   // year shown in the period popover (browsing it does not change the period)
   status: null,       // last /status payload
@@ -354,17 +355,25 @@ function closeNav(returnFocus) {
   if (returnFocus) toggle.focus();
 }
 
-const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'sync'];
+const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'sync', 'configuracoes'];
+const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
+  'configuracoes/metas', 'configuracoes/alertas', 'configuracoes/integracoes'];
+const SETTINGS_SECTIONS = SETTINGS_ROUTES.map((route) => route.split('/')[1]);
 
 function parseRoute() {
   const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
-  const [page, period] = (path || '').split('/');
+  const [page, segment] = (path || '').split('/');
   return {page: PAGES.includes(page) ? page : null,
-    period: /^\d{4}-\d{2}$/.test(period || '') ? period : null,
+    period: /^\d{4}-\d{2}$/.test(segment || '') ? segment : null,
+    section: SETTINGS_SECTIONS.includes(segment) ? segment : 'empresa',
     params: new URLSearchParams(query || '')};
 }
 
 function routeHash(page, period, params) {
+  if (page === 'configuracoes') {
+    const section = SETTINGS_SECTIONS.includes(period) ? period : (APP.settingsSection || 'empresa');
+    return `#/configuracoes/${section}`;
+  }
   const q = params ? params.toString() : '';
   return `#/${page}${period ? '/' + period : ''}${q ? '?' + q : ''}`;
 }
@@ -382,7 +391,8 @@ function onRouteChange() {
   const r = parseRoute();
   const page = r.page || 'resumo';
   const period = r.period && APP.periods.some((p) => p.period === r.period) ? r.period : APP.period;
-  const hash = routeHash(page, period, r.params);
+  APP.settingsSection = page === 'configuracoes' ? r.section : APP.settingsSection;
+  const hash = routeHash(page, page === 'configuracoes' ? APP.settingsSection : period, r.params);
   if (location.hash !== hash) history.replaceState(null, '', hash);  // normalize, no extra history entry
   const pageChanged = page !== APP.page;
   APP.page = page;
@@ -405,6 +415,7 @@ async function renderPage() {
   // Every render replaces #content's innerHTML somewhere below, which would orphan any
   // ECharts canvas mounted in the previous render (Fase 2 prototype, echarts-charts.js).
   if (typeof disposeEcharts === 'function') disposeEcharts();
+  if (APP.page === 'configuracoes') return renderSettingsPage();
   if (APP.page === 'sync') return renderSyncPage();
   if (!APP.period) {
     return renderEmptyState('Nenhum período sincronizado ainda. Vá em "Sincronização Mobne" e clique em Sincronizar agora.');
