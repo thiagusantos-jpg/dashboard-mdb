@@ -16,8 +16,16 @@ from ..finance.entry_management import (
     entry_history,
     update_entry,
 )
+from ..finance.expense_schedules import confirm_entry, create_expense_schedule, preview_expense_schedule
 from ..finance.payments import CASH_LINK_REQUIRED_MESSAGE
-from ..finance.recurrence import create_recurrence, generate_occurrences
+from ..finance.recurrence import (
+    RecurrenceConflictError,
+    RecurrenceNotFoundError,
+    RecurrenceValidationError,
+    create_recurrence,
+    generate_occurrences,
+    update_recurrence,
+)
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
@@ -72,6 +80,46 @@ class RecurrenceCreate(BaseModel):
     counterparty_id: Optional[int] = None
 
 
+class RecurrencePatch(BaseModel):
+    expected_version: int
+    scope: str = Field(pattern=r"^(single|future)$")
+    # scope='single': identifies the one occurrence being edited.
+    competence: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    # scope='future': cutoff competence for the cascade onto forecast occurrences.
+    effective_competence: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    account_id: Optional[int] = None
+    counterparty_id: Optional[int] = None
+    description: Optional[str] = None
+    amount_cents: Optional[int] = None
+    due_day: Optional[int] = None
+    due_date: Optional[date] = None
+    end_competence: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class ExpenseSchedulePreviewRequest(BaseModel):
+    total_cents: int = Field(gt=0)
+    count: int = Field(ge=1, le=120)
+    first_due: date
+    competence_mode: str = Field(pattern=r"^(single|distributed)$")
+    competence: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+
+
+class ExpenseScheduleCreate(ExpenseSchedulePreviewRequest):
+    account_id: int
+    description: str = Field(min_length=1, max_length=240)
+    store_id: Optional[int] = None
+    counterparty_id: Optional[int] = None
+    confirmed: bool = False
+
+
+class EntryConfirm(BaseModel):
+    expected_version: int
+    amount_cents: Optional[int] = Field(default=None, gt=0)
+    competence: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+
+
 def _require_sensitive_if_needed(
     company: int, account_id: int, auth: security.AuthContext
 ) -> None:
@@ -110,7 +158,15 @@ def _require_entry_access(
 # this file inconsistent until C2 updates the frontend's `api()` helper to
 # handle both shapes (see master plan, C2 task notes).
 
-_BIGINT_ID_FIELDS = ("id", "account_id", "counterparty_id", "recurrence_id", "created_by", "store")
+_BIGINT_ID_FIELDS = (
+    "id",
+    "account_id",
+    "counterparty_id",
+    "recurrence_id",
+    "created_by",
+    "store",
+    "expense_schedule_id",
+)
 
 
 def _stringify_ids(payload: dict) -> dict:
@@ -308,6 +364,146 @@ def generate_recurrence(
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# --- Task B6: recurrence edit scope, installment previews, confirmation ---
+
+
+@router.patch("/recurrences/{recurrence_id}")
+def patch_recurrence(
+    company: int,
+    recurrence_id: int,
+    body: RecurrencePatch,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.write")
+    ),
+):
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT account_id FROM financial_recurrences WHERE id=? AND company=?",
+            (recurrence_id, company),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, _error_detail("not_found", "Recorrência não encontrada."))
+    _require_sensitive_if_needed(company, row["account_id"], auth)
+    if body.account_id is not None and body.account_id != row["account_id"]:
+        _require_sensitive_if_needed(company, body.account_id, auth)
+
+    changes = body.dict(
+        exclude_unset=True,
+        exclude={"expected_version", "scope", "competence", "effective_competence"},
+    )
+    try:
+        updated = update_recurrence(
+            company,
+            recurrence_id,
+            changes,
+            expected_version=body.expected_version,
+            scope=body.scope,
+            effective_competence=body.effective_competence,
+            occurrence_competence=body.competence,
+            actor_id=auth.user_id,
+        )
+    except RecurrenceNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", str(exc))) from exc
+    except RecurrenceConflictError as exc:
+        raise HTTPException(409, _error_detail("conflict", str(exc))) from exc
+    except RecurrenceValidationError as exc:
+        raise HTTPException(
+            422, _error_detail("invalid_fields", str(exc), exc.fields)
+        ) from exc
+    return {
+        "recurrence": _stringify_ids(updated["recurrence"]),
+        "occurrence": _stringify_ids(updated["occurrence"])
+        if updated["occurrence"] is not None
+        else None,
+    }
+
+
+@router.post("/entries/{entry_id}/confirm")
+def confirm(
+    company: int,
+    entry_id: int,
+    body: EntryConfirm,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.write")
+    ),
+):
+    _require_entry_access(company, entry_id, auth)
+    try:
+        confirmed = confirm_entry(
+            company,
+            entry_id,
+            expected_version=body.expected_version,
+            amount_cents=body.amount_cents,
+            competence=body.competence,
+            actor_id=auth.user_id,
+        )
+    except EntryNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", str(exc))) from exc
+    except EntryConflictError as exc:
+        raise HTTPException(409, _error_detail("conflict", str(exc))) from exc
+    except EntryValidationError as exc:
+        raise HTTPException(
+            422, _error_detail("invalid_fields", str(exc), exc.fields)
+        ) from exc
+    return _stringify_ids(confirmed)
+
+
+@router.post("/expense-schedules/preview")
+def preview_schedule(
+    company: int,
+    body: ExpenseSchedulePreviewRequest,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.write")
+    ),
+):
+    try:
+        rows = preview_expense_schedule(
+            body.total_cents,
+            body.count,
+            body.first_due,
+            body.competence_mode,
+            body.competence,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, _error_detail("invalid_fields", str(exc))) from exc
+    return {
+        "items": rows,
+        "total_cents": body.total_cents,
+        "requires_confirmation": body.competence_mode == "distributed",
+    }
+
+
+@router.post("/expense-schedules", status_code=201)
+def add_expense_schedule(
+    company: int,
+    body: ExpenseScheduleCreate,
+    auth: security.AuthContext = Depends(
+        permissions.require_permission("finance.write")
+    ),
+):
+    _require_sensitive_if_needed(company, body.account_id, auth)
+    try:
+        result = create_expense_schedule(
+            company=company,
+            account_id=body.account_id,
+            description=body.description,
+            total_cents=body.total_cents,
+            count=body.count,
+            first_due=body.first_due,
+            competence_mode=body.competence_mode,
+            competence=body.competence,
+            store=body.store_id,
+            counterparty_id=body.counterparty_id,
+            confirmed=body.confirmed,
+            created_by=auth.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, _error_detail("invalid_fields", str(exc))) from exc
+    result["schedule"] = _stringify_ids(result["schedule"])
+    result["entries"] = [_stringify_ids(entry) for entry in result["entries"]]
+    return result
 
 
 @router.patch("/entries/{entry_id}")

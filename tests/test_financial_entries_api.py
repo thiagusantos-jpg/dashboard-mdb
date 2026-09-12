@@ -205,3 +205,146 @@ def test_cancel_entry_missing_expected_version_uses_shared_error_shape(client):
     assert isinstance(detail, dict)
     assert detail["code"] == "invalid_fields"
     assert "expected_version" in detail["fields"]
+
+
+# --- Task B6: installment preview/creation, confirm, recurrence PATCH -----
+
+
+def test_expense_schedule_preview_endpoint_matches_the_brief_example(client):
+    response = client.post(
+        "/api/companies/1/finance/expense-schedules/preview",
+        json={
+            "total_cents": 10000,
+            "count": 3,
+            "first_due": "2026-01-31",
+            "competence_mode": "single",
+            "competence": "2026-01",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [r["amount_cents"] for r in body["items"]] == [3334, 3333, 3333]
+    assert [r["due_date"] for r in body["items"]] == [
+        "2026-01-31",
+        "2026-02-28",
+        "2026-03-31",
+    ]
+    assert body["requires_confirmation"] is False
+
+
+def test_expense_schedule_create_endpoint_stringifies_bigint_expense_schedule_id(
+    client, monkeypatch
+):
+    # Same class of bug B1's review caught (Finding 1): a BIGINT id column
+    # embedded inside an entry payload must be a JSON string, or a value
+    # past 2**53 silently loses precision in JS JSON.parse. expense_schedule_id
+    # is a new BIGINT column this task adds to financial_entries.
+    from backend.finance import expense_schedules as expense_schedules_module
+
+    big_id = 9_007_199_254_740_993  # 2**53 + 1
+    monkeypatch.setattr(expense_schedules_module, "_new_id", lambda: big_id)
+
+    account = accounts.account_by_key(1, "rent")
+    response = client.post(
+        "/api/companies/1/finance/expense-schedules",
+        json={
+            "account_id": account["id"],
+            "description": "Compra parcelada",
+            "total_cents": 10000,
+            "count": 3,
+            "first_due": "2026-01-31",
+            "competence_mode": "single",
+            "competence": "2026-01",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["schedule"]["id"] == str(big_id)
+    for entry in body["entries"]:
+        assert entry["status"] == "forecast"
+        assert isinstance(entry["expense_schedule_id"], str)
+        assert entry["expense_schedule_id"] == str(big_id)
+
+
+def test_confirm_entry_endpoint_transitions_forecast_to_open(client):
+    account = accounts.account_by_key(1, "rent")
+    created = client.post(
+        "/api/companies/1/finance/expense-schedules",
+        json={
+            "account_id": account["id"],
+            "description": "Compra parcelada",
+            "total_cents": 9000,
+            "count": 3,
+            "first_due": "2026-01-10",
+            "competence_mode": "single",
+            "competence": "2026-01",
+        },
+    ).json()
+    entry = created["entries"][0]
+
+    response = client.post(
+        f"/api/companies/1/finance/entries/{entry['id']}/confirm",
+        json={"expected_version": int(entry["version"])},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "open"
+
+
+def test_patch_recurrence_future_scope_cascades_to_forecast_occurrences(client):
+    account = accounts.account_by_key(1, "rent")
+    recurrence = client.post(
+        "/api/companies/1/finance/recurrences",
+        json={
+            "account_id": account["id"],
+            "amount_cents": 250_000,
+            "description": "Aluguel",
+            "start_competence": "2026-01",
+            "due_day": 10,
+        },
+    ).json()
+    client.post(
+        f"/api/companies/1/finance/recurrences/{recurrence['id']}/generate",
+        params={"through_competence": "2026-03"},
+    )
+
+    response = client.patch(
+        f"/api/companies/1/finance/recurrences/{recurrence['id']}",
+        json={
+            "expected_version": int(recurrence["version"]),
+            "scope": "future",
+            "effective_competence": "2026-02",
+            "amount_cents": 300_000,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["recurrence"]["amount_cents"] == 300_000
+    assert body["occurrence"] is None
+
+
+def test_patch_recurrence_invalid_scope_uses_shared_error_shape(client):
+    account = accounts.account_by_key(1, "rent")
+    recurrence = client.post(
+        "/api/companies/1/finance/recurrences",
+        json={
+            "account_id": account["id"],
+            "amount_cents": 250_000,
+            "description": "Aluguel",
+            "start_competence": "2026-01",
+            "due_day": 10,
+        },
+    ).json()
+
+    response = client.patch(
+        f"/api/companies/1/finance/recurrences/{recurrence['id']}",
+        json={"expected_version": int(recurrence["version"]), "scope": "whole-series"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict)
+    assert "fields" in detail

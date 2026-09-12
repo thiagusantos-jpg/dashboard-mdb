@@ -29,6 +29,7 @@ MIGRATIONS: Tuple[Tuple[int, str], ...] = (
     (17, "017_obligation_payments.sql"),
     (18, "018_payment_reversals.sql"),
     (19, "019_bank_payment_links.sql"),
+    (20, "020_expense_schedules.sql"),
 )
 
 
