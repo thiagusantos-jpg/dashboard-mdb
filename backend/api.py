@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -106,6 +107,31 @@ async def secure_headers(request,call_next):
         # heuristically cached style.css and kept serving the old layout after an update.
         response.headers['Cache-Control']='no-cache'
     return response
+
+# FastAPI's own request-body validation (a malformed field type, a missing
+# required field, a failed Field(...) constraint) rejects the request before
+# any route body runs, and its default handler replies with
+# {"detail": [{"loc":..., "msg":..., "type":...}, ...]} — not the shared
+# contract's {"detail": {code, message, fields}} shape used everywhere a
+# route raises its own HTTPException (see shared-contracts.md: "Formato de
+# detail: {code,message,fields}"). Reshape it here once, app-wide, instead of
+# hand-validating every field FastAPI already validates for us. Verified
+# before adding this that no existing test asserts on the raw default shape.
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    fields = sorted({
+        str(error["loc"][-1]) for error in exc.errors() if error.get("loc")
+    })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "code": "invalid_fields",
+                "message": "Dados inválidos na requisição.",
+                "fields": fields,
+            }
+        },
+    )
 
 class Login(BaseModel):
     email: Optional[str]=Field(default=None,max_length=254)

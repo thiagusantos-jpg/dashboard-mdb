@@ -126,6 +126,15 @@ def _stringify_history_item(item: dict) -> dict:
         result["id"] = str(result["id"])
     if result.get("actor_id") is not None:
         result["actor_id"] = str(result["actor_id"])
+    # `before`/`after` are raw snapshots of the `financial_entries` row (see
+    # entry_management._insert_audit): they carry the same BIGINT-ish columns
+    # (id, account_id, counterparty_id, recurrence_id, created_by, store) as
+    # the entry payload itself, so they need the same stringification or a
+    # value > 2**53 silently loses precision in JS JSON.parse.
+    if isinstance(result.get("before"), dict):
+        result["before"] = _stringify_ids(result["before"])
+    if isinstance(result.get("after"), dict):
+        result["after"] = _stringify_ids(result["after"])
     return result
 
 
