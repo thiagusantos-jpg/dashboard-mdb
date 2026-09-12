@@ -1,17 +1,202 @@
 from __future__ import annotations
 
-from datetime import date
+import sqlite3
+from datetime import date, timedelta
 
 import pytest
 
 from backend import database as db
 from backend.finance import accounts, ledger, loans
 from backend.finance.entries import EntryCommand, create_entry
-from backend.finance.forecast import forecast
+from backend.finance.forecast import SCENARIOS, forecast
 
 
 COMPANY = 1
 AS_OF = date(2026, 9, 12)
+
+
+def _count_queries(fn):
+    """Count every SQL statement executed on any SQLite connection opened
+    while `fn` runs — the exact methodology docs/validation/2026-09-12-baseline.md
+    used (a `sqlite3.connect` wrapper that attaches `set_trace_callback` to
+    every new connection). `sqlite3.Connection.execute` itself can't be
+    monkeypatched (it's a read-only slot on a built-in type), so this hooks
+    connection creation instead. Includes the `PRAGMA foreign_keys=ON` every
+    backend.database.connection() open issues, so it slightly overcounts
+    "business queries", but it is an honest, direct proxy for "how many
+    round-trips to the database this call makes" — which is exactly what
+    task B7's optimization targets."""
+    real_connect = sqlite3.connect
+    counter = {"n": 0}
+
+    def counting_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(lambda _sql: counter.__setitem__("n", counter["n"] + 1))
+        return conn
+
+    sqlite3.connect = counting_connect
+    try:
+        result = fn()
+    finally:
+        sqlite3.connect = real_connect
+    return result, counter["n"]
+
+
+# --- Frozen pre-B7 reference implementation, for the equivalence test below.
+#
+# This is a verbatim copy of forecast.py's day-by-day implementation as it
+# existed BEFORE task B7's optimization (one-plus query per day). It exists
+# solely so test_forecast_optimization_is_equivalent_to_reference below can
+# assert the optimized forecast() produces IDENTICAL output to the original
+# on a realistic scenario — proving the query-count optimization did not
+# silently change any result. Do not "fix" divergences here to match the
+# optimized version; if they ever disagree, the optimized version has a bug.
+
+
+def _ref_date_range(start, end):
+    day = start
+    while day <= end:
+        yield day
+        day += timedelta(days=1)
+
+
+def _ref_balance_before(company, day):
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_cents),0) AS balance FROM cash_events WHERE company=? AND occurred_at<?",
+            (company, day.isoformat()),
+        ).fetchone()
+    return int(row["balance"])
+
+
+def _ref_realized_events_for_day(company, day):
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM cash_events WHERE company=? AND occurred_at=?",
+            (company, day.isoformat()),
+        ).fetchall()
+    return [
+        {"amount_cents": row["amount_cents"], "description": row["description"],
+         "source": "ledger", "confidence": "realized"}
+        for row in rows
+    ]
+
+
+def _ref_open_entries_due(company, day, *, due_on_or_before=False):
+    comparator = "<=" if due_on_or_before else "="
+    with db.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.id,e.amount_cents,e.description,a.nature,
+                   COALESCE(SUM(
+                       CASE WHEN ev.event_type='settled' THEN ev.amount_cents
+                            WHEN ev.event_type='reversed' THEN -ev.amount_cents ELSE 0 END
+                   ),0) AS paid_cents
+            FROM financial_entries e
+            JOIN finance_accounts a ON a.id=e.account_id
+            LEFT JOIN financial_events ev ON ev.entry_id=e.id
+            WHERE e.company=? AND e.due_date{comparator}?
+              AND e.status IN ('open','overdue','partially_paid')
+            GROUP BY e.id
+            """,
+            (company, day.isoformat()),
+        ).fetchall()
+    items = []
+    for row in rows:
+        remaining = max(0, row["amount_cents"] - row["paid_cents"])
+        if remaining <= 0:
+            continue
+        signed = remaining if row["nature"] in ("revenue", "financing_inflow") else -remaining
+        items.append({"amount_cents": signed, "description": row["description"],
+                      "source": "financial_entries", "confidence": "forecast"})
+    return items
+
+
+def _ref_open_installments_due(company, day, *, due_on_or_before=False):
+    comparator = "<=" if due_on_or_before else "="
+    with db.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT i.total_cents,i.number,l.lender FROM loan_installments i
+            JOIN loans l ON l.id=i.loan_id
+            JOIN loan_schedules s ON s.id=i.schedule_id
+            WHERE l.company=? AND i.due_date{comparator}?
+              AND i.schedule_id=l.active_schedule_id
+              AND s.status='active' AND i.status='open'
+            """,
+            (company, day.isoformat()),
+        ).fetchall()
+    return [
+        {"amount_cents": -row["total_cents"], "description": f"Parcela {row['number']} — {row['lender']}",
+         "source": "loan_installments", "confidence": "forecast"}
+        for row in rows
+    ]
+
+
+def _ref_average_daily_realized(company, as_of, window_days=30):
+    window_start = as_of - timedelta(days=window_days)
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_cents),0) AS total FROM cash_events WHERE company=? AND occurred_at>=? AND occurred_at<?",
+            (company, window_start.isoformat(), as_of.isoformat()),
+        ).fetchone()
+    return int(row["total"]) / window_days
+
+
+def _ref_scenario_layer(company, day, scenario, as_of):
+    multiplier = SCENARIOS[scenario]
+    if multiplier == 1.0:
+        return []
+    baseline = _ref_average_daily_realized(company, as_of)
+    if baseline == 0:
+        return []
+    adjustment = round(baseline * (multiplier - 1.0))
+    if adjustment == 0:
+        return []
+    return [{"amount_cents": adjustment, "description": f"Ajuste de cenário ({scenario})",
+             "source": "scenario", "confidence": "simulated"}]
+
+
+def _reference_forecast(company, start, end, scenario="base", *, as_of=None):
+    today = as_of or date.today()
+    balance = _ref_balance_before(company, start)
+    days = []
+    for day in _ref_date_range(start, end):
+        if day < today:
+            items = _ref_realized_events_for_day(company, day)
+        elif day == today:
+            items = _ref_realized_events_for_day(company, day)
+            items += _ref_open_entries_due(company, day, due_on_or_before=True)
+            items += _ref_open_installments_due(company, day, due_on_or_before=True)
+        else:
+            items = _ref_open_entries_due(company, day) + _ref_open_installments_due(company, day)
+            items += _ref_scenario_layer(company, day, scenario, today)
+        balance += sum(item["amount_cents"] for item in items)
+        days.append({"date": day.isoformat(), "items": items, "balance_cents": balance})
+
+    lowest = min(days, key=lambda d: d["balance_cents"]) if days else None
+    alerts = []
+    if lowest is not None and lowest["balance_cents"] < 0:
+        alerts.append({"type": "negative_cash", "date": lowest["date"], "balance_cents": lowest["balance_cents"]})
+    return {
+        "company": company, "start": start.isoformat(), "end": end.isoformat(), "scenario": scenario,
+        "starting_balance_cents": _ref_balance_before(company, start),
+        "days": days,
+        "lowest": {"date": lowest["date"], "balance_cents": lowest["balance_cents"]} if lowest else None,
+        "alerts": alerts,
+    }
+
+
+def _normalize(result):
+    """Item ORDER within a day can legitimately differ between the grouped
+    (optimized) queries and the original per-row queries — sort them so the
+    comparison is about content, not incidental SQL row order."""
+    normalized = dict(result)
+    normalized["days"] = [
+        {**day, "items": sorted(day["items"], key=lambda i: (i["source"], i["description"], i["amount_cents"]))}
+        for day in result["days"]
+    ]
+    return normalized
 
 
 @pytest.fixture
@@ -170,20 +355,26 @@ def test_renegotiated_loan_keeps_paid_installment_query_working(forecast_db):
         start_date="2026-09-01",
     )
     first = loans.loan_position(loan["id"])["installments"][0]
+    # Partially pay the principal (task B7: renegotiate's new schedule must
+    # sum to the OUTSTANDING principal — 100_000-40_000=60_000 — not an
+    # arbitrary amount; pay_installment_legacy_unsafe still marks the
+    # installment 'paid' unconditionally regardless of whether the amount
+    # actually covers it, which is exactly the "KNOWN BUG" this legacy
+    # fixture helper deliberately preserves for tests like this one).
     loans.pay_installment_legacy_unsafe(
-        first["id"], principal_cents=100_000, interest_cents=10_000,
+        first["id"], principal_cents=40_000, interest_cents=10_000,
         paid_at=date(2026, 9, 15),
     )
     loans.renegotiate(
         loan["id"],
-        installments=[{"number": 1, "due_date": "2026-09-25", "principal_cents": 50_000, "interest_cents": 5_000}],
+        installments=[{"number": 1, "due_date": "2026-09-25", "principal_cents": 60_000, "interest_cents": 5_000}],
         reason="Nova parcela",
     )
 
     result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
     amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
                if i['source'] == 'loan_installments']
-    assert amounts == [-55000]
+    assert amounts == [-65000]
 
     position = loans.loan_position(loan["id"])
     paid = [i for i in position["installments"] if i["status"] == "paid"]
@@ -220,19 +411,25 @@ def test_renegotiated_loan_excludes_orphaned_unpaid_installment_from_closed_sche
     # `second` (due 2026-09-20) is deliberately left unpaid/open on the old
     # schedule.
 
+    # Task B7: renegotiate's new schedule must sum to the loan's outstanding
+    # principal (100_000 total - 50_000 paid on `first` = 50_000) — the
+    # orphaned `second` installment's own 50_000 is exactly what's being
+    # replaced here, which is why this number changed from the pre-B7
+    # version of this test (60_000, an arbitrary amount unrelated to what
+    # was actually still owed).
     loans.renegotiate(
         loan["id"],
-        installments=[{"number": 1, "due_date": "2026-09-25", "principal_cents": 60_000, "interest_cents": 6_000}],
+        installments=[{"number": 1, "due_date": "2026-09-25", "principal_cents": 50_000, "interest_cents": 6_000}],
         reason="Renegociação com saldo em aberto",
     )
 
     result = forecast(1, AS_OF, date(2026, 9, 30), as_of=AS_OF)
     amounts = [i['amount_cents'] for d in result['days'] for i in d['items']
                if i['source'] == 'loan_installments']
-    # Only the new active schedule's installment (-66000) should appear — the
+    # Only the new active schedule's installment (-56000) should appear — the
     # stale open installment on the closed schedule (-55000) must not leak in.
     assert -55000 not in amounts
-    assert amounts == [-66000]
+    assert amounts == [-56000]
 
     # loan_position is unaffected by this fix (it doesn't filter by schedule
     # status the same way) and must still correctly report the paid
@@ -257,3 +454,90 @@ def test_future_window_shows_remaining_balance(forecast_db):
     day = next(d for d in result['days'] if d['date'] == '2026-10-05')
     amounts = [i['amount_cents'] for i in day['items'] if i['source'] == 'financial_entries']
     assert amounts == [-75000]
+
+
+# --- Task B7: query-count optimization ---------------------------------
+
+
+def _seed_realistic_scenario(forecast_db):
+    account = ledger.create_account(COMPANY, "Banco", "bank")
+    ledger.post_cash_event(COMPANY, account["id"], 10_000_00, date(2026, 8, 20), "Saldo inicial")
+    ledger.post_cash_event(COMPANY, account["id"], 500_00, date(2026, 9, 5), "Venda do dia")
+    ledger.post_cash_event(COMPANY, account["id"], 300_00, date(2026, 9, 10), "Venda do dia")
+
+    rent = accounts.account_by_key(COMPANY, "rent")
+    create_entry(EntryCommand(
+        company_id=COMPANY, account_id=rent["id"], amount_cents=4_000_00,
+        competence="2026-09", due_date=date(2026, 9, 5), source="manual",
+        external_id=None, description="Aluguel vencido"))
+    create_entry(EntryCommand(
+        company_id=COMPANY, account_id=rent["id"], amount_cents=2_000_00,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Aluguel de setembro"))
+    create_entry(EntryCommand(
+        company_id=COMPANY, account_id=rent["id"], amount_cents=1_000_00,
+        competence="2026-10", due_date=date(2026, 10, 25), source="manual",
+        external_id=None, description="Aluguel de outubro"))
+
+    loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=3_000_00, net_disbursement_cents=2_900_00,
+        installments=[
+            {"number": 1, "due_date": "2026-09-08", "principal_cents": 1_500_00, "interest_cents": 6_00},
+            {"number": 2, "due_date": "2026-09-28", "principal_cents": 1_500_00, "interest_cents": 6_00},
+        ],
+        start_date="2026-09-01",
+    )
+
+
+def test_forecast_query_count_is_constant_regardless_of_window(forecast_db):
+    _seed_realistic_scenario(forecast_db)
+
+    _, count_30 = _count_queries(
+        lambda: forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), as_of=AS_OF)
+    )
+    _, count_360 = _count_queries(
+        lambda: forecast(COMPANY, date(2026, 9, 1), date(2027, 8, 27), as_of=AS_OF)
+    )
+
+    # Before this task: ~3 statements per day (100 for a 30-day window, 1090
+    # for 360 days — see docs/validation/2026-09-12-baseline.md). After: a
+    # small FIXED number of statements regardless of window length.
+    assert count_30 == count_360
+    assert count_30 < 20
+
+
+def test_forecast_query_count_stays_constant_for_non_base_scenario(forecast_db):
+    # Self-review: the scenario layer used to call _average_daily_realized
+    # (one query) PER FUTURE DAY whenever scenario != 'base' — its own,
+    # separate source of O(days) queries, easy to miss when only exercising
+    # scenario='base'. Confirm it was fixed too.
+    _seed_realistic_scenario(forecast_db)
+
+    _, count_30 = _count_queries(
+        lambda: forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), "pessimistic", as_of=AS_OF)
+    )
+    _, count_360 = _count_queries(
+        lambda: forecast(COMPANY, date(2026, 9, 1), date(2027, 8, 27), "pessimistic", as_of=AS_OF)
+    )
+
+    assert count_30 == count_360
+    assert count_30 < 25
+
+
+def test_forecast_optimization_is_equivalent_to_reference(forecast_db):
+    _seed_realistic_scenario(forecast_db)
+
+    optimized = forecast(COMPANY, date(2026, 9, 1), date(2026, 10, 31), "base", as_of=AS_OF)
+    reference = _reference_forecast(COMPANY, date(2026, 9, 1), date(2026, 10, 31), "base", as_of=AS_OF)
+
+    assert _normalize(optimized) == _normalize(reference)
+
+
+def test_forecast_optimization_is_equivalent_to_reference_non_base_scenario(forecast_db):
+    _seed_realistic_scenario(forecast_db)
+
+    optimized = forecast(COMPANY, date(2026, 9, 1), date(2026, 10, 31), "optimistic", as_of=AS_OF)
+    reference = _reference_forecast(COMPANY, date(2026, 9, 1), date(2026, 10, 31), "optimistic", as_of=AS_OF)
+
+    assert _normalize(optimized) == _normalize(reference)

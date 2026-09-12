@@ -1,22 +1,120 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 from datetime import date
 from typing import Optional
 
 from .. import database as db
 from . import accounts
-from .entries import EntryCommand, create_entry, settle_entry
+from .entries import (
+    EntryCommand,
+    create_entry,
+    create_entry_on_connection,
+    settle_entry,
+    settle_entry_on_connection,
+)
+from .entry_management import _insert_audit
+from .ledger import post_cash_event
 
 
 def _new_id() -> int:
     return secrets.randbits(63) or 1
 
 
+def _is_unique_violation(exc: Exception) -> bool:
+    # Duplicated from backend/finance/payments.py::_is_unique_violation
+    # (importing it here would create a cycle: payments.py already imports
+    # from this module). Same rationale as that copy: recover from a race on
+    # the idempotency UNIQUE constraint by replaying the winner's row instead
+    # of surfacing a raw IntegrityError.
+    name = type(exc).__name__
+    if name in ("IntegrityError", "UniqueViolation"):
+        return True
+    return getattr(exc, "sqlstate", None) == "23505"
+
+
 class InstallmentVersionConflict(ValueError):
     """Raised by pay_installment_on_connection when the optimistic-concurrency
     version check fails. See entries.EntryVersionConflict for the rationale;
     subclasses ValueError so a bare `except ValueError` still catches it."""
+
+
+class LoanError(Exception):
+    """Base error for the NEW loan-contract operations added by task B7
+    (PATCH lender/purpose, cancel, disbursement, and the stronger
+    create/renegotiate validation below). Pre-existing functions in this
+    module (create_loan's lender/principal checks, the legacy disbursement
+    helper, pay_installment_*) deliberately keep raising bare ValueError —
+    retrofitting them to this shape is out of this task's scope (see task
+    brief: "retrofitting all of those is explicitly OUT OF SCOPE"). Every
+    error condition this task INTRODUCES uses this hierarchy instead, so
+    backend/routes/loans.py can map it to the plan's {code,message,fields}
+    contract."""
+
+    def __init__(self, message: str, *, fields: Optional[list] = None):
+        super().__init__(message)
+        self.message = message
+        self.fields = fields
+
+
+class LoanNotFoundError(LoanError):
+    """-> HTTP 404."""
+
+
+class LoanConflictError(LoanError):
+    """-> HTTP 409 (version conflict, wrong loan status, movement already
+    recorded, idempotency key reused with different data, ...)."""
+
+
+class LoanValidationError(LoanError):
+    """-> HTTP 422 (bad input shape, principal-sum mismatch, ...)."""
+
+
+def _validate_schedule_items(installments: list) -> int:
+    """Server-side revalidation of a proposed installment schedule — types,
+    quantities and dates — shared by create_loan and renegotiate so a fresh
+    contract and a renegotiated one get identical scrutiny regardless of
+    caller (the HTTP layer's Pydantic models already coerce types for real
+    requests, but this module's functions are also called directly, e.g. by
+    this task's own tests, with no such gate). Returns the sum of
+    principal_cents so callers can compare it against whatever total the
+    caller expects (the loan's principal_cents for create_loan, the
+    outstanding principal for renegotiate) — "validar tipos, quantidades,
+    datas e soma ... no servidor" per the task brief.
+
+    Variable interest per installment (juros variáveis) is valid by
+    construction: interest_cents is read per item and never compared against
+    any running total, so a schedule where each installment carries a
+    different interest amount is accepted without special-casing.
+    """
+    if not installments:
+        raise LoanValidationError("Informe ao menos uma parcela.", fields=["installments"])
+    principal_sum = 0
+    seen_numbers = set()
+    for item in installments:
+        number = item.get("number")
+        principal = item.get("principal_cents")
+        interest = item.get("interest_cents", 0)
+        due_date = item.get("due_date")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise LoanValidationError("Número de parcela inválido.", fields=["installments"])
+        if number in seen_numbers:
+            raise LoanValidationError("Números de parcela duplicados.", fields=["installments"])
+        seen_numbers.add(number)
+        if not isinstance(principal, int) or isinstance(principal, bool) or principal < 0:
+            raise LoanValidationError("Principal da parcela inválido.", fields=["installments"])
+        if not isinstance(interest, int) or isinstance(interest, bool) or interest < 0:
+            raise LoanValidationError("Juros da parcela inválido.", fields=["installments"])
+        try:
+            date.fromisoformat(str(due_date))
+        except (TypeError, ValueError) as exc:
+            raise LoanValidationError(
+                "Data de vencimento inválida.", fields=["installments"]
+            ) from exc
+        principal_sum += principal
+    return principal_sum
 
 
 def create_loan(
@@ -38,8 +136,12 @@ def create_loan(
         raise ValueError("Informe o credor.")
     if principal_cents <= 0:
         raise ValueError("O principal deve ser maior que zero.")
-    if not installments:
-        raise ValueError("Informe ao menos uma parcela.")
+    principal_sum = _validate_schedule_items(installments)
+    if principal_sum != principal_cents:
+        raise LoanValidationError(
+            "O principal do contrato deve ser igual à soma do principal das parcelas.",
+            fields=["principal_cents", "installments"],
+        )
     loan_id = _new_id()
     schedule_id = _new_id()
     timestamp = db.now()
@@ -85,26 +187,233 @@ def _insert_schedule(conn, schedule_id: int, loan_id: int, installments: list, t
         )
 
 
-def record_disbursement(loan_id: int, amount_cents: int, disbursed_at: date) -> dict:
+def _disbursement_request_hash(
+    *,
+    loan_id: int,
+    amount_cents: int,
+    disbursed_at: date,
+    cash_account_id: Optional[int],
+    existing_cash_event_id: Optional[int],
+) -> str:
+    # Mirrors payments.py::_request_hash's rationale exactly (same fields
+    # that determine whether a retry is a genuine replay vs. a conflicting
+    # reuse of the same key) — deliberately excludes nothing version-related
+    # since record_disbursement has no expected_version parameter at all.
+    payload = {
+        "loan_id": loan_id,
+        "amount_cents": amount_cents,
+        "disbursed_at": disbursed_at.isoformat(),
+        "cash_account_id": cash_account_id,
+        "existing_cash_event_id": existing_cash_event_id,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def record_disbursement(
+    company: int,
+    loan_id: int,
+    amount_cents: int,
+    disbursed_at: date,
+    *,
+    idempotency_key: str,
+    cash_account_id: Optional[int] = None,
+    existing_cash_event_id: Optional[int] = None,
+    actor_id: Optional[int] = None,
+) -> dict:
+    """Record that a loan's principal was actually disbursed — a genuine gap
+    filled from scratch (see task brief: the pre-B7 version only inserted a
+    bookkeeping row into `loan_disbursements`, with no cash movement, no
+    financial_entries trace, and no idempotency mechanism at all).
+
+    Follows the same two established patterns this codebase already uses
+    elsewhere, applied to an inflow instead of an outflow:
+    - payments.py::record_payment's "generate a new cash movement OR link an
+      already-imported one" XOR shape (`cash_account_id` vs.
+      `existing_cash_event_id`);
+    - payments.py::record_payment's idempotency-key + UNIQUE(company,
+      idempotency_key) replay/conflict mechanics (migration 021, mirroring
+      017_obligation_payments.sql).
+
+    "Não tratar empréstimo recebido como venda": the cash inflow is booked as
+    a financial_entries row against the `loan_proceeds` system account
+    (nature=financing_inflow, previously unused anywhere in this codebase),
+    not any revenue-nature account — obligations.py's payable query already
+    excludes financing_inflow entries, and this makes the inflow show up in
+    reporting.py::management_result as financing, never as revenue.
+    """
     if amount_cents <= 0:
         raise ValueError("O valor desembolsado deve ser maior que zero.")
-    disbursement_id = _new_id()
-    timestamp = db.now()
-    with db.connection() as conn:
-        loan = conn.execute("SELECT * FROM loans WHERE id=?", (loan_id,)).fetchone()
-        if not loan:
-            raise ValueError("Empréstimo não encontrado.")
-        conn.execute(
-            """
-            INSERT INTO loan_disbursements(id,loan_id,amount_cents,disbursed_at,created_at)
-            VALUES(?,?,?,?,?)
-            """,
-            (disbursement_id, loan_id, amount_cents, disbursed_at.isoformat(), timestamp),
+    if not idempotency_key or not str(idempotency_key).strip():
+        raise LoanValidationError(
+            "Informe a chave de idempotência.", fields=["idempotency_key"]
         )
-        row = conn.execute(
-            "SELECT * FROM loan_disbursements WHERE id=?", (disbursement_id,)
-        ).fetchone()
-    return dict(row)
+    idempotency_key = str(idempotency_key).strip()
+    if cash_account_id is not None and existing_cash_event_id is not None:
+        raise LoanValidationError(
+            "Informe apenas uma origem de caixa (conta ou movimento existente).",
+            fields=["cash_account_id", "existing_cash_event_id"],
+        )
+    if cash_account_id is None and existing_cash_event_id is None:
+        raise LoanValidationError(
+            "Informe a conta de caixa ou um movimento existente para o desembolso.",
+            fields=["cash_account_id", "existing_cash_event_id"],
+        )
+
+    # accounts.account_by_key() opens its own connection (and may seed
+    # default accounts) — must be resolved BEFORE this function opens its own
+    # `with db.connection()` below, same rationale as
+    # payments.py::record_payment's interest_account_id resolution.
+    proceeds_account = accounts.account_by_key(company, "loan_proceeds")
+
+    request_hash = _disbursement_request_hash(
+        loan_id=loan_id,
+        amount_cents=amount_cents,
+        disbursed_at=disbursed_at,
+        cash_account_id=cash_account_id,
+        existing_cash_event_id=existing_cash_event_id,
+    )
+
+    try:
+        with db.connection() as conn:
+            # 1. Idempotency check — a genuine replay returns verbatim.
+            existing = conn.execute(
+                "SELECT * FROM loan_disbursements WHERE company=? AND idempotency_key=?",
+                (company, idempotency_key),
+            ).fetchone()
+            if existing:
+                if existing["request_hash"] != request_hash:
+                    raise LoanConflictError(
+                        "Chave de idempotência já usada com dados diferentes.",
+                        fields=["idempotency_key"],
+                    )
+                return json.loads(existing["response_json"])
+
+            loan = conn.execute(
+                "SELECT * FROM loans WHERE id=? AND company=?", (loan_id, company)
+            ).fetchone()
+            if not loan:
+                raise LoanNotFoundError("Empréstimo não encontrado.")
+            if loan["status"] != "active":
+                raise LoanConflictError("Empréstimo não está ativo.")
+
+            # 2. Cash-link validation (existing_cash_event_id path only reads
+            # here; the new-event path is created below).
+            if existing_cash_event_id is not None:
+                event = conn.execute(
+                    "SELECT * FROM cash_events WHERE id=? AND company=?",
+                    (existing_cash_event_id, company),
+                ).fetchone()
+                if not event:
+                    raise LoanValidationError(
+                        "Movimento de caixa não encontrado.",
+                        fields=["existing_cash_event_id"],
+                    )
+                if event["amount_cents"] != amount_cents:
+                    raise LoanValidationError(
+                        "Movimento de caixa não corresponde ao valor desembolsado.",
+                        fields=["existing_cash_event_id"],
+                    )
+                if conn.execute(
+                    "SELECT 1 FROM cash_events WHERE reversed_event_id=?",
+                    (existing_cash_event_id,),
+                ).fetchone():
+                    raise LoanValidationError(
+                        "Movimento de caixa já foi estornado.",
+                        fields=["existing_cash_event_id"],
+                    )
+                if conn.execute(
+                    "SELECT 1 FROM loan_disbursements WHERE cash_event_id=?",
+                    (existing_cash_event_id,),
+                ).fetchone():
+                    raise LoanValidationError(
+                        "Movimento de caixa já está vinculado a outro desembolso.",
+                        fields=["existing_cash_event_id"],
+                    )
+
+            disbursement_id = _new_id()
+            timestamp = db.now()
+            description = f"Desembolso — {loan['lender']}"
+
+            # 3. Create or link the cash movement.
+            if cash_account_id is not None:
+                cash_event = post_cash_event(
+                    company,
+                    cash_account_id,
+                    amount_cents,
+                    disbursed_at,
+                    description,
+                    created_by=actor_id,
+                    conn=conn,
+                )
+                cash_event_id = cash_event["id"]
+                owns_cash_event = 1
+            else:
+                cash_event_id = existing_cash_event_id
+                owns_cash_event = 0
+
+            # 4. Book the inflow against loan_proceeds (financing_inflow) and
+            # settle it immediately — the money already arrived on
+            # disbursed_at, there is no "open" period for this entry.
+            entry = create_entry_on_connection(
+                conn,
+                EntryCommand(
+                    company_id=company,
+                    account_id=proceeds_account["id"],
+                    amount_cents=amount_cents,
+                    competence=disbursed_at.isoformat()[:7],
+                    due_date=disbursed_at,
+                    source="loan",
+                    external_id=f"loan-disbursement:{disbursement_id}",
+                    description=description,
+                    created_by=actor_id,
+                ),
+            )
+            settle_entry_on_connection(
+                conn, entry["id"], amount_cents, paid_at=disbursed_at, created_by=actor_id
+            )
+
+            response = {
+                "disbursement_id": str(disbursement_id),
+                "loan_id": str(loan_id),
+                "amount_cents": amount_cents,
+                "disbursed_at": disbursed_at.isoformat(),
+                "entry_id": str(entry["id"]),
+                "cash_event_id": str(cash_event_id) if cash_event_id is not None else None,
+            }
+            conn.execute(
+                """
+                INSERT INTO loan_disbursements(
+                    id,loan_id,company,amount_cents,disbursed_at,cash_event_id,
+                    owns_cash_event,idempotency_key,request_hash,response_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    disbursement_id, loan_id, company, amount_cents,
+                    disbursed_at.isoformat(), cash_event_id, owns_cash_event,
+                    idempotency_key, request_hash,
+                    json.dumps(response, ensure_ascii=False), timestamp,
+                ),
+            )
+            return response
+    except LoanError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - only recover a true idempotency race
+        if not _is_unique_violation(exc):
+            raise
+        with db.connection() as conn2:
+            row = conn2.execute(
+                "SELECT * FROM loan_disbursements WHERE company=? AND idempotency_key=?",
+                (company, idempotency_key),
+            ).fetchone()
+        if row is None:
+            raise
+        if row["request_hash"] != request_hash:
+            raise LoanConflictError(
+                "Chave de idempotência já usada com dados diferentes.",
+                fields=["idempotency_key"],
+            )
+        return json.loads(row["response_json"])
 
 
 def pay_installment_legacy_unsafe(
@@ -354,26 +663,252 @@ def reverse_installment_payment_on_connection(
     return dict(row)
 
 
-def renegotiate(loan_id: int, installments: list, *, reason: str) -> dict:
+def _principal_outstanding_on_connection(conn, loan) -> int:
+    """What's still owed on `loan`'s principal, summed across EVERY
+    installment ever created for it — not just the active schedule's. Paid
+    installments on a PREVIOUSLY closed schedule (one or more renegotiations
+    ago) still contribute their paid_principal_cents here, since that column
+    is never reset/moved when a schedule closes (renegotiate only flips the
+    schedule's own status and swaps the loan's active_schedule_id — see
+    _insert_schedule/renegotiate below). This makes the calculation correct
+    regardless of how many times the loan has already been renegotiated
+    (task brief's self-review: "loan renegotiated more than once — does
+    outstanding principal calculation still work?").
+
+    Deliberately `loan_id`-scoped (not schedule-scoped): this is
+    "principal_outstanding" per the task brief's own assertion
+    (`sum(...) == principal_outstanding`), i.e. the loan's original
+    principal_cents minus everything already amortized — NOT the closed
+    schedule's own remaining balance, which is a different (and, once a
+    schedule has been renegotiated more than once, generally smaller/wrong)
+    number.
+    """
+    paid = conn.execute(
+        "SELECT COALESCE(SUM(paid_principal_cents),0) AS paid FROM loan_installments WHERE loan_id=?",
+        (loan["id"],),
+    ).fetchone()["paid"]
+    return loan["principal_cents"] - int(paid or 0)
+
+
+def renegotiate(
+    loan_id: int, installments: list, *, reason: str, actor_id: Optional[int] = None
+) -> dict:
     """Close the active schedule and open a new one. Paid installments stay
-    attached to the closed schedule — renegotiation only replaces what's still owed."""
+    attached to the closed schedule — renegotiation only replaces what's
+    still owed.
+
+    Task B7 additions: the new schedule's principal must sum to exactly the
+    loan's outstanding principal (not its original total principal — see
+    `_principal_outstanding_on_connection`), and every installment in it is
+    revalidated the same way `create_loan` validates a fresh schedule
+    (`_validate_schedule_items`: types, quantities, dates, sum)."""
+    clean_reason = (reason or "").strip()
+    if not clean_reason:
+        raise LoanValidationError("Informe o motivo da renegociação.", fields=["reason"])
+    if len(clean_reason) > 500:
+        raise LoanValidationError(
+            "Motivo deve ter no máximo 500 caracteres.", fields=["reason"]
+        )
+    principal_sum = _validate_schedule_items(installments)
+
     timestamp = db.now()
     new_schedule_id = _new_id()
     with db.connection() as conn:
         loan = conn.execute("SELECT * FROM loans WHERE id=?", (loan_id,)).fetchone()
         if not loan:
-            raise ValueError("Empréstimo não encontrado.")
+            raise LoanNotFoundError("Empréstimo não encontrado.")
+        if loan["status"] != "active":
+            raise LoanConflictError("Empréstimo não está ativo.")
+
+        outstanding = _principal_outstanding_on_connection(conn, loan)
+        if principal_sum != outstanding:
+            raise LoanValidationError(
+                "A soma do principal das novas parcelas deve ser igual ao saldo devedor.",
+                fields=["installments"],
+            )
+
         conn.execute(
             "UPDATE loan_schedules SET status='closed',reason=? WHERE id=?",
-            (reason.strip(), loan["active_schedule_id"]),
+            (clean_reason, loan["active_schedule_id"]),
         )
         _insert_schedule(conn, new_schedule_id, loan_id, installments, timestamp)
         conn.execute(
             "UPDATE loans SET active_schedule_id=?,updated_at=?,version=version+1 WHERE id=?",
             (new_schedule_id, timestamp, loan_id),
         )
+        after = dict(conn.execute("SELECT * FROM loans WHERE id=?", (loan_id,)).fetchone())
+        _insert_audit(
+            conn,
+            company=loan["company"],
+            entity_type="loan",
+            entity_id=loan_id,
+            action="renegotiate",
+            before=dict(loan),
+            after=after,
+            reason=clean_reason,
+            actor_id=actor_id,
+            timestamp=timestamp,
+        )
         row = conn.execute("SELECT * FROM loans WHERE id=?", (loan_id,)).fetchone()
     return dict(row)
+
+
+_LOAN_EDITABLE_FIELDS = {"lender", "purpose"}
+
+
+def update_loan_details(
+    company: int,
+    loan_id: int,
+    patch: dict,
+    *,
+    expected_version: int,
+    actor_id: Optional[int] = None,
+) -> dict:
+    """PATCH /loans/{id}: edit `lender`/`purpose` only, optimistic-locked by
+    `expected_version` (same `UPDATE ... WHERE id=? AND version=?` pattern as
+    loan_installments/financial_entries elsewhere in this codebase). Any
+    value-bearing field (principal_cents, installments, dates, ...) is
+    rejected here — changing what's actually owed must go through
+    `renegotiate`, never this descriptive-edit endpoint."""
+    if not patch:
+        raise LoanValidationError("Nenhuma alteração informada.")
+    unknown = sorted(set(patch) - _LOAN_EDITABLE_FIELDS)
+    if unknown:
+        raise LoanValidationError(
+            "Campo não pode ser alterado por esta operação; utilize a renegociação "
+            "para alterar valores do contrato.",
+            fields=unknown,
+        )
+
+    timestamp = db.now()
+    with db.connection() as conn:
+        loan = conn.execute(
+            "SELECT * FROM loans WHERE id=? AND company=?", (loan_id, company)
+        ).fetchone()
+        if not loan:
+            raise LoanNotFoundError("Empréstimo não encontrado.")
+        if loan["status"] != "active":
+            raise LoanConflictError("Empréstimo não está ativo.")
+
+        updates: dict = {}
+        if "lender" in patch:
+            clean_lender = (patch["lender"] or "").strip()
+            if not clean_lender:
+                raise LoanValidationError("Informe o credor.", fields=["lender"])
+            updates["lender"] = clean_lender
+        if "purpose" in patch:
+            updates["purpose"] = (patch["purpose"] or "").strip()
+
+        set_sql = ",".join(f"{column}=?" for column in updates)
+        params: list = list(updates.values())
+        params.append(timestamp)
+        params.extend([loan_id, company, expected_version])
+        changed = conn.execute(
+            f"UPDATE loans SET {set_sql},updated_at=?,version=version+1 "
+            "WHERE id=? AND company=? AND version=?",
+            params,
+        )
+        if changed.rowcount != 1:
+            raise LoanConflictError("Versão desatualizada; recarregue o contrato.")
+
+        after = dict(conn.execute("SELECT * FROM loans WHERE id=?", (loan_id,)).fetchone())
+        _insert_audit(
+            conn,
+            company=company,
+            entity_type="loan",
+            entity_id=loan_id,
+            action="update",
+            before=dict(loan),
+            after=after,
+            reason="",
+            actor_id=actor_id,
+            timestamp=timestamp,
+        )
+    return loan_position(loan_id)
+
+
+def cancel_loan(
+    company: int, loan_id: int, *, reason: str, actor_id: Optional[int] = None
+) -> dict:
+    """Cancel a loan contract that has NO recorded movement whatsoever (no
+    payment against any installment, no disbursement) — "não apagar contrato
+    com pagamentos; cancelar contrato sem movimentação exige motivo e
+    atualização da agenda". There is no delete route for loans (a loan with
+    payments can never be removed); this is the only terminal transition, and
+    it is refused outright once any movement exists.
+
+    "Atualização da agenda": the active schedule is marked status='cancelled'
+    (a new terminal value alongside 'active'/'closed'). Both
+    obligations.py::_loan_installment_rows and
+    forecast.py::_open_installments_by_due_date_on_connection already gate
+    their installment query on `s.status='active'` (see this task's
+    investigation of obligations.py:
+    no code change was needed there for this reason — a non-'active' schedule
+    is already invisible to both the payable list and the forecast, exactly
+    like a renegotiated-away closed schedule already is). Individual
+    installment rows are left untouched (still 'open') — their own schedule
+    no longer being 'active' is what removes them, mirroring the exact
+    mechanism renegotiate() already relies on for a closed schedule.
+    """
+    clean_reason = (reason or "").strip()
+    if not clean_reason:
+        raise LoanValidationError("Informe o motivo do cancelamento.", fields=["reason"])
+    if len(clean_reason) > 500:
+        raise LoanValidationError(
+            "Motivo deve ter no máximo 500 caracteres.", fields=["reason"]
+        )
+
+    timestamp = db.now()
+    with db.connection() as conn:
+        loan = conn.execute(
+            "SELECT * FROM loans WHERE id=? AND company=?", (loan_id, company)
+        ).fetchone()
+        if not loan:
+            raise LoanNotFoundError("Empréstimo não encontrado.")
+        if loan["status"] == "cancelled":
+            raise LoanConflictError("Empréstimo já está cancelado.")
+
+        has_payment = conn.execute(
+            """
+            SELECT 1 FROM loan_installments
+            WHERE loan_id=? AND (
+                COALESCE(paid_principal_cents,0)>0 OR COALESCE(paid_interest_cents,0)>0
+                OR status!='open'
+            )
+            LIMIT 1
+            """,
+            (loan_id,),
+        ).fetchone()
+        has_disbursement = conn.execute(
+            "SELECT 1 FROM loan_disbursements WHERE loan_id=? LIMIT 1", (loan_id,)
+        ).fetchone()
+        if has_payment or has_disbursement:
+            raise LoanConflictError(
+                "Empréstimo com pagamento ou desembolso registrado não pode ser cancelado."
+            )
+
+        conn.execute(
+            "UPDATE loans SET status='cancelled',updated_at=?,version=version+1 WHERE id=?",
+            (timestamp, loan_id),
+        )
+        conn.execute(
+            "UPDATE loan_schedules SET status='cancelled',reason=? WHERE id=?",
+            (clean_reason, loan["active_schedule_id"]),
+        )
+        after = dict(conn.execute("SELECT * FROM loans WHERE id=?", (loan_id,)).fetchone())
+        _insert_audit(
+            conn,
+            company=company,
+            entity_type="loan",
+            entity_id=loan_id,
+            action="cancel",
+            before=dict(loan),
+            after=after,
+            reason=clean_reason,
+            actor_id=actor_id,
+            timestamp=timestamp,
+        )
+    return loan_position(loan_id)
 
 
 def loan_position(loan_id: int) -> dict:

@@ -5,7 +5,7 @@ from datetime import date
 import pytest
 
 from backend import database as db
-from backend.finance import loans
+from backend.finance import ledger, loans
 from backend.finance.reporting import management_result
 
 
@@ -110,8 +110,243 @@ def test_renegotiation_closes_schedule_and_keeps_paid_installments(loan_db):
 
 def test_record_disbursement(loan_db):
     loan = make_loan()
+    account = ledger.create_account(COMPANY, "Banco", "bank")
 
-    disbursement = loans.record_disbursement(loan["id"], 98_500_00, date(2026, 9, 1))
+    disbursement = loans.record_disbursement(
+        COMPANY, loan["id"], 98_500_00, date(2026, 9, 1),
+        idempotency_key="disb-1", cash_account_id=account["id"],
+    )
 
-    assert disbursement["loan_id"] == loan["id"]
+    assert disbursement["loan_id"] == str(loan["id"])
     assert disbursement["amount_cents"] == 98_500_00
+    assert disbursement["cash_event_id"] is not None
+    assert ledger.account_balance(account["id"]) == 98_500_00
+
+
+def test_record_disbursement_links_existing_cash_event(loan_db):
+    # "gerar caixa OU vincular crédito existente" — the other path.
+    loan = make_loan()
+    account = ledger.create_account(COMPANY, "Banco", "bank")
+    event = ledger.post_cash_event(
+        COMPANY, account["id"], 98_500_00, date(2026, 9, 1), "Crédito recebido"
+    )
+
+    disbursement = loans.record_disbursement(
+        COMPANY, loan["id"], 98_500_00, date(2026, 9, 1),
+        idempotency_key="disb-link", existing_cash_event_id=event["id"],
+    )
+
+    assert disbursement["cash_event_id"] == str(event["id"])
+    # No SECOND cash movement was created for the linked path — the account's
+    # balance is exactly the one pre-existing event, not doubled.
+    assert ledger.account_balance(account["id"]) == 98_500_00
+
+
+def test_record_disbursement_is_idempotent_on_replay(loan_db):
+    loan = make_loan()
+    account = ledger.create_account(COMPANY, "Banco", "bank")
+
+    first = loans.record_disbursement(
+        COMPANY, loan["id"], 50_000_00, date(2026, 9, 1),
+        idempotency_key="disb-replay", cash_account_id=account["id"],
+    )
+    second = loans.record_disbursement(
+        COMPANY, loan["id"], 50_000_00, date(2026, 9, 1),
+        idempotency_key="disb-replay", cash_account_id=account["id"],
+    )
+
+    assert first == second
+    # A genuine replay must not create a second cash movement.
+    assert ledger.account_balance(account["id"]) == 50_000_00
+
+
+def test_record_disbursement_rejects_conflicting_reuse_of_idempotency_key(loan_db):
+    loan = make_loan()
+    account = ledger.create_account(COMPANY, "Banco", "bank")
+    loans.record_disbursement(
+        COMPANY, loan["id"], 50_000_00, date(2026, 9, 1),
+        idempotency_key="disb-conflict", cash_account_id=account["id"],
+    )
+
+    with pytest.raises(loans.LoanConflictError):
+        loans.record_disbursement(
+            COMPANY, loan["id"], 60_000_00, date(2026, 9, 1),
+            idempotency_key="disb-conflict", cash_account_id=account["id"],
+        )
+
+
+def test_record_disbursement_requires_a_cash_link(loan_db):
+    loan = make_loan()
+    with pytest.raises(loans.LoanValidationError):
+        loans.record_disbursement(
+            COMPANY, loan["id"], 50_000_00, date(2026, 9, 1),
+            idempotency_key="disb-no-link",
+        )
+
+
+def test_create_loan_rejects_principal_sum_mismatch(loan_db):
+    with pytest.raises(loans.LoanValidationError):
+        loans.create_loan(
+            COMPANY,
+            lender="Banco Local",
+            purpose="Capital de giro",
+            principal_cents=90_000_00,
+            net_disbursement_cents=88_000_00,
+            installments=[
+                {"number": 1, "due_date": "2026-10-10", "principal_cents": 40_000_00, "interest_cents": 6_00},
+            ],
+            start_date="2026-09-01",
+        )
+
+
+def test_create_loan_accepts_variable_interest_schedule(loan_db):
+    # "cronograma com juros variáveis válido" — each installment carries a
+    # different interest_cents; only the PRINCIPAL sum is checked against
+    # the contract's principal_cents.
+    loan = loans.create_loan(
+        COMPANY,
+        lender="Banco Local",
+        purpose="Capital de giro",
+        principal_cents=90_000_00,
+        net_disbursement_cents=88_000_00,
+        installments=[
+            {"number": 1, "due_date": "2026-10-10", "principal_cents": 30_000_00, "interest_cents": 9_00},
+            {"number": 2, "due_date": "2026-11-10", "principal_cents": 30_000_00, "interest_cents": 6_00},
+            {"number": 3, "due_date": "2026-12-10", "principal_cents": 30_000_00, "interest_cents": 3_00},
+        ],
+        start_date="2026-09-01",
+    )
+    position = loans.loan_position(loan["id"])
+    interests = [i["interest_cents"] for i in position["installments"]]
+    assert interests == [9_00, 6_00, 3_00]
+
+
+def test_renegotiate_rejects_principal_sum_not_matching_outstanding(loan_db):
+    loan = make_loan(principal=90_000_00, installments=3)
+    first = loans.loan_position(loan["id"])["installments"][0]
+    loans.pay_installment_legacy_unsafe(
+        first["id"], principal_cents=30_000_00, interest_cents=6_00,
+        paid_at=date(2026, 10, 10),
+    )
+    # Outstanding is 90_000_00 - 30_000_00 = 60_000_00 — anything else must
+    # be rejected, per the brief's own assertion
+    # (sum(new_schedule principal) == principal_outstanding).
+    with pytest.raises(loans.LoanValidationError):
+        loans.renegotiate(
+            loan["id"],
+            installments=[{"number": 1, "due_date": "2026-12-10", "principal_cents": 61_000_00, "interest_cents": 9_00}],
+            reason="Tentativa inválida",
+        )
+
+
+def test_renegotiate_requires_a_reason(loan_db):
+    loan = make_loan()
+    with pytest.raises(loans.LoanValidationError):
+        loans.renegotiate(
+            loan["id"],
+            installments=[{"number": 1, "due_date": "2026-12-10", "principal_cents": 90_000_00, "interest_cents": 9_00}],
+            reason="   ",
+        )
+
+
+def test_renegotiate_twice_still_computes_outstanding_correctly(loan_db):
+    # Self-review: a loan renegotiated MORE THAN ONCE — paid installments are
+    # now spread across two closed schedules plus the active one; outstanding
+    # must still be loan.principal_cents minus every paid_principal_cents
+    # ever recorded for the loan, regardless of which schedule they sit on.
+    loan = make_loan(principal=90_000_00, installments=3)
+    first = loans.loan_position(loan["id"])["installments"][0]
+    loans.pay_installment_legacy_unsafe(
+        first["id"], principal_cents=30_000_00, interest_cents=6_00,
+        paid_at=date(2026, 10, 10),
+    )
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-12-10", "principal_cents": 60_000_00, "interest_cents": 9_00}],
+        reason="Primeira renegociação",
+    )
+    second_schedule_installment = loans.loan_position(loan["id"])["installments"][-1]
+    loans.pay_installment_legacy_unsafe(
+        second_schedule_installment["id"], principal_cents=20_000_00, interest_cents=9_00,
+        paid_at=date(2026, 12, 10),
+    )
+    # Outstanding is now 90_000_00 - 30_000_00 - 20_000_00 = 40_000_00.
+    with pytest.raises(loans.LoanValidationError):
+        loans.renegotiate(
+            loan["id"],
+            installments=[{"number": 1, "due_date": "2027-01-10", "principal_cents": 41_000_00, "interest_cents": 5_00}],
+            reason="Segunda renegociação — valor errado",
+        )
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2027-01-10", "principal_cents": 40_000_00, "interest_cents": 5_00}],
+        reason="Segunda renegociação — valor correto",
+    )
+    position = loans.loan_position(loan["id"])
+    open_ = [i for i in position["installments"] if i["status"] == "open"]
+    assert len(open_) == 1
+    assert open_[0]["principal_cents"] == 40_000_00
+
+
+def test_patch_loan_updates_lender_and_purpose(loan_db):
+    loan = make_loan()
+    updated = loans.update_loan_details(
+        COMPANY, loan["id"], {"lender": "Novo Banco", "purpose": "Novo motivo"},
+        expected_version=loan["version"],
+    )
+    assert updated["loan"]["lender"] == "Novo Banco"
+    assert updated["loan"]["purpose"] == "Novo motivo"
+
+
+def test_patch_loan_rejects_stale_version(loan_db):
+    loan = make_loan()
+    loans.update_loan_details(
+        COMPANY, loan["id"], {"lender": "Novo Banco"}, expected_version=loan["version"],
+    )
+    with pytest.raises(loans.LoanConflictError):
+        loans.update_loan_details(
+            COMPANY, loan["id"], {"lender": "Outro Banco"}, expected_version=loan["version"],
+        )
+
+
+def test_patch_loan_rejects_value_bearing_field(loan_db):
+    loan = make_loan()
+    with pytest.raises(loans.LoanValidationError):
+        loans.update_loan_details(
+            COMPANY, loan["id"], {"principal_cents": 100_00}, expected_version=loan["version"],
+        )
+
+
+def test_cancel_loan_without_movement_succeeds(loan_db):
+    loan = make_loan()
+    result = loans.cancel_loan(COMPANY, loan["id"], reason="Contrato não utilizado")
+    assert result["loan"]["status"] == "cancelled"
+
+
+def test_cancel_loan_requires_a_reason(loan_db):
+    loan = make_loan()
+    with pytest.raises(loans.LoanValidationError):
+        loans.cancel_loan(COMPANY, loan["id"], reason="")
+
+
+def test_cancel_loan_with_payment_is_rejected(loan_db):
+    loan = make_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    loans.pay_installment_legacy_unsafe(
+        installment["id"], principal_cents=30_000_00, interest_cents=6_00,
+        paid_at=date(2026, 10, 10),
+    )
+    with pytest.raises(loans.LoanConflictError):
+        loans.cancel_loan(COMPANY, loan["id"], reason="Tentativa inválida")
+
+
+def test_cancel_loan_with_disbursement_and_no_payments_is_rejected(loan_db):
+    # Self-review: a disbursement with ZERO payments is still "movement".
+    loan = make_loan()
+    account = ledger.create_account(COMPANY, "Banco", "bank")
+    loans.record_disbursement(
+        COMPANY, loan["id"], 90_000_00, date(2026, 9, 1),
+        idempotency_key="disb-cancel-guard", cash_account_id=account["id"],
+    )
+    with pytest.raises(loans.LoanConflictError):
+        loans.cancel_loan(COMPANY, loan["id"], reason="Tentativa inválida")

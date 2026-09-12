@@ -78,16 +78,31 @@ def test_sum_of_open_balances_is_correct(obligations_db):
 
 def test_old_schedule_excluded_after_renegotiation(obligations_db):
     loan = _two_installment_loan()
+    # Task B7: renegotiate's new schedule must sum to the loan's outstanding
+    # principal (200_000 — nothing paid yet), not an arbitrary total.
     loans.renegotiate(
         loan["id"],
-        installments=[{"number": 1, "due_date": "2026-11-01", "principal_cents": 210_000, "interest_cents": 0}],
+        installments=[{"number": 1, "due_date": "2026-11-01", "principal_cents": 200_000, "interest_cents": 0}],
         reason="Prazo estendido",
     )
     result = list_obligations(1, include_sensitive=True)
     installment_items = [i for i in result["items"] if i["kind"] == "loan_installment"]
     # Only the new schedule's single installment should remain.
     assert len(installment_items) == 1
-    assert installment_items[0]["total_cents"] == 210_000
+    assert installment_items[0]["total_cents"] == 200_000
+
+
+def test_cancelled_loan_installments_excluded_from_obligations(obligations_db):
+    # Task B7's cancel_loan marks the active schedule non-'active' —
+    # obligations.py's own payable query already gates on
+    # `s.status='active'`, so a cancelled loan's installments disappear from
+    # the payable list with no code change needed here (see task report).
+    loan = _two_installment_loan()
+    loans.cancel_loan(COMPANY, loan["id"], reason="Contrato não utilizado")
+
+    result = list_obligations(1, include_sensitive=True)
+    installment_items = [i for i in result["items"] if i["kind"] == "loan_installment"]
+    assert installment_items == []
 
 
 def test_totals_are_identical_across_pages(obligations_db):

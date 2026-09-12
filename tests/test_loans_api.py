@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 
 from backend import api, database as db, security
+from backend.finance import loans
 
 
 @pytest.fixture
@@ -82,3 +85,153 @@ def test_loan_from_another_company_is_not_visible(client):
 
     response = client.get(f"/api/companies/2/finance/loans/{loan_id}")
     assert response.status_code == 404
+
+
+def test_create_loan_rejects_principal_sum_mismatch(client):
+    response = client.post(
+        "/api/companies/1/finance/loans",
+        json={
+            "lender": "Banco Local",
+            "purpose": "Capital de giro",
+            "principal_cents": 90_000_00,
+            "net_disbursement_cents": 88_500_00,
+            "start_date": "2026-09-01",
+            "installments": [
+                {"number": 1, "due_date": "2026-10-10", "principal_cents": 40_000_00, "interest_cents": 600},
+            ],
+        },
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()["detail"]
+    assert body["code"] == "invalid_fields"
+    assert "installments" in body["fields"]
+
+
+def test_patch_loan_updates_lender_and_purpose(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+    version = created.json()["loan"]["version"]
+
+    patched = client.patch(
+        f"/api/companies/1/finance/loans/{loan_id}",
+        json={"expected_version": version, "lender": "Novo Banco", "purpose": "Reforma"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["loan"]["lender"] == "Novo Banco"
+    assert patched.json()["loan"]["purpose"] == "Reforma"
+
+
+def test_patch_loan_rejects_stale_version(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+    version = created.json()["loan"]["version"]
+
+    first = client.patch(
+        f"/api/companies/1/finance/loans/{loan_id}",
+        json={"expected_version": version, "lender": "Novo Banco"},
+    )
+    assert first.status_code == 200, first.text
+
+    stale = client.patch(
+        f"/api/companies/1/finance/loans/{loan_id}",
+        json={"expected_version": version, "lender": "Outro Banco"},
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "conflict"
+
+
+def test_patch_loan_rejects_value_bearing_field(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+    version = created.json()["loan"]["version"]
+
+    response = client.patch(
+        f"/api/companies/1/finance/loans/{loan_id}",
+        json={"expected_version": version, "principal_cents": 123_00},
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()["detail"]
+    assert body["code"] == "invalid_fields"
+    assert "principal_cents" in body["fields"]
+
+
+def test_cancel_loan_without_movement_succeeds(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+
+    response = client.post(
+        f"/api/companies/1/finance/loans/{loan_id}/cancel",
+        json={"reason": "Contrato não utilizado"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["loan"]["status"] == "cancelled"
+
+
+def test_cancel_loan_with_payment_is_rejected(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+    installment_id = created.json()["installments"][0]["id"]
+
+    loans.pay_installment_legacy_unsafe(
+        installment_id, principal_cents=30_000_00, interest_cents=600,
+        paid_at=date(2026, 10, 10),
+    )
+
+    response = client.post(
+        f"/api/companies/1/finance/loans/{loan_id}/cancel",
+        json={"reason": "Tentativa inválida"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "conflict"
+
+
+def test_disbursement_via_api_requires_idempotency_key(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+
+    response = client.post(
+        f"/api/companies/1/finance/loans/{loan_id}/disbursements",
+        json={"amount_cents": 88_500_00, "disbursed_at": "2026-09-01"},
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_disbursement_via_api_creates_cash_movement(client):
+    created = create_loan(client)
+    loan_id = created.json()["loan"]["id"]
+
+    account = client.post(
+        "/api/companies/1/finance/cash-accounts",
+        json={"name": "Banco", "kind": "bank"},
+    ).json()
+
+    response = client.post(
+        f"/api/companies/1/finance/loans/{loan_id}/disbursements",
+        json={
+            "amount_cents": 88_500_00,
+            "disbursed_at": "2026-09-01",
+            "cash_account_id": account["id"],
+        },
+        headers={"Idempotency-Key": "disb-api-1"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["cash_event_id"] is not None
+
+    balance = client.get("/api/companies/1/finance/cash-balance")
+    assert balance.json()["balance_cents"] == 88_500_00
+
+    # Replay with the same key returns the same result and does not double
+    # the cash balance.
+    replay = client.post(
+        f"/api/companies/1/finance/loans/{loan_id}/disbursements",
+        json={
+            "amount_cents": 88_500_00,
+            "disbursed_at": "2026-09-01",
+            "cash_account_id": account["id"],
+        },
+        headers={"Idempotency-Key": "disb-api-1"},
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.json() == response.json()
+    balance_after_replay = client.get("/api/companies/1/finance/cash-balance")
+    assert balance_after_replay.json()["balance_cents"] == 88_500_00
