@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 
 from .. import database as db
 from .entries import _paid_cents, get_entry
+from . import validators as _shared_validators
 
 
 class EntryManagementError(Exception):
@@ -64,100 +65,43 @@ def _is_reconciled(conn, entry_id: int) -> bool:
     return row is not None
 
 
+# The field validators below are thin bindings onto backend/finance/validators.py
+# (shared with recurrence.py, which edits the same field set under the same
+# rules): each just supplies EntryValidationError as the exception class to
+# raise, so every other call site in this module keeps calling
+# `_validate_description(value)` etc. unchanged.
+
+
 def _validate_description(value) -> str:
-    text = (value or "").strip()
-    if not (1 <= len(text) <= 240):
-        raise EntryValidationError(
-            "Descrição deve ter entre 1 e 240 caracteres.", fields=["description"]
-        )
-    return text
+    return _shared_validators.validate_description(value, error_cls=EntryValidationError)
 
 
 def _validate_notes(value) -> str:
-    text = (value or "").strip()
-    if len(text) > 2000:
-        raise EntryValidationError(
-            "Notas devem ter no máximo 2000 caracteres.", fields=["notes"]
-        )
-    return text
+    return _shared_validators.validate_notes(value, error_cls=EntryValidationError)
 
 
 def _validate_amount(value) -> int:
-    try:
-        amount = int(value)
-    except (TypeError, ValueError):
-        amount = None
-    if amount is None or isinstance(value, bool) or amount <= 0:
-        raise EntryValidationError(
-            "O valor deve ser maior que zero.", fields=["amount_cents"]
-        )
-    return amount
+    return _shared_validators.validate_amount(value, error_cls=EntryValidationError)
 
 
 def _validate_competence(value) -> str:
-    if not isinstance(value, str) or len(value) != 7:
-        raise EntryValidationError("Competência inválida.", fields=["competence"])
-    try:
-        date.fromisoformat(value + "-01")
-    except ValueError as exc:
-        raise EntryValidationError("Competência inválida.", fields=["competence"]) from exc
-    return value
+    return _shared_validators.validate_competence(value, error_cls=EntryValidationError)
 
 
 def _validate_due_date(value) -> str:
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value).isoformat()
-        except ValueError as exc:
-            raise EntryValidationError(
-                "Data de vencimento inválida.", fields=["due_date"]
-            ) from exc
-    raise EntryValidationError("Data de vencimento inválida.", fields=["due_date"])
+    return _shared_validators.validate_due_date(value, error_cls=EntryValidationError)
 
 
 def _validate_account(conn, company: int, account_id) -> int:
-    try:
-        account_id = int(account_id)
-    except (TypeError, ValueError) as exc:
-        raise EntryValidationError("Categoria inválida.", fields=["account_id"]) from exc
-    row = conn.execute(
-        "SELECT archived FROM finance_accounts WHERE id=? AND company=?",
-        (account_id, company),
-    ).fetchone()
-    if not row:
-        raise EntryValidationError(
-            "Categoria não encontrada para esta empresa.", fields=["account_id"]
-        )
-    if row["archived"]:
-        raise EntryValidationError(
-            "Categoria está arquivada e não pode ser selecionada.", fields=["account_id"]
-        )
-    return account_id
+    return _shared_validators.validate_account(
+        conn, company, account_id, error_cls=EntryValidationError
+    )
 
 
 def _validate_counterparty(conn, company: int, counterparty_id) -> int:
-    try:
-        counterparty_id = int(counterparty_id)
-    except (TypeError, ValueError) as exc:
-        raise EntryValidationError(
-            "Favorecido inválido.", fields=["counterparty_id"]
-        ) from exc
-    row = conn.execute(
-        "SELECT archived FROM counterparties WHERE id=? AND company=?",
-        (counterparty_id, company),
-    ).fetchone()
-    if not row:
-        raise EntryValidationError(
-            "Favorecido não encontrado para esta empresa.", fields=["counterparty_id"]
-        )
-    if row["archived"]:
-        raise EntryValidationError(
-            "Favorecido está arquivado e não pode ser selecionado.",
-            fields=["counterparty_id"],
-        )
-    return counterparty_id
+    return _shared_validators.validate_counterparty(
+        conn, company, counterparty_id, error_cls=EntryValidationError
+    )
 
 
 def _insert_audit(
