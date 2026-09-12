@@ -1,11 +1,12 @@
 from __future__ import annotations
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -17,6 +18,29 @@ from .routes.financial_entries import router as financial_entries_router
 from .routes.settings import router as settings_router
 from .routes.users import router as users_router
 from .sync import Worker
+
+# Account, entry, user and store ids are secrets.randbits(63) — deliberately random
+# and unguessable, but past JavaScript's 2^53 safe-integer limit. A plain int in JSON
+# silently rounds in the browser, so every id round-tripped through a form breaks
+# ("Conta financeira não encontrada"). Stringify oversized ints app-wide instead of
+# hunting down each id field; FastAPI/Pydantic already accept a numeric string back
+# as an int.
+_JS_MAX_SAFE_INT = 2**53 - 1
+
+def _stringify_big_ints(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _JS_MAX_SAFE_INT else value
+    if isinstance(value, dict):
+        return {k: _stringify_big_ints(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_stringify_big_ints(v) for v in value]
+    return value
+
+class BigIntSafeJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return json.dumps(_stringify_big_ints(content), ensure_ascii=False).encode('utf-8')
 
 @asynccontextmanager
 async def lifespan(app):
@@ -33,7 +57,7 @@ async def lifespan(app):
     yield
     if worker: worker.stop.set()
 
-app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
+app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None,default_response_class=BigIntSafeJSONResponse)
 app.include_router(users_router)
 app.include_router(settings_router)
 app.include_router(finance_accounts_router)
