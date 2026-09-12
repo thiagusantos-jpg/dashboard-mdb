@@ -19,7 +19,9 @@
         <h1>Mercado duBairro</h1>
         <p>Painel dos Sócios — acesso restrito</p>
         <div id="login-error" class="form-error"></div>
-        <label for="login-password" class="field-label">Senha de acesso</label>
+        <label for="login-email" class="field-label">E-mail</label>
+        <input type="email" id="login-email" class="login-input" autocomplete="username" maxlength="254" required>
+        <label for="login-password" class="field-label">Senha</label>
         <input type="password" id="login-password" class="login-input" autocomplete="current-password" required>
         <button type="submit" class="btn-primary" id="login-submit">Entrar</button>
     </form>
@@ -54,7 +56,11 @@
         <a class="nav-item" href="#/sazonalidade" data-page="sazonalidade">📈 Sazonalidade e Tendências</a>
         <a class="nav-item" href="#/visao" data-page="visao">🔮 Visão Futurista</a>
         <a class="nav-item" href="#/estoque" data-page="estoque">📦 Produtos &amp; Estoque</a>
+        <a class="nav-item" href="#/financeiro" data-page="financeiro">💵 Financeiro</a>
+        <a class="nav-item" href="#/despesas" data-page="despesas">🧾 Custos e Despesas</a>
+        <a class="nav-item" href="#/contas-pagar" data-page="contas-pagar">📄 Contas a Pagar</a>
         <a class="nav-item" href="#/sync" data-page="sync">🔗 Sincronização Mobne</a>
+        <a class="nav-item" href="#/configuracoes/empresa" data-page="configuracoes">⚙️ Configurações</a>
 
         <hr>
         <div class="sidebar-section-title">🎛️ Simulador</div>
@@ -96,6 +102,8 @@
 <!-- Apache ECharts — vendored locally, Apache-2.0, see assets/vendor/echarts/README.md -->
 <script src="assets/vendor/echarts/echarts.min.js?v=6.1.0"></script>
 <script src="assets/echarts-charts.js?v=20260911-ux7"></script>
+<script src="assets/settings.js?v=20260912-admin1"></script>
+<script src="assets/finance.js?v=20260912-finance1"></script>
 <script src="assets/app.js?v=20260911-ux7"></script>
 </body>
 </html>

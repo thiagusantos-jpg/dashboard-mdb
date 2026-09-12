@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from . import settings
+from . import migrations
 
 PG = bool(settings.DATABASE_URL)
 if PG:
@@ -32,6 +33,9 @@ class _PGCursor:
         return self._cur.fetchall()
     def __iter__(self):
         return iter(self._cur)
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
 
 class _PGConn:
     def __init__(self, conn):
@@ -97,7 +101,7 @@ def _initialize_sqlite(db):
             count = json.loads(row['payload']).get('raw_count', 0)
             db.execute('UPDATE datasets SET documents=? WHERE company=? AND resource=? AND period=?',
                        (count, row['company'], row['resource'], row['period']))
-        db.execute('INSERT OR IGNORE INTO schema_versions VALUES(2,?)', (now(),))
+    db.execute('INSERT OR IGNORE INTO schema_versions VALUES(2,?)', (now(),))
 
 def _initialize_postgres(db):
     # Same shape as the SQLite schema above, in Postgres DDL — a fresh database,
@@ -132,6 +136,7 @@ def _initialize_postgres(db):
     CREATE TABLE IF NOT EXISTS config(company INTEGER PRIMARY KEY, fixed_cost_cents INTEGER NOT NULL DEFAULT 1691346)
     ''')
     db.execute('INSERT INTO schema_versions VALUES(1,?) ON CONFLICT(version) DO NOTHING', (now(),))
+    db.execute('INSERT INTO schema_versions VALUES(2,?) ON CONFLICT(version) DO NOTHING', (now(),))
 
 def initialize():
     with connection() as db:
@@ -139,6 +144,7 @@ def initialize():
             _initialize_postgres(db)
         else:
             _initialize_sqlite(db)
+        migrations.migrate(db)
     if not PG:
         os.chmod(settings.DB_PATH, 0o600)
 

@@ -1,17 +1,47 @@
 from __future__ import annotations
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
-from . import database as db, models, security, settings
+from . import database as db, models, permissions, security, settings
 from . import sync
+from .routes.finance_accounts import router as finance_accounts_router
+from .routes.financial_entries import router as financial_entries_router
+from .routes.financial_reports import router as financial_reports_router
+from .routes.settings import router as settings_router
+from .routes.users import router as users_router
 from .sync import Worker
+
+# Account, entry, user and store ids are secrets.randbits(63) — deliberately random
+# and unguessable, but past JavaScript's 2^53 safe-integer limit. A plain int in JSON
+# silently rounds in the browser, so every id round-tripped through a form breaks
+# ("Conta financeira não encontrada"). Stringify oversized ints app-wide instead of
+# hunting down each id field; FastAPI/Pydantic already accept a numeric string back
+# as an int.
+_JS_MAX_SAFE_INT = 2**53 - 1
+
+def _stringify_big_ints(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _JS_MAX_SAFE_INT else value
+    if isinstance(value, dict):
+        return {k: _stringify_big_ints(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_stringify_big_ints(v) for v in value]
+    return value
+
+class BigIntSafeJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return json.dumps(_stringify_big_ints(content), ensure_ascii=False).encode('utf-8')
 
 @asynccontextmanager
 async def lifespan(app):
@@ -28,7 +58,12 @@ async def lifespan(app):
     yield
     if worker: worker.stop.set()
 
-app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
+app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None,default_response_class=BigIntSafeJSONResponse)
+app.include_router(users_router)
+app.include_router(settings_router)
+app.include_router(finance_accounts_router)
+app.include_router(financial_entries_router)
+app.include_router(financial_reports_router)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','testserver','*.vercel.app'])
 # /dashboard is ~420 KB of JSON per month; it was going over the wire uncompressed.
 app.add_middleware(GZipMiddleware,minimum_size=1024)
@@ -49,21 +84,23 @@ async def secure_headers(request,call_next):
     return response
 
 class Login(BaseModel):
+    email: Optional[str]=Field(default=None,max_length=254)
     password: str=Field(min_length=1,max_length=200)
 
 @app.post('/api/login')
 def login(body: Login,request:Request,response:Response):
-    raw=security.login(request,body.password)
+    raw=security.login(request,body.password,body.email)
     response.set_cookie(security.COOKIE,raw,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=43200)
     return {'csrf':security.csrf(raw)}
 
 @app.get('/api/session')
-def session(raw=Depends(security.authenticate)):
-    return {'csrf':security.csrf(raw),'companies':db.companies(),'user':'Administrador local'}
+def session(request:Request,auth=Depends(security.authenticate)):
+    raw=request.cookies.get(security.COOKIE,'')
+    return {'csrf':security.csrf(raw),'companies':permissions.companies_for(auth),'user':auth.email}
 
 @app.post('/api/logout')
-def logout(response:Response,raw=Depends(security.authenticate)):
-    with db.connection() as conn: conn.execute('DELETE FROM sessions WHERE hash=?',(security.fingerprint(raw),))
+def logout(response:Response,auth=Depends(security.authenticate)):
+    with db.connection() as conn: conn.execute('DELETE FROM sessions WHERE hash=?',(auth.session_hash,))
     response.delete_cookie(security.COOKIE)
     return {'ok':True}
 
@@ -91,7 +128,7 @@ def pct_change(new,old):
     if new is None or old is None or old==0: return None
     return round((new/old-1)*100,2)
 
-@app.get('/api/companies/{company}/status',dependencies=[Depends(security.authenticate)])
+@app.get('/api/companies/{company}/status',dependencies=[Depends(permissions.require_permission('dashboard.read'))])
 def status(company:int):
     authorized_company(company)
     periods=db.periods(company)
@@ -105,7 +142,7 @@ def status(company:int):
 class SyncRequest(BaseModel):
     mode:str=Field(pattern='^(recent|history|reconcile)$')
 
-@app.post('/api/companies/{company}/sync',dependencies=[Depends(security.authenticate)],status_code=202)
+@app.post('/api/companies/{company}/sync',dependencies=[Depends(permissions.require_permission('integrations.manage'))],status_code=202)
 def trigger_sync(company:int,body:SyncRequest):
     # No authorized_company() pre-check here on purpose: the very first sync for a company
     # runs against an empty companies table (nothing to check membership against yet) — sync.run()
@@ -118,13 +155,14 @@ def trigger_sync(company:int,body:SyncRequest):
         sync.run(company,body.mode,job_id=job_id)
     return {'job_id':job_id}
 
-@app.get('/api/sync-jobs/{job_id}',dependencies=[Depends(security.authenticate)])
-def sync_job(job_id:int):
+@app.get('/api/sync-jobs/{job_id}')
+def sync_job(job_id:int,auth=Depends(security.authenticate)):
     # The administrator must be able to follow bootstrap before companies exist.
     with db.connection() as conn:
         job=conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
     if job is None:
         raise HTTPException(404,'Sincronização não encontrada.')
+    permissions.ensure_permission(auth,'integrations.manage',job['company'])
     return dict(job)
 
 @app.get('/api/cron/sync')
@@ -144,14 +182,14 @@ def cron_sync(request:Request):
 class Config(BaseModel):
     fixed_cost_cents:int=Field(ge=0,le=1000000000)
 
-@app.put('/api/companies/{company}/config',dependencies=[Depends(security.authenticate)])
+@app.put('/api/companies/{company}/config',dependencies=[Depends(permissions.require_permission('settings.manage'))])
 def config(company:int,body:Config):
     authorized_company(company)
     with db.connection() as conn:
         conn.execute('INSERT INTO config VALUES(?,?) ON CONFLICT(company) DO UPDATE SET fixed_cost_cents=excluded.fixed_cost_cents',(company,body.fixed_cost_cents))
     return {'ok':True}
 
-@app.get('/api/companies/{company}/dashboard',dependencies=[Depends(security.authenticate)])
+@app.get('/api/companies/{company}/dashboard',dependencies=[Depends(permissions.require_permission('dashboard.read'))])
 def dashboard(company:int,period:str):
     authorized_company(company); validate_period(period)
     with db.connection() as conn:
