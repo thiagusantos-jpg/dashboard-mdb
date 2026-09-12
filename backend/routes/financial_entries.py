@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
-from ..finance.entries import EntryCommand, create_entry, reverse_entry, settle_entry
+from ..finance.entries import EntryCommand, create_entry, reverse_entry
 from ..finance.entry_management import (
     EntryConflictError,
     EntryNotFoundError,
@@ -16,6 +16,7 @@ from ..finance.entry_management import (
     entry_history,
     update_entry,
 )
+from ..finance.payments import CASH_LINK_REQUIRED_MESSAGE
 from ..finance.recurrence import create_recurrence, generate_occurrences
 
 
@@ -225,16 +226,16 @@ def add_settlement(
         permissions.require_permission("finance.write")
     ),
 ):
+    # This legacy route's payload never carries a cash-account link
+    # (`Settlement` above has no cash_account_id/existing_cash_event_id
+    # field) — task B3 requires every payment to be linked to a real cash
+    # movement (created or attached to an already-imported bank
+    # transaction), same underlying rule as POST
+    # /obligations/entry/{id}/payments (backend/finance/payments.py::
+    # record_payment). Rather than silently settling the entry with no cash
+    # trace, reject and point the caller at the new flow.
     _require_entry_access(company, entry_id, auth)
-    try:
-        return settle_entry(
-            entry_id,
-            body.amount_cents,
-            paid_at=body.paid_at,
-            created_by=auth.user_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    raise HTTPException(409, _error_detail("conflict", CASH_LINK_REQUIRED_MESSAGE))
 
 
 @router.post("/entries/{entry_id}/reverse")

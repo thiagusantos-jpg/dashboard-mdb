@@ -3,15 +3,26 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
-from ..finance import obligations
+from ..finance import obligations, payments
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
 
 _VALID_KINDS = ("entry", "loan_installment")
+
+
+class PaymentCreate(BaseModel):
+    amount_cents: int = Field(gt=0)
+    paid_at: date
+    expected_version: int
+    cash_account_id: Optional[int] = None
+    existing_cash_event_id: Optional[int] = None
+    principal_cents: Optional[int] = None
+    interest_cents: Optional[int] = None
 
 
 def _error_detail(code: str, message: str, fields=None) -> dict:
@@ -31,6 +42,29 @@ def _strip_write_actions(item: dict) -> dict:
         action for action in item["allowed_actions"] if action not in obligations.WRITE_ACTIONS
     ]
     return item
+
+
+def _require_entry_payment_access(
+    company: int, entry_id: int, auth: security.AuthContext
+) -> None:
+    """Mirrors backend/routes/financial_entries.py's
+    `_require_sensitive_if_needed`: paying an entry booked against a
+    sensitive account (e.g. salaries) still requires finance.sensitive.read,
+    same as the legacy settlement route enforced — this route must not
+    become a way to bypass that gate. loan_installment has no sensitive-
+    account concept (obligations.py: "loans carry no account/sensitive
+    linkage"), so this only applies to kind='entry'."""
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT a.sensitive FROM financial_entries e
+            JOIN finance_accounts a ON a.id=e.account_id
+            WHERE e.id=? AND e.company=?
+            """,
+            (entry_id, company),
+        ).fetchone()
+    if row and row["sensitive"]:
+        permissions.ensure_permission(auth, "finance.sensitive.read", company)
 
 
 @router.get("/obligations")
@@ -108,3 +142,55 @@ def get_obligation(
     if not can_write:
         _strip_write_actions(item)
     return item
+
+
+@router.post("/obligations/{kind}/{obligation_id}/payments")
+def add_payment(
+    company: int,
+    kind: str,
+    obligation_id: str,
+    body: PaymentCreate,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    auth: security.AuthContext = Depends(permissions.require_permission("finance.write")),
+):
+    if kind not in _VALID_KINDS:
+        raise HTTPException(404, _error_detail("not_found", "Obrigação não encontrada."))
+    try:
+        numeric_id = int(obligation_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422, _error_detail("invalid_fields", "Identificador inválido.", ["id"])
+        )
+
+    with db.connection() as conn:
+        exists = conn.execute("SELECT 1 FROM companies WHERE id=?", (company,)).fetchone()
+    if not exists:
+        raise HTTPException(404, _error_detail("not_found", "Empresa não encontrada."))
+
+    if kind == "entry":
+        _require_entry_payment_access(company, numeric_id, auth)
+
+    try:
+        result = payments.record_payment(
+            company,
+            kind,
+            numeric_id,
+            amount_cents=body.amount_cents,
+            paid_at=body.paid_at,
+            expected_version=body.expected_version,
+            idempotency_key=idempotency_key,
+            cash_account_id=body.cash_account_id,
+            existing_cash_event_id=body.existing_cash_event_id,
+            principal_cents=body.principal_cents,
+            interest_cents=body.interest_cents,
+            actor_id=auth.user_id,
+        )
+    except payments.PaymentNotFoundError as exc:
+        raise HTTPException(404, _error_detail("not_found", exc.message)) from exc
+    except payments.PaymentConflictError as exc:
+        raise HTTPException(409, _error_detail("conflict", exc.message, exc.fields)) from exc
+    except payments.PaymentValidationError as exc:
+        raise HTTPException(
+            422, _error_detail("invalid_fields", exc.message, exc.fields)
+        ) from exc
+    return result

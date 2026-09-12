@@ -56,7 +56,13 @@ def test_create_and_list_loan(client):
     assert len(listed.json()) == 1
 
 
-def test_pay_installment_via_api(client):
+def test_pay_installment_via_api_without_cash_link_is_rejected(client):
+    # Task B3: this legacy route's payload has no way to link the payment to
+    # a real cash movement, so it now always rejects with 409 and points the
+    # caller at the new POST /obligations/loan_installment/{id}/payments
+    # flow (backend/finance/payments.py::record_payment) instead of silently
+    # recording an untracked payment. See test_obligations_api.py for the
+    # new route's success path.
     created = create_loan(client)
     installment_id = created.json()["installments"][0]["id"]
 
@@ -64,8 +70,8 @@ def test_pay_installment_via_api(client):
         f"/api/companies/1/finance/loans/installments/{installment_id}/payments",
         json={"principal_cents": 30_000_00, "interest_cents": 600, "paid_at": "2026-10-10"},
     )
-    assert paid.status_code == 200, paid.text
-    assert paid.json()["principal_cents"] == 60_000_00
+    assert paid.status_code == 409, paid.text
+    assert paid.json()["detail"] == "Atualize a página para registrar a conta de pagamento."
 
 
 def test_loan_from_another_company_is_not_visible(client):

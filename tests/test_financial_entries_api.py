@@ -48,6 +48,21 @@ def _open_entry(client):
     )
 
 
+# --- Task B3: legacy settlement route requires a cash link -----------------
+
+
+def test_settlement_without_cash_link_is_rejected(client):
+    entry = _open_entry(client)
+    response = client.post(
+        f"/api/companies/1/finance/entries/{entry['id']}/settlements",
+        json={"amount_cents": 5_000, "paid_at": "2026-09-10"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["message"] == (
+        "Atualize a página para registrar a conta de pagamento."
+    )
+
+
 # --- Finding 1: BIGINT ids inside history before/after snapshots ----------
 
 

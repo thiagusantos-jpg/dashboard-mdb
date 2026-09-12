@@ -13,6 +13,12 @@ def _new_id() -> int:
     return secrets.randbits(63) or 1
 
 
+class InstallmentVersionConflict(ValueError):
+    """Raised by pay_installment_on_connection when the optimistic-concurrency
+    version check fails. See entries.EntryVersionConflict for the rationale;
+    subclasses ValueError so a bare `except ValueError` still catches it."""
+
+
 def create_loan(
     company: int,
     lender: str,
@@ -156,6 +162,95 @@ def pay_installment(
         row = conn.execute(
             "SELECT * FROM loan_installments WHERE id=?", (installment_id,)
         ).fetchone()
+    return dict(row)
+
+
+def pay_installment_on_connection(
+    conn,
+    installment_id: int,
+    *,
+    principal_cents: int,
+    interest_cents: int,
+    paid_at: date,
+    created_by: Optional[int] = None,
+    expected_version: Optional[int] = None,
+    interest_entry_id: Optional[int] = None,
+) -> dict:
+    """Apply a (possibly partial) installment payment on the caller's
+    connection/transaction — no commit here, and no interest-entry creation
+    (that's the caller's job, sharing the same connection; see
+    backend/finance/payments.py::record_payment, which is this function's
+    only caller). Unlike the legacy `pay_installment()` below, this:
+
+    - accepts a partial payment (principal_cents/interest_cents need not
+      cover the whole installment) and only flips status to 'paid' once both
+      components reach zero balance, per the task brief's "aceitar parcial
+      sem marcar quitada até zerar saldo";
+    - validates principal_cents/interest_cents each stay within their own
+      remaining component balance (the legacy function performs no such
+      check — see test_loans.py::test_paying_an_installment_twice_fails,
+      which relies on the legacy function accepting an over-payment on the
+      first call, so that laxer behavior is deliberately preserved there and
+      NOT shared with this stricter helper);
+    - supports the same `expected_version` optimistic-concurrency gate as
+      entries.settle_entry_on_connection (see that function's docstring for
+      why the conditional UPDATE itself is the real concurrency guarantee,
+      not just the earlier read).
+
+    `interest_entry_id`, when given, is persisted onto the installment's
+    `entry_id` column (via COALESCE, so it's only ever set once — the first
+    payment that carries interest — and never overwritten by a later
+    interest-less partial payment).
+    """
+    if principal_cents < 0 or interest_cents < 0:
+        raise ValueError("Os valores pagos não podem ser negativos.")
+    installment = conn.execute(
+        "SELECT * FROM loan_installments WHERE id=?", (installment_id,)
+    ).fetchone()
+    if not installment:
+        raise ValueError("Parcela não encontrada.")
+    if installment["status"] == "paid":
+        raise ValueError("Parcela já paga.")
+    paid_principal = int(installment["paid_principal_cents"] or 0)
+    paid_interest = int(installment["paid_interest_cents"] or 0)
+    open_principal = installment["principal_cents"] - paid_principal
+    open_interest = installment["interest_cents"] - paid_interest
+    if principal_cents > open_principal or interest_cents > open_interest:
+        raise ValueError("O pagamento excede o saldo em aberto da parcela.")
+
+    new_paid_principal = paid_principal + principal_cents
+    new_paid_interest = paid_interest + interest_cents
+    fully_paid = (
+        new_paid_principal == installment["principal_cents"]
+        and new_paid_interest == installment["interest_cents"]
+    )
+    status = "paid" if fully_paid else "partially_paid"
+    timestamp = db.now()
+
+    set_sql = (
+        "status=?,paid_principal_cents=?,paid_interest_cents=?,paid_at=?,"
+        "entry_id=COALESCE(?,entry_id),version=version+1,updated_at=?"
+    )
+    params = [
+        status, new_paid_principal, new_paid_interest, paid_at.isoformat(),
+        interest_entry_id, timestamp,
+    ]
+    if expected_version is None:
+        conn.execute(
+            f"UPDATE loan_installments SET {set_sql} WHERE id=?",
+            (*params, installment_id),
+        )
+    else:
+        changed = conn.execute(
+            f"UPDATE loan_installments SET {set_sql} WHERE id=? AND version=?",
+            (*params, installment_id, expected_version),
+        )
+        if changed.rowcount != 1:
+            raise InstallmentVersionConflict("Versão desatualizada; recarregue a parcela.")
+
+    row = conn.execute(
+        "SELECT * FROM loan_installments WHERE id=?", (installment_id,)
+    ).fetchone()
     return dict(row)
 
 

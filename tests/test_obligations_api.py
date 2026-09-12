@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import api, database as db, identity, permissions, security
-from backend.finance import accounts, loans
+from backend.finance import accounts, ledger, loans
 from backend.finance.entries import EntryCommand, create_entry, settle_entry
 
 
@@ -253,9 +253,13 @@ def test_get_obligation_detail_entry(client):
 def test_get_obligation_detail_preserves_paid_installment_history(client):
     loan = _two_installment_loan()
     installment_id = loans.loan_position(loan["id"])["installments"][0]["id"]
-    client.post(
-        f"/api/companies/1/finance/loans/installments/{installment_id}/payments",
-        json={"principal_cents": 100_000, "interest_cents": 5_000, "paid_at": "2026-09-10"},
+    # Task B3 made the legacy POST /loans/installments/{id}/payments route
+    # always reject (no cash link) — use the module function directly to
+    # set up this fixture's "already paid" installment, same as before B3
+    # this test relied on the (now-removed) success path of that route.
+    loans.pay_installment(
+        installment_id, principal_cents=100_000, interest_cents=5_000,
+        paid_at=date(2026, 9, 10),
     )
     response = client.get(f"/api/companies/1/finance/obligations/loan_installment/{installment_id}")
     assert response.status_code == 200, response.text
@@ -285,3 +289,123 @@ def test_get_obligation_detail_404_for_sensitive_item_without_permission(client)
 
     response = manager_client.get(f"/api/companies/1/finance/obligations/entry/{entry['id']}")
     assert response.status_code == 404
+
+
+# --- POST .../obligations/{kind}/{id}/payments (task B3) -------------------
+
+
+def test_pay_entry_via_new_payments_endpoint(client):
+    account = accounts.account_by_key(1, "rent")
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account["id"], amount_cents=100_000,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Aluguel",
+    ))
+    bank = ledger.create_account(1, "Banco X", "bank")
+
+    response = client.post(
+        f"/api/companies/1/finance/obligations/entry/{entry['id']}/payments",
+        json={
+            "amount_cents": 40_000, "paid_at": "2026-09-12", "expected_version": 1,
+            "cash_account_id": bank["id"],
+        },
+        headers={"Idempotency-Key": "test-api-1"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["obligation"]["open_cents"] == 60_000
+    assert body["cash_event_id"] is not None
+    assert isinstance(body["payment_id"], str)
+
+    # Replaying the same key returns the same payment, not a second one.
+    replay = client.post(
+        f"/api/companies/1/finance/obligations/entry/{entry['id']}/payments",
+        json={
+            "amount_cents": 40_000, "paid_at": "2026-09-12", "expected_version": 1,
+            "cash_account_id": bank["id"],
+        },
+        headers={"Idempotency-Key": "test-api-1"},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["payment_id"] == body["payment_id"]
+
+
+def test_pay_entry_without_idempotency_key_header_is_rejected(client):
+    account = accounts.account_by_key(1, "rent")
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account["id"], amount_cents=100_000,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Aluguel",
+    ))
+    bank = ledger.create_account(1, "Banco X", "bank")
+
+    response = client.post(
+        f"/api/companies/1/finance/obligations/entry/{entry['id']}/payments",
+        json={
+            "amount_cents": 40_000, "paid_at": "2026-09-12", "expected_version": 1,
+            "cash_account_id": bank["id"],
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_pay_loan_installment_via_new_payments_endpoint(client):
+    loan = _two_installment_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    bank = ledger.create_account(1, "Banco X", "bank")
+
+    response = client.post(
+        f"/api/companies/1/finance/obligations/loan_installment/{installment['id']}/payments",
+        json={
+            "amount_cents": 105_000, "paid_at": "2026-09-10", "expected_version": 1,
+            "cash_account_id": bank["id"], "principal_cents": 100_000, "interest_cents": 5_000,
+        },
+        headers={"Idempotency-Key": "test-api-loan-1"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["obligation"]["status"] == "paid"
+    assert body["obligation"]["open_cents"] == 0
+
+
+def test_pay_sensitive_entry_requires_sensitive_read_permission(client):
+    sensitive_account = accounts.account_by_key(1, "salaries")
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=sensitive_account["id"], amount_cents=50_000,
+        competence="2026-09", due_date=date(2026, 9, 15), source="manual",
+        external_id=None, description="Folha de pagamento",
+    ))
+    bank = ledger.create_account(1, "Banco X", "bank")
+    manager = identity.create_user("gerente3@loja.test", "senha-segura-5", "Gerente", is_admin=False)
+    permissions.grant_role(manager["id"], 1, "manager")  # finance.write but not finance.sensitive.read
+    manager_client = _login_as(client, "gerente3@loja.test", "senha-segura-5")
+
+    response = manager_client.post(
+        f"/api/companies/1/finance/obligations/entry/{entry['id']}/payments",
+        json={
+            "amount_cents": 50_000, "paid_at": "2026-09-15", "expected_version": 1,
+            "cash_account_id": bank["id"],
+        },
+        headers={"Idempotency-Key": "sensitive-1"},
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_pay_obligation_stale_version_returns_409(client):
+    account = accounts.account_by_key(1, "rent")
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account["id"], amount_cents=100_000,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Aluguel",
+    ))
+    bank = ledger.create_account(1, "Banco X", "bank")
+
+    response = client.post(
+        f"/api/companies/1/finance/obligations/entry/{entry['id']}/payments",
+        json={
+            "amount_cents": 40_000, "paid_at": "2026-09-12", "expected_version": 99,
+            "cash_account_id": bank["id"],
+        },
+        headers={"Idempotency-Key": "test-api-stale"},
+    )
+    assert response.status_code == 409, response.text

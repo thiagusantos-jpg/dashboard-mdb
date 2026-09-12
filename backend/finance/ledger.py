@@ -62,7 +62,13 @@ def post_cash_event(
     *,
     entry_id: Optional[int] = None,
     created_by: Optional[int] = None,
+    conn=None,
 ) -> dict:
+    """Create a cash movement. When `conn` is given, writes happen on the
+    caller's connection/transaction with no internal commit (for callers —
+    backend/finance/payments.py — that need this to be part of one larger
+    atomic operation); otherwise behaves exactly as before, opening and
+    committing its own connection."""
     if amount_cents == 0:
         raise ValueError("O valor não pode ser zero.")
     clean_description = description.strip()
@@ -70,9 +76,10 @@ def post_cash_event(
         raise ValueError("Informe a descrição.")
     event_id = _new_id()
     timestamp = db.now()
-    with db.connection() as conn:
-        _require_account(conn, company, cash_account_id)
-        conn.execute(
+
+    def _write(c) -> dict:
+        _require_account(c, company, cash_account_id)
+        c.execute(
             """
             INSERT INTO cash_events(
                 id,company,cash_account_id,amount_cents,occurred_at,description,
@@ -84,8 +91,13 @@ def post_cash_event(
                 clean_description, "entry", entry_id, created_by, timestamp,
             ),
         )
-        row = conn.execute("SELECT * FROM cash_events WHERE id=?", (event_id,)).fetchone()
-    return dict(row)
+        row = c.execute("SELECT * FROM cash_events WHERE id=?", (event_id,)).fetchone()
+        return dict(row)
+
+    if conn is not None:
+        return _write(conn)
+    with db.connection() as own_conn:
+        return _write(own_conn)
 
 
 def transfer(

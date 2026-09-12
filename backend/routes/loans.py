@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
 from ..finance import loans
+from ..finance.payments import CASH_LINK_REQUIRED_MESSAGE
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
@@ -150,17 +151,14 @@ def pay_installment(
         ).fetchone()
     if not row or row["company"] != company:
         raise HTTPException(404, "Parcela não encontrada.")
-    try:
-        loans.pay_installment(
-            installment_id,
-            principal_cents=body.principal_cents,
-            interest_cents=body.interest_cents,
-            paid_at=body.paid_at,
-            created_by=auth.user_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return loans.loan_position(row["loan_id"])
+    # This legacy route's payload never carries a cash-account link
+    # (`InstallmentPayment` above has no cash_account_id/
+    # existing_cash_event_id field) — task B3 requires every payment to be
+    # linked to a real cash movement, same rule enforced by POST
+    # /obligations/loan_installment/{id}/payments (backend/finance/payments.py
+    # ::record_payment). Rather than silently marking the installment paid
+    # with no cash trace, reject and point the caller at the new flow.
+    raise HTTPException(409, CASH_LINK_REQUIRED_MESSAGE)
 
 
 @router.post(
