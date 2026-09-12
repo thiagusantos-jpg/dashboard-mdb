@@ -151,6 +151,18 @@ def list_accounts(company: int, include_archived: bool = False) -> list:
         ]
 
 
+def account_by_key(company: int, key: str) -> dict:
+    _seed_defaults(company)
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM finance_accounts WHERE company=? AND system_key=?",
+            (company, key),
+        ).fetchone()
+    if not row:
+        raise ValueError(f"Conta padrão '{key}' não encontrada.")
+    return _row(row)
+
+
 def _slug(value: str) -> str:
     plain = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     return "-".join("".join(c if c.isalnum() else " " for c in plain.lower()).split())
