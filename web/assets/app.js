@@ -355,7 +355,9 @@ function closeNav(returnFocus) {
   if (returnFocus) toggle.focus();
 }
 
-const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'sync', 'configuracoes'];
+const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque',
+  'financeiro', 'despesas', 'contas-pagar', 'sync', 'configuracoes'];
+const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar'];
 const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
   'configuracoes/metas', 'configuracoes/alertas', 'configuracoes/integracoes'];
 const SETTINGS_SECTIONS = SETTINGS_ROUTES.map((route) => route.split('/')[1]);
@@ -417,6 +419,9 @@ async function renderPage() {
   if (typeof disposeEcharts === 'function') disposeEcharts();
   if (APP.page === 'configuracoes') return renderSettingsPage();
   if (APP.page === 'sync') return renderSyncPage();
+  // Finance pages read their own /finance/* endpoints by competence — they don't need
+  // the Mobne /dashboard payload this function fetches below for every other page.
+  if (FINANCE_PAGES.includes(APP.page)) return renderFinancePage();
   if (!APP.period) {
     return renderEmptyState('Nenhum período sincronizado ainda. Vá em "Sincronização Mobne" e clique em Sincronizar agora.');
   }
