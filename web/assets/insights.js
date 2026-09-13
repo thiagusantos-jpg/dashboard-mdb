@@ -14,7 +14,6 @@ const DIAS_CURTOS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
 const COR = {yellow: '#FFC107', amber: '#B7791F', green: '#27AE60', greenDark: '#1E8449', red: '#E74C3C',
   blue: '#2E86C1', orange: '#F39C12', gray: '#AAAAAA', lightGray: '#BDBDBD'};
 const EROSAO_LIMIAR = 3;       // pontos de margem, mesmo corte da versão anterior
-const META_MARGEM_REAL = 15;   // % após custo fixo
 // Same thresholds as backend/models.py summarize(): giro ≥ 60% dos dias, margem ≥ 35%.
 const GIRO_CORTE = 0.6, MARGEM_CORTE = 35;
 // label has no emoji: it also feeds ECharts canvas legends/tooltips, where a glyph's
@@ -552,12 +551,13 @@ function renderSazonalidade(data) {
 
 function renderVisao(data) {
   const S = seasonalModel(data), P = S.P, t = data.totals;
-  const fixed = data.fixed_cost_cents;
   const fat = t.revenue, mg = t.margin;
   const nx = nextMonthProjection(data, S);
   const cp = nx.value * 0.85, cr = nx.value, co = nx.value * 1.15;
-  const lucroDe = (v) => (mg == null ? null : v * mg / 100 - fixed);
-  const [lp, lr, lo] = [cp, cr, co].map(lucroDe);
+  // Commercial projection only: gross profit at the current margin. Expenses and
+  // results after them belong to Financeiro (fluxo de caixa, resultado gerencial).
+  const brutoDe = (v) => (mg == null ? null : v * mg / 100);
+  const [lp, lr, lo] = [cp, cr, co].map(brutoDe);
   const pace = P.partial ? fat / P.endDay * P.daysInMonth : fat;
 
   const closedReal = S.cur.map((c) => (c && !c.partial ? c.revenue : null));
@@ -574,16 +574,6 @@ function renderVisao(data) {
     yFmt: brlShort, yTitle: 'Faturamento (R$)',
   };
 
-  const be = mg > 0 ? fixed / (mg / 100) : null, ideal = be ? be * 1.5 : null;
-  const gaugeOpts = be ? {
-    value: pace, max: ideal * 1.5, fmt: brl,
-    steps: [{to: be, color: '#FADBD8'}, {to: ideal, color: '#F9E79F'}, {to: ideal * 1.5, color: '#D5F5E3'}],
-    threshold: be, thresholdTip: `Ponto de equilíbrio: ${brl(be)}`,
-    tip: P.partial ? `Ritmo projetado: ${brl(pace)}\nRealizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}` : `Faturamento: ${brl(fat)}`,
-    ticks: [0, be, ideal, ideal * 1.5],
-    title: P.partial ? `Faturamento projetado ${P.label} (ritmo de ${P.endDay} dias)` : `Faturamento ${P.label}`,
-    delta: {value: pace - ideal, text: `${pace >= ideal ? '▲' : '▼'} ${brl(Math.abs(pace - ideal))} vs meta ideal`},
-  } : null;
 
   const idxNext = S.index[nx.m - 1];
   const top5 = (data.categories || []).slice().sort((a, b) => b.revenue - a.revenue).slice(0, 5);
@@ -595,7 +585,6 @@ function renderVisao(data) {
   const pesoMorto = prods.filter((p) => p.classification === 'Baixo giro');
   const cmp = data.comparison;
   const vc = cmp && cmp.totals.receipts ? growth(t.receipts, cmp.totals.receipts) : null;
-  const netMargin = mg == null || !pace ? null : (pace * mg / 100 - fixed) / pace * 100;
 
   const doList = [];
   if (eros.length) doList.push(`${icon('triangle-alert')} <strong>Reajustar preços</strong> de ${eros.length} produtos Curva A com custo subindo`);
@@ -603,11 +592,10 @@ function renderVisao(data) {
   if (idxNext != null && idxNext > 1.05) doList.push(`${icon('trending-up')} <strong>Reforçar compras</strong> — ${nx.nome} é forte (índice ${dec2(idxNext)})`);
   else if (idxNext != null && idxNext < 0.95) doList.push(`${icon('megaphone')} <strong>Planejar promoções</strong> — ${nx.nome} é fraco (índice ${dec2(idxNext)})`);
   doList.push(`${icon('target')} <strong>Meta de faturamento</strong>: ${brl(cr)}`);
-  doList.push(`${icon('dollar-sign')} <strong>Meta de lucro líquido</strong>: ${brl(lr)}`);
+  if (lr != null) doList.push(`${icon('dollar-sign')} <strong>Lucro bruto esperado</strong>: ${brl(lr)} (margem bruta atual de ${pct1(mg)})`);
   const watchList = [];
   if (vc != null) watchList.push(`${icon('users')} <strong>Fluxo de clientes</strong>: variou ${signedPct(vc)} vs o mesmo período do ano anterior`);
-  const marginGoal = data.margin_goal_pct != null ? data.margin_goal_pct : META_MARGEM_REAL;
-  watchList.push(`${icon('bar-chart-3')} <strong>Margem real</strong> (após custo fixo): manter acima de ${dec2(marginGoal)}% (atual: ${pct1(netMargin)})`);
+  if (data.margin_goal_pct != null) watchList.push(`${icon('bar-chart-3')} <strong>Margem bruta</strong>: manter acima da meta de ${dec2(data.margin_goal_pct)}% (atual: ${pct1(mg)})`);
   watchList.push(`${icon('tag')} <strong>Erosão</strong>: ${eros.length} produtos precisam de reajuste`);
   if (pesoMorto.length > 50) watchList.push(`${icon('trash-2')} <strong>Peso Morto</strong>: ${num(pesoMorto.length)} produtos a avaliar`);
 
@@ -631,20 +619,16 @@ function renderVisao(data) {
 
     ${section(`${icon('target')} Cenários para ${nx.nome}/${nx.y}`)}
     <div class="kpi-grid kpi-grid-3">
-      ${kpi(`${icon('frown')} Pessimista (−15%)`, brl(cp), `Lucro: ${brl(lp)}`, lp != null && lp < 0 ? 'kpi-negative' : 'kpi-neutral')}
-      ${kpi(`${icon('bar-chart-3')} Realista`, brl(cr), `Lucro: ${brl(lr)}`, lr != null && lr < 0 ? 'kpi-negative' : 'kpi-positive')}
-      ${kpi(`${icon('rocket')} Otimista (+15%)`, brl(co), `Lucro: ${brl(lo)}`, lo != null && lo < 0 ? 'kpi-negative' : 'kpi-positive')}
+      ${kpi(`${icon('frown')} Pessimista (−15%)`, brl(cp), `Lucro bruto: ${brl(lp)}`, lp != null && lp < 0 ? 'kpi-negative' : 'kpi-neutral')}
+      ${kpi(`${icon('bar-chart-3')} Realista`, brl(cr), `Lucro bruto: ${brl(lr)}`, lr != null && lr < 0 ? 'kpi-negative' : 'kpi-positive')}
+      ${kpi(`${icon('rocket')} Otimista (+15%)`, brl(co), `Lucro bruto: ${brl(lo)}`, lo != null && lo < 0 ? 'kpi-negative' : 'kpi-positive')}
     </div>
-    ${explain(`Cenários ${nx.nome}`, '3 cenários sobre a projeção: pessimista (−15%), realista e otimista (+15%). Lucro = faturamento × margem bruta atual − custo fixo mensal.',
-      'Se o pessimista já dá lucro, o negócio está seguro.', 'Planejar caixa e definir metas realistas.', basisTxt)}
+    ${explain(`Cenários ${nx.nome}`, '3 cenários de receita sobre a projeção: pessimista (−15%), realista e otimista (+15%). Lucro bruto = receita × margem bruta atual; despesas e o resultado após despesas ficam no Financeiro.',
+      `Hipóteses: margem bruta atual de ${pct1(mg)} e ${S.pairs || 0} mês(es) fechados comparáveis entre ${P.y} e ${S.R}.`, 'Planejar compras e metas comerciais.', basisTxt)}
     <hr class="divider">
 
-    ${section(`${icon('gauge')} Velocímetro — ${P.label} vs Metas`)}
-    ${gaugeOpts ? '<div class="chart-container chart-h-330" id="chart-visao-gauge"></div>'
-      : chartBox(chartEmpty('Margem indisponível no período — não é possível calcular o ponto de equilíbrio.'))}
-    ${be ? explain('Velocímetro', `Vermelho = abaixo do ponto de equilíbrio (${brl(be)}). Amarelo = acima do equilíbrio. Verde = acima da meta ideal (${brl(ideal)} = 1,5× equilíbrio).`,
-      'A linha vermelha é o ponto de equilíbrio. Quanto mais para a direita (verde), mais saudável.', 'Mostra se o mês cobre o custo fixo com folga.',
-      P.partial ? `Realizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}. O ponteiro usa o ritmo diário projetado para o mês inteiro.` : undefined) : ''}
+    ${section(`${icon('calendar')} Cobertura histórica da projeção`)}
+    ${story(`${S.pairs || 0} mês(es) fechados comparáveis entre ${P.y} e ${S.R}. ${basisTxt} ${P.partial ? `${P.label} está em andamento: ritmo projetado de ${brl(pace)} para o mês inteiro.` : ''}`)}
     <hr class="divider">
 
     ${section(`${icon('package')} Top 5 Categorias — Performance e Tendência`)}
@@ -671,5 +655,4 @@ function renderVisao(data) {
       'Ações priorizadas por impacto: margem → estoque → sazonalidade.', 'Revise com os sócios no início de cada mês.')}
   `;
   mountEchartCombo(document.getElementById('chart-visao-proj'), projOpts);
-  if (gaugeOpts) mountEchartGauge(document.getElementById('chart-visao-gauge'), gaugeOpts);
 }

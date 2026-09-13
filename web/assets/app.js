@@ -177,7 +177,6 @@ function boot() {
   document.getElementById('reset-password-form').addEventListener('submit', onResetPasswordSubmit);
   document.getElementById('forgot-password-link').addEventListener('click', showResetPassword);
   document.getElementById('back-to-login-link').addEventListener('click', showLoginForm);
-  document.getElementById('custo-fixo-input').addEventListener('change', updateCustoFixo);
   if (typeof initProfile === 'function') initProfile();
   APP.moduleRoutes = typeof createModuleRoutes === 'function' ? createModuleRoutes(safeSessionStorage()) : null;
   document.querySelectorAll('img[data-fallback]').forEach((img) => {
@@ -765,7 +764,6 @@ async function renderPage() {
     if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
     APP.dashboard = payload;
     APP.dashboardCompany = company;
-    document.getElementById('custo-fixo-input').value = (APP.dashboard.fixed_cost_cents / 100).toFixed(2);
   }
   if (!APP.pageState.isCurrent(token)) return;
   const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
@@ -944,7 +942,7 @@ async function onCreateActionFromAlert(event) {
 
 // "The month in one sentence" — revenue vs. last month and vs. the same month last year
 // (each silently omitted when there is no reliable base to compare against, see backend/api.py
-// comparison_for()), plus margin and how far revenue landed from the break-even point.
+// comparison_for()), plus the gross margin. Results after expenses live in Financeiro.
 function resumoNarrative(data) {
   const t = data.totals, cmp = data.comparison, mom = data.comparison_mom;
   const [y, m] = data.period.split('-');
@@ -955,11 +953,35 @@ function resumoNarrative(data) {
   if (t.margin == null) {
     return text + ' Margem indisponível: há itens vendidos sem custo conhecido no período.';
   }
-  text += ` Margem de ${pct(t.margin)}`;
-  if (data.break_even_cents == null) return text + '.';
-  return text + (data.break_even_gap_pct >= 0
-    ? `, e o ponto de equilíbrio (${money(data.break_even_cents)}) foi superado com folga de ${pct(data.break_even_gap_pct)}.`
-    : `, e a receita ficou ${pct(Math.abs(data.break_even_gap_pct))} abaixo do ponto de equilíbrio (${money(data.break_even_cents)}).`);
+  return text + ` Margem bruta de ${pct(t.margin)}.`;
+}
+
+/* Secondary reference to Financeiro in the Resumo: the same endpoint and data
+ * status as Resultado gerencial, never a profit figure computed here. Hidden
+ * when the profile cannot read finance; a response for a Resumo that was
+ * already replaced (period change, navigation) is discarded. */
+async function loadResumoManagementCard(period) {
+  const box = document.getElementById('resumo-management');
+  if (!box || typeof managementResultUrl !== 'function') return;
+  let result;
+  try {
+    result = await api(managementResultUrl(period));
+  } catch (e) {
+    return;  // no finance access or unavailable: the commercial summary stands alone
+  }
+  if (!box.isConnected) return;
+  const status = managementStatus(result);
+  box.innerHTML = `
+    <div class="settings-heading">
+      <div><h2 id="resumo-management-title">Resultado gerencial — Financeiro</h2><p>${esc(status.detail)}</p></div>
+      <span class="badge-warning">${esc(status.label)}</span>
+    </div>
+    <div class="kpi-grid kpi-grid-3">
+      ${kpiCard('Resultado gerencial', money(result.managerial_result_cents),
+        result.managerial_result_cents == null ? 'kpi-unavailable' : '', '', 'Após custos e despesas da competência')}
+    </div>
+    <a class="btn-link" href="${routeHash('financeiro', period)}">Abrir Resultado gerencial →</a>`;
+  box.hidden = false;
 }
 
 function renderResumo(data) {
@@ -982,21 +1004,15 @@ function renderResumo(data) {
 
     <div class="kpi-grid kpi-grid-4">
       ${kpiCard('Faturamento', money(t.revenue), '', deltas('revenue_change'), `${num(t.receipts)} documentos · ${num(t.cancelled)} cancelados`)}
-      ${kpiCard('Lucro Bruto', money(t.profit), t.profit == null ? 'kpi-unavailable' : (t.profit >= 0 ? 'kpi-positive' : 'kpi-negative'),
-        deltas('profit_change'), t.unknown > 0 ? num(t.unknown) + ' itens sem custo — não estimados' : 'Todos os itens com custo')}
-      ${kpiCard('Margem', pct(t.margin), t.margin == null ? 'kpi-unavailable' : '', '', `Ticket médio: ${money(t.ticket)}`)}
+      ${kpiCard('Margem bruta', pct(t.margin), t.margin == null ? 'kpi-unavailable' : '', '',
+        t.unknown > 0 ? num(t.unknown) + ' itens sem custo — margem indisponível' : `Lucro bruto: ${money(t.profit)}`)}
       ${kpiCard('Ticket médio', money(t.ticket), '', deltas('ticket_change'), '')}
       ${kpiCard('Nº de cupons', num(t.receipts), '', deltas('receipts_change'), '')}
+      ${kpiCard('Lucro bruto', money(t.profit), t.profit == null ? 'kpi-unavailable' : (t.profit >= 0 ? 'kpi-positive' : 'kpi-negative'),
+        deltas('profit_change'), t.unknown > 0 ? num(t.unknown) + ' itens sem custo — não estimados' : 'Todos os itens com custo')}
       ${kpiCard('Taxa de cancelamento', pct(cancelRate), '', '', `${num(t.cancelled)} de ${num(cancelBase)} documentos`)}
-      ${kpiCard('Resultado simulado', money(data.simulated_net), data.simulated_net == null ? 'kpi-unavailable' : (data.simulated_net >= 0 ? 'kpi-positive' : 'kpi-negative'),
-        '', `Custo fixo cadastrado: ${money(data.fixed_cost_cents)}`)}
-      ${kpiCard('Ponto de equilíbrio', money(data.break_even_cents), data.break_even_cents == null ? 'kpi-unavailable' : '',
-        '', data.break_even_gap_pct == null ? '' : `Folga: ${data.break_even_gap_pct >= 0 ? '+' : ''}${pct(data.break_even_gap_pct)}`)}
     </div>
-    ${explain('Resultado simulado e Ponto de equilíbrio',
-      'Resultado simulado = receita − custo dos itens conhecidos − custo fixo cadastrado do mês. Ponto de equilíbrio = custo fixo ÷ margem do período.',
-      'Nenhum dos dois é o lucro líquido contábil — despesas reais não são confirmadas com o Mobne; são apenas simulações a partir das vendas e do custo cadastrado.',
-      'Ambos ficam indisponíveis quando há itens vendidos sem custo conhecido no período, em vez de usar uma margem parcial como se fosse a real.')}
+    <section class="management-summary" id="resumo-management" aria-labelledby="resumo-management-title" hidden></section>
 
     <div class="row">
       <div class="col-60">
@@ -1021,6 +1037,7 @@ function renderResumo(data) {
     <div class="section-header">Histórico mensal</div>
     <div class="chart-container chart-box" id="echart-timeline"></div>
   `;
+  loadResumoManagementCard(data.period);
   // Mounted after innerHTML so the container elements exist; each sizes itself off its
   // own CSS height (.chart-h-*) rather than a fixed viewBox like the old SVG charts.
   mountEchartLine(document.getElementById('echart-daily'), dailyPoints);
@@ -1161,37 +1178,6 @@ async function triggerSync(mode, button) {
     if (status) status.textContent = 'Não foi possível iniciar a sincronização: ' + e.message;
     if (button) button.disabled = false;
   }
-}
-
-/* ---------------------------------------------------------------- config */
-
-let custoFixoTimer = null, custoStatusTimer = null;
-
-function setCustoStatus(text, kind) {
-  const el = document.getElementById('custo-fixo-status');
-  clearTimeout(custoStatusTimer);
-  el.textContent = text;
-  el.className = 'sim-status' + (kind ? ' ' + kind : '');
-  if (kind === 'ok') custoStatusTimer = setTimeout(() => { el.textContent = ''; el.className = 'sim-status'; }, 5000);
-}
-
-function updateCustoFixo() {
-  clearTimeout(custoFixoTimer);
-  custoFixoTimer = setTimeout(async () => {
-    const value = parseFloat(document.getElementById('custo-fixo-input').value);
-    if (isNaN(value) || value < 0) return setCustoStatus('Informe um valor em reais, maior ou igual a zero.', 'error');
-    setCustoStatus('Salvando…');
-    try {
-      await api(`/api/companies/${APP.company}/config`, {
-        method: 'PUT', body: JSON.stringify({fixed_cost_cents: Math.round(value * 100)}),
-      });
-      APP.dashboard = null;
-      if (APP.page !== 'sync') await renderPage();
-      setCustoStatus(`Salvo ✓ ${money(Math.round(value * 100))} — resultado e ponto de equilíbrio recalculados.`, 'ok');
-    } catch (e) {
-      setCustoStatus('Não foi possível salvar: ' + e.message, 'error');
-    }
-  }, 500);
 }
 
 boot();

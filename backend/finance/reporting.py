@@ -6,16 +6,29 @@ from .. import database as db, models
 from .accounts import list_accounts, resolve_parameter
 
 
-def management_result(company: int, period: str, store: Optional[int] = None) -> dict:
+def management_result(
+    company: int,
+    period: str,
+    store: Optional[int] = None,
+    *,
+    include_sensitive: bool = True,
+) -> dict:
+    """Managerial P&L for one competence. Unavailable is never a confirmed zero:
+    without a synced sales dataset revenue/COGS and every result built on them
+    are None; a period synced with zero sales keeps a legitimate 0. Without
+    include_sensitive, sensitive accounts are left out and every expense total
+    they would feed becomes None, so a filtered total never poses as the
+    company total. data_status says which of these applies."""
     sales = db.dataset(company, "sales", period)
-    totals = (
-        models.summarize(sales["payload"]["receipts"])["totals"]
-        if sales
-        else {"revenue": 0, "cost": 0, "unknown": 0}
-    )
-    revenue = int(totals["revenue"])
-    cogs = None if totals["unknown"] else int(totals["cost"])
-    gross_profit = revenue - cogs if cogs is not None else None
+    sales_available = sales is not None
+    if sales_available:
+        totals = models.summarize(sales["payload"]["receipts"])["totals"]
+        revenue = int(totals["revenue"])
+        cogs = None if totals["unknown"] else int(totals["cost"])
+    else:
+        revenue = None
+        cogs = None
+    gross_profit = revenue - cogs if revenue is not None and cogs is not None else None
 
     store_filter = " AND e.store IN (0,?)" if store is not None else ""
     params = (company, period, store) if store is not None else (company, period)
@@ -38,6 +51,7 @@ def management_result(company: int, period: str, store: Optional[int] = None) ->
 
     actual_by_id = {row["id"]: dict(row) for row in rows}
     account_lines = []
+    restricted = False
     on_date = period + "-01"
     for account in list_accounts(company, include_archived=True):
         actual = actual_by_id.get(account["id"])
@@ -49,6 +63,9 @@ def management_result(company: int, period: str, store: Optional[int] = None) ->
         )
         actual_cents = int(actual["actual_cents"]) if actual else 0
         if not actual_cents and budget is None:
+            continue
+        if account["sensitive"] and not include_sensitive:
+            restricted = restricted or bool(actual_cents)
             continue
         source = "budget"
         if actual:
@@ -98,6 +115,22 @@ def management_result(company: int, period: str, store: Optional[int] = None) ->
         if operating_result is not None
         else None
     )
+    if restricted:
+        operating_expenses = owner_compensation = financial_expenses = None
+        distributions = operating_result = managerial_result = None
+
+    reasons = []
+    if not sales_available:
+        reasons.append(
+            f"Vendas de {period} ainda não sincronizadas do Mobne: receita, CMV e resultados ficam indisponíveis."
+        )
+    elif cogs is None:
+        reasons.append("Há itens vendidos sem custo conhecido: CMV e resultados ficam indisponíveis.")
+    if restricted:
+        reasons.append(
+            "Parte das despesas é restrita ao seu perfil: totais de despesas e resultados não são exibidos."
+        )
+    reasons.append("Despesas do mês ainda não revisadas.")
     return {
         "company": company,
         "period": period,
@@ -112,6 +145,12 @@ def management_result(company: int, period: str, store: Optional[int] = None) ->
         "managerial_result_cents": managerial_result,
         "profit_distribution_cents": distributions,
         "accounts": account_lines,
+        "data_status": {
+            "sales_available": sales_available,
+            "expenses_reviewed": False,
+            "restricted": restricted,
+            "reason": " ".join(reasons),
+        },
         "sources": {
             "revenue": "Mobne",
             "cogs": "Mobne",

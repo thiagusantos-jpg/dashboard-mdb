@@ -177,3 +177,60 @@ def test_archived_category_retains_actuals_for_period_before_archiving(report_db
 
     assert result["operating_expenses_cents"] == 100_000
 
+
+
+# --- Data status: unavailable is never a confirmed zero (task C4) ------------
+
+
+def test_missing_sales_makes_revenue_and_results_unavailable(report_db):
+    result = management_result(COMPANY, "2026-10")  # no sales dataset synced for October
+
+    assert result["data_status"]["sales_available"] is False
+    assert result["data_status"]["expenses_reviewed"] is False
+    assert result["data_status"]["reason"]
+    assert result["revenue_cents"] is None
+    assert result["cogs_cents"] is None
+    assert result["gross_profit_cents"] is None
+    assert result["operating_result_cents"] is None
+    assert result["managerial_result_cents"] is None
+    assert result["operating_expenses_cents"] == 0  # expenses are known even without sales
+
+
+def test_confirmed_zero_sales_stay_a_legitimate_zero(report_db):
+    db.put_dataset(COMPANY, "sales", "2026-10", {"raw_count": 0, "receipts": [], "analysis": []}, documents=0)
+
+    result = management_result(COMPANY, "2026-10")
+
+    assert result["data_status"]["sales_available"] is True
+    assert result["revenue_cents"] == 0
+    assert result["managerial_result_cents"] == 0
+
+
+def test_restricted_view_hides_sensitive_lines_and_every_total_they_feed(report_db):
+    secret = accounts.create_account(
+        COMPANY, "Retirada extra", accounts.AccountNature.OPERATING_EXPENSE, sensitive=True
+    )
+    add(secret, 50_000, "Retirada")
+    add(report_db["electricity"], 10_000, "Energia")
+
+    full = management_result(COMPANY, "2026-09")
+    restricted = management_result(COMPANY, "2026-09", include_sensitive=False)
+
+    assert full["operating_expenses_cents"] == 60_000
+    assert full["data_status"]["restricted"] is False
+    assert restricted["data_status"]["restricted"] is True
+    assert all(line["account_id"] != secret["id"] for line in restricted["accounts"])
+    # A total missing a hidden line must not pose as the company total.
+    assert restricted["operating_expenses_cents"] is None
+    assert restricted["operating_result_cents"] is None
+    assert restricted["managerial_result_cents"] is None
+    assert restricted["revenue_cents"] == 100_000  # sales are not sensitive
+
+
+def test_restricted_view_without_sensitive_movement_keeps_totals(report_db):
+    add(report_db["electricity"], 10_000, "Energia")
+
+    restricted = management_result(COMPANY, "2026-09", include_sensitive=False)
+
+    assert restricted["data_status"]["restricted"] is False
+    assert restricted["operating_expenses_cents"] == 10_000

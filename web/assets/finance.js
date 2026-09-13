@@ -30,6 +30,25 @@ const FINANCE_STATUS_BADGES = {
 // Financeiro competence (navigation.js): any calendar month, not only synced sales months.
 function financeCompetence() { return APP.financePeriod || APP.period; }
 
+// One source for the managerial result: the Financeiro page and the Resumo card both read it.
+function managementResultUrl(period) {
+  return `/api/companies/${APP.company}/finance/management-result?period=${encodeURIComponent(period)}`;
+}
+
+// "Em apuração" until the monthly review exists (C6); the detail names what is missing.
+function managementStatus(result) {
+  const status = (result && result.data_status) || {};
+  const notes = [];
+  if (status.reason) notes.push(status.reason);
+  if (status.restricted && !/restrit/i.test(status.reason || '')) {
+    notes.push('Parte das despesas é restrita ao seu perfil: totais não exibidos.');
+  }
+  return {
+    label: status.expenses_reviewed ? 'Revisado' : 'Em apuração',
+    detail: notes.join(' ') || 'Despesas do mês ainda não revisadas.',
+  };
+}
+
 function financePeriodLabel(period) {
   const [y, m] = (period || '').split('-').map(Number);
   return m ? `${MONTHS[m - 1]}/${y}` : '—';
@@ -99,7 +118,7 @@ async function renderFinanceiro(token) {
   financeLoading(title, subtitle, 'Carregando resultado gerencial');
   let result;
   try {
-    result = await api(`/api/companies/${APP.company}/finance/management-result?period=${financeCompetence()}`);
+    result = await api(managementResultUrl(financeCompetence()));
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     return financeError(title, subtitle, e, () => renderFinanceiro());
@@ -129,6 +148,8 @@ async function renderFinanceiro(token) {
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
     <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(financeCompetence())}</span>
+    <div class="story-box mt-16" role="status"><span class="badge-warning">${esc(managementStatus(result).label)}</span>
+      ${esc(managementStatus(result).detail)}</div>
     <hr class="divider">
     <div class="kpi-grid kpi-grid-4">${kpis}</div>
     <h2 class="section-header">Contas — Realizado vs. Orçado</h2>

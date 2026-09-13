@@ -25,3 +25,52 @@ test('management result labels do not mix owner compensation and distributions',
   assert.match(source, /Orçado/);
   assert.match(source, /Realizado/);
 });
+
+
+/* Task C4: the legacy fixed-cost simulator is gone; the management result is
+ * the one source, with its data status stated instead of implied. */
+const vm = require('node:vm');
+
+function loadFinance() {
+  const context = vm.createContext({
+    console, APP: {company: '7', financePeriod: '2026-09'}, MONTHS: ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'],
+    esc: (s) => String(s == null ? '' : s), icon: () => '', money: (c) => (c == null ? 'Indisponível' : `R$ ${c / 100}`),
+  });
+  vm.runInContext(fs.readFileSync(path.join(root, 'web/assets/finance.js'), 'utf8'), context);
+  return context;
+}
+
+test('no fixed-cost simulator, simulated result or break-even remains in the client', () => {
+  const html = fs.readFileSync(path.join(root, 'web/index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(root, 'web/assets/app.js'), 'utf8');
+  const insights = fs.readFileSync(path.join(root, 'web/assets/insights.js'), 'utf8');
+
+  assert.doesNotMatch(html, /custo-fixo|Simulador/);
+  assert.doesNotMatch(app, /updateCustoFixo|custo-fixo|\/config['`]|fixed_cost_cents|simulated_net|break_even|Resultado simulado|Ponto de equilíbrio/);
+  assert.doesNotMatch(insights, /fixed_cost_cents|mountEchartGauge|Ponto de equilíbrio|custo fixo|lucro líquido/i);
+});
+
+test('the Resumo card and the Financeiro page read the same management result', () => {
+  const app = fs.readFileSync(path.join(root, 'web/assets/app.js'), 'utf8');
+  const finance = fs.readFileSync(path.join(root, 'web/assets/finance.js'), 'utf8');
+  const {managementResultUrl} = loadFinance();
+
+  assert.equal(managementResultUrl('2026-09'), '/api/companies/7/finance/management-result?period=2026-09');
+  assert.match(app, /managementResultUrl\(/);
+  assert.match(finance, /managementResultUrl\(/);
+});
+
+test('data status is spelled out: missing sales, restricted access, and Em apuração', () => {
+  const {managementStatus} = loadFinance();
+
+  const noSales = managementStatus({data_status: {sales_available: false, expenses_reviewed: false, restricted: false, reason: 'Vendas de 2026-10 não sincronizadas.'}});
+  assert.equal(noSales.label, 'Em apuração');
+  assert.match(noSales.detail, /Vendas de 2026-10 não sincronizadas/);
+
+  const restricted = managementStatus({data_status: {sales_available: true, expenses_reviewed: false, restricted: true, reason: ''}});
+  assert.match(restricted.detail, /restrit/i);
+
+  const complete = managementStatus({data_status: {sales_available: true, expenses_reviewed: false, restricted: false, reason: ''}});
+  assert.equal(complete.label, 'Em apuração');
+  assert.doesNotMatch(complete.detail, /seguro|confiável/i);
+});
