@@ -409,3 +409,48 @@ def test_pay_obligation_stale_version_returns_409(client):
         headers={"Idempotency-Key": "test-api-stale"},
     )
     assert response.status_code == 409, response.text
+
+
+# --- GET .../obligations/{kind}/{id} lists its payments (task C2) ------------
+
+
+def test_obligation_detail_lists_payments_for_reversal(client):
+    account = accounts.account_by_key(1, "rent")
+    entry = create_entry(EntryCommand(
+        company_id=1, account_id=account["id"], amount_cents=100_000,
+        competence="2026-09", due_date=date(2026, 9, 20), source="manual",
+        external_id=None, description="Aluguel",
+    ))
+    bank = ledger.create_account(1, "Banco X", "bank")
+    paid = client.post(
+        f"/api/companies/1/finance/obligations/entry/{entry['id']}/payments",
+        json={
+            "amount_cents": 40_000, "paid_at": "2026-09-12", "expected_version": 1,
+            "cash_account_id": bank["id"],
+        },
+        headers={"Idempotency-Key": "detail-payments-1"},
+    )
+    assert paid.status_code == 200, paid.text
+    payment_id = paid.json()["payment_id"]
+    version = paid.json()["obligation"]["version"]
+
+    detail = client.get(f"/api/companies/1/finance/obligations/entry/{entry['id']}")
+    assert detail.status_code == 200, detail.text
+    payments = detail.json()["payments"]
+    assert [p["id"] for p in payments] == [payment_id]
+    assert payments[0]["amount_cents"] == 40_000
+    assert payments[0]["paid_at"] == "2026-09-12"
+    assert payments[0]["reversed_at"] is None
+    assert "idempotency_key" not in payments[0]
+    assert "response_json" not in payments[0]
+
+    undone = client.post(
+        f"/api/companies/1/finance/payments/{payment_id}/reverse",
+        json={"reason": "Valor lançado errado", "reversed_at": "2026-09-13", "expected_version": version},
+        headers={"Idempotency-Key": "detail-payments-undo-1"},
+    )
+    assert undone.status_code == 200, undone.text
+    after = client.get(f"/api/companies/1/finance/obligations/entry/{entry['id']}").json()
+    assert after["payments"][0]["reversed_at"] == "2026-09-13"
+    assert after["payments"][0]["reversal_reason"] == "Valor lançado errado"
+    assert after["open_cents"] == 100_000

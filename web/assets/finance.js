@@ -1,6 +1,7 @@
 /* Financeiro, Custos e Despesas e Contas a Pagar. Loaded before app.js and
  * uses its shared api(), esc(), money(), APP and MONTHS globals only when a
- * route opens (same convention as settings.js). */
+ * route opens (same convention as settings.js). Every form opens in the shared
+ * drawer from finance-forms.js; these pages list first and act per row. */
 'use strict';
 
 const FINANCE_SOURCE_LABELS = {
@@ -8,6 +9,7 @@ const FINANCE_SOURCE_LABELS = {
   mobne: 'Mobne',
   multiple: 'Múltiplas origens',
   budget: 'Somente orçado',
+  loan: 'Empréstimo',
 };
 
 const FINANCE_STATUS_LABELS = {
@@ -20,6 +22,11 @@ const FINANCE_STATUS_LABELS = {
   reversed: 'Estornado',
 };
 
+const FINANCE_STATUS_BADGES = {
+  forecast: 'badge-info', open: 'badge-muted', partially_paid: 'badge-warning', paid: 'badge-success',
+  overdue: 'badge-error', cancelled: 'badge-muted', reversed: 'badge-muted',
+};
+
 function financePeriodLabel(period) {
   const [y, m] = (period || '').split('-').map(Number);
   return m ? `${MONTHS[m - 1]}/${y}` : '—';
@@ -27,19 +34,43 @@ function financePeriodLabel(period) {
 
 function dateBR(iso) {
   if (!iso) return '—';
-  const [y, m, d] = iso.split('-');
+  const [y, m, d] = String(iso).slice(0, 10).split('-');
   return `${d}/${m}/${y}`;
+}
+
+function statusBadge(status) {
+  return `<span class="${FINANCE_STATUS_BADGES[status] || 'badge-muted'}">${esc(FINANCE_STATUS_LABELS[status] || status)}</span>`;
+}
+
+// Per-page filters survive a save or a return to the page within this visit.
+function financeFilters(page, defaults) {
+  APP.financeFilters = APP.financeFilters || {};
+  APP.financeFilters[page] = Object.assign({}, defaults, APP.financeFilters[page] || {});
+  return APP.financeFilters[page];
+}
+
+// A save re-renders the list; keep the reader where they were.
+function refreshKeepingScroll(render) {
+  const y = typeof window !== 'undefined' ? window.scrollY : 0;
+  return Promise.resolve(render()).then(() => { if (typeof window !== 'undefined') window.scrollTo(0, y); });
 }
 
 /* A GET that failed or timed out offers a manual retry instead of looping on
  * its own or automatically re-issuing the request (never done for a POST). */
 function financeError(title, subtitle, error, retry) {
   document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
+    <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <div class="story-box mt-16">Não foi possível carregar: ${esc(error.message)}</div>
-    <div class="btn-row"><button type="button" class="btn-primary" id="finance-retry">Tentar novamente</button></div>`;
-  document.getElementById('finance-retry').addEventListener('click', retry);
+    <div class="story-box mt-16">${icon('triangle-alert')} Não foi possível carregar: ${esc(error.message)}</div>
+    <div class="btn-row"><button type="button" class="btn-primary btn-wide" id="finance-retry">Tentar novamente</button></div>`;
+  document.getElementById('finance-retry').addEventListener('click', () => retry());
+}
+
+function financeLoading(title, subtitle, label) {
+  document.getElementById('content').innerHTML = `
+    <h1 class="page-title">${title}</h1>
+    <div class="page-subtitle">${subtitle}</div>
+    <div class="skeleton-block" aria-label="${label}"></div>`;
 }
 
 /* `token` comes from app.js's renderPage() (via beginPage()) for the normal
@@ -60,12 +91,9 @@ function renderFinancePage(token) {
 
 async function renderFinanceiro(token) {
   token = token || beginPage();
-  const title = '💵 Financeiro';
+  const title = `${icon('gauge', {class: 'title-icon'})}Financeiro`;
   const subtitle = 'Resultado gerencial da competência: receita, custos, despesas e distribuições.';
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
-    <div class="page-subtitle">${subtitle}</div>
-    <div class="skeleton-block" aria-label="Carregando resultado gerencial"></div>`;
+  financeLoading(title, subtitle, 'Carregando resultado gerencial');
   let result;
   try {
     result = await api(`/api/companies/${APP.company}/finance/management-result?period=${APP.period}`);
@@ -89,180 +117,266 @@ async function renderFinanceiro(token) {
   const rows = result.accounts.map((line) => `
     <tr>
       <td>${esc(line.name)}</td>
-      <td>${money(line.actual_cents)}</td>
-      <td>${line.budget_cents == null ? '—' : money(line.budget_cents)}</td>
-      <td>${line.variance_cents == null ? '—' : money(line.variance_cents)}</td>
+      <td class="num">${money(line.actual_cents)}</td>
+      <td class="num">${line.budget_cents == null ? '—' : money(line.budget_cents)}</td>
+      <td class="num">${line.variance_cents == null ? '—' : money(line.variance_cents)}</td>
       <td>${esc(FINANCE_SOURCE_LABELS[line.source] || line.source)}</td>
     </tr>`).join('');
   document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
+    <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">📅 Competência: ${financePeriodLabel(APP.period)}</span>
+    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(APP.period)}</span>
     <hr class="divider">
     <div class="kpi-grid kpi-grid-4">${kpis}</div>
-    <div class="section-header">Contas — Realizado vs. Orçado</div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Conta</th><th>Realizado</th><th>Orçado</th><th>Variação</th><th>Origem</th></tr></thead>
+    <h2 class="section-header">Contas — Realizado vs. Orçado</h2>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Conta</th><th class="num">Realizado</th><th class="num">Orçado</th><th class="num">Variação</th><th>Origem</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5">Nenhum lançamento nesta competência.</td></tr>'}</tbody>
     </table></div>`;
 }
 
 /* ---------------------------------------------------------------- Custos e Despesas */
 
+const DESPESAS_FILTERS = {
+  active: {label: 'Ativos', match: (e) => !['cancelled', 'reversed'].includes(e.status)},
+  forecast: {label: 'Previstos a confirmar', match: (e) => e.status === 'forecast'},
+  open: {label: 'Em aberto', match: (e) => ['open', 'partially_paid', 'overdue'].includes(e.status)},
+  paid: {label: 'Pagos', match: (e) => e.status === 'paid'},
+  cancelled: {label: 'Cancelados e estornados', match: (e) => ['cancelled', 'reversed'].includes(e.status)},
+  all: {label: 'Todos', match: () => true},
+};
+
+function expenseRowActions(entry) {
+  const actions = [];
+  if (entry.status === 'forecast') actions.push(['confirm', 'Confirmar']);
+  if (!['cancelled', 'reversed'].includes(entry.status)) actions.push(['edit', 'Editar']);
+  if (entry.source === 'manual' && ['open', 'forecast'].includes(entry.status)) actions.push(['cancel', 'Cancelar']);
+  actions.push(['history', 'Histórico']);
+  return actions.map(([action, label]) =>
+    `<button type="button" class="btn-secondary" data-entry-action="${action}" data-entry-id="${esc(entry.id)}"
+       aria-label="${label}: ${esc(entry.description)}">${label}</button>`).join('');
+}
+
 async function renderDespesas(token) {
   token = token || beginPage();
-  const title = '🧾 Custos e Despesas';
+  const title = `${icon('dollar-sign', {class: 'title-icon'})}Custos e Despesas`;
   const subtitle = 'Lançamentos de despesas por competência.';
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
-    <div class="page-subtitle">${subtitle}</div>
-    <div class="skeleton-block" aria-label="Carregando despesas"></div>`;
-  let accounts, entries;
+  financeLoading(title, subtitle, 'Carregando despesas');
+  const base = `/api/companies/${APP.company}/finance`;
+  let accounts, counterparties, entries;
   try {
-    [accounts, entries] = await Promise.all([
-      api(`/api/companies/${APP.company}/finance/accounts`),
-      api(`/api/companies/${APP.company}/finance/entries?competence=${APP.period}`),
+    [accounts, counterparties, entries] = await Promise.all([
+      api(`${base}/accounts`),
+      api(`${base}/counterparties`),
+      api(`${base}/entries?competence=${APP.period}`),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
     return financeError(title, subtitle, e, () => renderDespesas());
   }
   if (!APP.pageState.isCurrent(token)) return;
-  const expenseAccounts = accounts.filter((a) =>
-    ['operating_expense', 'financial_expense', 'tax_expense'].includes(a.nature));
-  const options = expenseAccounts.map((a) => `<option value="${esc(a.id)}">${esc(a.code)} — ${esc(a.name)}</option>`).join('');
-  const accountsById = Object.fromEntries(accounts.map((a) => [a.id, a]));
-  const rows = entries.map((e) => `
-    <tr>
-      <td>${esc((accountsById[e.account_id] || {}).name || '—')}</td>
-      <td>${esc(e.description)}</td>
-      <td>${money(e.amount_cents)}</td>
-      <td>${dateBR(e.due_date)}</td>
-      <td>${esc(FINANCE_STATUS_LABELS[e.status] || e.status)}</td>
-    </tr>`).join('');
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
-    <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">📅 Competência: ${financePeriodLabel(APP.period)}</span>
-    <hr class="divider">
-    <div class="settings-block">
-      <h2>Nova despesa</h2>
-      <form id="expense-create-form" class="settings-form">
-        <div class="form-grid">
-          <div>
-            <label for="expense-account" class="field-label">Conta</label>
-            <select id="expense-account" class="login-input" required>${options}</select>
-          </div>
-          <div>
-            <label for="expense-amount" class="field-label">Valor (R$)</label>
-            <input id="expense-amount" class="login-input" type="number" min="0.01" step="0.01" required>
-          </div>
-          <div>
-            <label for="expense-due" class="field-label">Vencimento</label>
-            <input id="expense-due" class="login-input" type="date" required>
-          </div>
-          <div class="form-grid-wide">
-            <label for="expense-description" class="field-label">Descrição</label>
-            <input id="expense-description" class="login-input" maxlength="240" required>
-          </div>
-        </div>
-        <div class="settings-actions">
-          <button class="btn-primary" type="submit">Lançar despesa</button>
-          <span id="expense-create-status" class="sim-status" role="status" aria-live="polite"></span>
-        </div>
-      </form>
-    </div>
-    <div class="section-header">Lançamentos de ${financePeriodLabel(APP.period)}</div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Conta</th><th>Descrição</th><th>Valor</th><th>Vencimento</th><th>Status</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5">Nenhuma despesa lançada nesta competência.</td></tr>'}</tbody>
-    </table></div>`;
-  watchForm(document.getElementById('expense-create-form')).addEventListener('submit', onCreateExpense);
-}
 
-async function onCreateExpense(event) {
-  event.preventDefault();
-  const status = document.getElementById('expense-create-status');
-  status.textContent = 'Salvando…';
-  const amount = parseFloat(document.getElementById('expense-amount').value.replace(',', '.'));
-  try {
-    await api(`/api/companies/${APP.company}/finance/entries`, {
-      method: 'POST',
-      body: JSON.stringify({
-        account_id: document.getElementById('expense-account').value,
-        amount_cents: Math.round(amount * 100),
-        competence: APP.period,
-        due_date: document.getElementById('expense-due').value,
-        description: document.getElementById('expense-description').value.trim(),
-      }),
-    });
-    clearDirty();
-    renderDespesas();
-  } catch (e) {
-    status.textContent = 'Erro: ' + e.message;
-  }
+  const filters = financeFilters('despesas', {status: 'active'});
+  const accountsById = Object.fromEntries(accounts.map((a) => [String(a.id), a]));
+  const expenseEntries = entries.filter((e) => {
+    const account = accountsById[String(e.account_id)];
+    return !account || EXPENSE_NATURES.includes(account.nature);
+  });
+  const visible = expenseEntries.filter((DESPESAS_FILTERS[filters.status] || DESPESAS_FILTERS.active).match);
+  const realized = expenseEntries.filter((e) => !['forecast', 'cancelled', 'reversed'].includes(e.status))
+    .reduce((sum, e) => sum + e.amount_cents, 0);
+  const forecast = expenseEntries.filter((e) => e.status === 'forecast').reduce((sum, e) => sum + e.amount_cents, 0);
+
+  const rows = visible.map((e) => `
+    <tr>
+      <td>${esc(e.description)}<div class="muted">${esc((accountsById[String(e.account_id)] || {}).name || '—')}${e.installment_count ? ` · parcela ${e.installment_number}/${e.installment_count}` : ''}</div></td>
+      <td class="num">${money(e.amount_cents)}</td>
+      <td>${dateBR(e.due_date)}</td>
+      <td>${statusBadge(e.status)}</td>
+      <td><div class="row-actions">${expenseRowActions(e)}</div></td>
+    </tr>`).join('');
+  const filterOptions = Object.entries(DESPESAS_FILTERS)
+    .map(([value, f]) => `<option value="${value}"${value === filters.status ? ' selected' : ''}>${f.label}</option>`).join('');
+  const emptyMessage = expenseEntries.length
+    ? '<div class="empty-state">Nenhum lançamento com este filtro.</div>'
+    : `<div class="empty-state">Nenhuma despesa lançada em ${financePeriodLabel(APP.period)}.
+        <div><button type="button" class="btn-primary" data-expense-new>Lançar primeira despesa</button></div></div>`;
+
+  document.getElementById('content').innerHTML = `
+    <h1 class="page-title">${title}</h1>
+    <div class="page-subtitle">${subtitle}</div>
+    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(APP.period)}</span>
+    <div class="kpi-grid kpi-grid-3 mt-16">
+      ${kpi('Realizado na competência', money(realized))}
+      ${kpi('Previsto a confirmar', money(forecast))}
+      ${kpi('Lançamentos', expenseEntries.length)}
+    </div>
+    <div class="page-toolbar">
+      <div class="filters">
+        <div><label class="field-label" for="despesas-status">Mostrar</label>
+          <select id="despesas-status" class="login-input">${filterOptions}</select></div>
+      </div>
+      <button type="button" class="btn-primary btn-wide" data-expense-new>Nova despesa</button>
+    </div>
+    ${visible.length ? `<div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Descrição</th><th class="num">Valor</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>` : emptyMessage}`;
+
+  const refresh = () => refreshKeepingScroll(() => renderDespesas());
+  const lookups = {accounts, counterparties};
+  const content = document.getElementById('content');
+  document.getElementById('despesas-status').addEventListener('change', (ev) => {
+    filters.status = ev.target.value;
+    refresh();
+  });
+  content.querySelectorAll('[data-expense-new]').forEach((button) => button.addEventListener('click', () =>
+    openExpenseForm(null, Object.assign({trigger: button, onSaved: refresh}, lookups))));
+  const entriesById = Object.fromEntries(entries.map((e) => [String(e.id), e]));
+  content.querySelectorAll('[data-entry-action]').forEach((button) => button.addEventListener('click', () => {
+    const entry = entriesById[button.dataset.entryId];
+    const ctx = Object.assign({trigger: button, onSaved: refresh}, lookups);
+    const open = {
+      edit: () => openExpenseForm(entry, ctx), cancel: () => openCancelEntryForm(entry, ctx),
+      confirm: () => openConfirmForecastForm(entry, ctx), history: () => openEntryHistory(entry, ctx),
+    }[button.dataset.entryAction];
+    if (open) open();
+  }));
 }
 
 /* ---------------------------------------------------------------- Contas a Pagar */
 
+const OBLIGATION_STATUS_FILTERS = [
+  ['', 'Todas em aberto'], ['overdue', 'Vencidas'], ['partially_paid', 'Parcialmente pagas'], ['open', 'Em dia'],
+];
+
+function obligationQuery(filters, cursor) {
+  const params = new URLSearchParams({limit: '50'});
+  ['kind', 'status', 'q', 'due_from', 'due_to'].forEach((key) => { if (filters[key]) params.set(key, filters[key]); });
+  if (cursor) params.set('cursor', cursor);
+  return `/api/companies/${APP.company}/finance/obligations?${params}`;
+}
+
+function obligationRow(item) {
+  const actions = [];
+  if (item.allowed_actions.includes('pay')) {
+    actions.push(`<button type="button" class="btn-secondary" data-obligation-pay="${esc(item.key)}" aria-label="Pagar: ${esc(item.description)}">Pagar</button>`);
+  }
+  actions.push(`<button type="button" class="btn-secondary" data-obligation-details="${esc(item.key)}" aria-label="Detalhes: ${esc(item.description)}">Detalhes</button>`);
+  return `
+    <tr>
+      <td>${esc(item.description)}${item.kind === 'loan_installment' ? '<div class="muted">Empréstimo</div>' : ''}</td>
+      <td class="${item.status === 'overdue' ? 'cell-alert' : ''}">${dateBR(item.due_date)}</td>
+      <td class="num">${money(item.total_cents)}</td>
+      <td class="num">${money(item.paid_cents)}</td>
+      <td class="num"><strong>${money(item.open_cents)}</strong></td>
+      <td>${statusBadge(item.status)}</td>
+      <td><div class="row-actions">${actions.join('')}</div></td>
+    </tr>`;
+}
+
 async function renderContasPagar(token) {
   token = token || beginPage();
-  const title = '📄 Contas a Pagar';
-  const subtitle = 'Despesas em aberto, vencidas ou parcialmente pagas, em qualquer competência.';
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
-    <div class="page-subtitle">${subtitle}</div>
-    <div class="skeleton-block" aria-label="Carregando contas a pagar"></div>`;
-  let accounts, entries;
+  const title = `${icon('calendar', {class: 'title-icon'})}Contas a Pagar`;
+  const subtitle = 'Despesas e parcelas de empréstimo em aberto, vencidas ou parcialmente pagas, em qualquer competência.';
+  const routeKind = APP.routeParams && APP.routeParams.get('tipo') === 'emprestimo' ? 'loan_installment' : '';
+  const filters = financeFilters('contas-pagar', {kind: routeKind, status: '', q: '', due_from: '', due_to: ''});
+  if (routeKind) filters.kind = routeKind;
+  financeLoading(title, subtitle, 'Carregando contas a pagar');
+  let page;
   try {
-    [accounts, entries] = await Promise.all([
-      api(`/api/companies/${APP.company}/finance/accounts`),
-      api(`/api/companies/${APP.company}/finance/entries`),
-    ]);
+    page = await api(obligationQuery(filters));
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
     return financeError(title, subtitle, e, () => renderContasPagar());
   }
   if (!APP.pageState.isCurrent(token)) return;
-  const accountsById = Object.fromEntries(accounts.map((a) => [a.id, a]));
-  const today = new Date().toISOString().slice(0, 10);
-  const pending = entries.filter((e) => ['open', 'partially_paid', 'overdue'].includes(e.status));
-  const rows = pending.map((e) => {
-    const late = e.due_date < today;
-    return `
-    <tr class="${late ? 'row-alert' : ''}">
-      <td>${esc((accountsById[e.account_id] || {}).name || '—')}</td>
-      <td>${esc(e.description)}</td>
-      <td>${money(e.amount_cents)}</td>
-      <td>${dateBR(e.due_date)}${late ? ' ⚠️' : ''}</td>
-      <td>${esc(FINANCE_STATUS_LABELS[e.status] || e.status)}</td>
-      <td><button type="button" class="btn-secondary" data-settle-id="${esc(e.id)}" data-settle-amount="${e.amount_cents}">Pagar</button></td>
-    </tr>`;
-  }).join('');
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
-    <div class="page-subtitle">${subtitle}</div>
-    <hr class="divider">
-    <div class="table-wrap"><table>
-      <thead><tr><th>Conta</th><th>Descrição</th><th>Valor</th><th>Vencimento</th><th>Status</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6">Nenhuma conta em aberto.</td></tr>'}</tbody>
-    </table></div>`;
-  document.querySelectorAll('[data-settle-id]').forEach((btn) => btn.addEventListener('click', onSettleEntry));
-}
 
-async function onSettleEntry(event) {
-  const btn = event.currentTarget;
-  const entryId = btn.dataset.settleId;
-  const amountCents = parseInt(btn.dataset.settleAmount, 10);
-  btn.disabled = true;
-  try {
-    await api(`/api/companies/${APP.company}/finance/entries/${entryId}/settlements`, {
-      method: 'POST',
-      body: JSON.stringify({amount_cents: amountCents, paid_at: new Date().toISOString().slice(0, 10)}),
-    });
+  const items = page.items.slice();
+  const statusOptions = OBLIGATION_STATUS_FILTERS
+    .map(([value, label]) => `<option value="${value}"${value === filters.status ? ' selected' : ''}>${label}</option>`).join('');
+  const kindOptions = [['', 'Todas'], ['entry', 'Despesas'], ['loan_installment', 'Parcelas de empréstimo']]
+    .map(([value, label]) => `<option value="${value}"${value === filters.kind ? ' selected' : ''}>${label}</option>`).join('');
+  const hasFilter = filters.kind || filters.status || filters.q || filters.due_from || filters.due_to;
+
+  document.getElementById('content').innerHTML = `
+    <h1 class="page-title">${title}</h1>
+    <div class="page-subtitle">${subtitle}</div>
+    <div class="kpi-grid kpi-grid-3 mt-16">
+      ${kpi('Saldo em aberto', money(page.open_cents), hasFilter ? 'no filtro atual' : null)}
+      ${kpi('Obrigações', page.total)}
+    </div>
+    <form id="obligations-filter" class="page-toolbar">
+      <div class="filters">
+        <div><label class="field-label" for="obligations-kind">Tipo</label>
+          <select id="obligations-kind" name="kind" class="login-input">${kindOptions}</select></div>
+        <div><label class="field-label" for="obligations-status">Situação</label>
+          <select id="obligations-status" name="status" class="login-input">${statusOptions}</select></div>
+        <div><label class="field-label" for="obligations-due-from">Vence de</label>
+          <input id="obligations-due-from" name="due_from" type="date" class="login-input" value="${esc(filters.due_from)}"></div>
+        <div><label class="field-label" for="obligations-due-to">até</label>
+          <input id="obligations-due-to" name="due_to" type="date" class="login-input" value="${esc(filters.due_to)}"></div>
+        <div><label class="field-label" for="obligations-q">Buscar</label>
+          <input id="obligations-q" name="q" type="search" class="login-input" maxlength="120" value="${esc(filters.q)}" placeholder="Descrição ou credor"></div>
+      </div>
+      <div class="btn-row">
+        <button type="submit" class="btn-primary btn-wide">Filtrar</button>
+        ${hasFilter ? '<button type="button" class="btn-secondary" data-obligations-clear>Limpar filtros</button>' : ''}
+      </div>
+    </form>
+    <div id="obligations-list"></div>`;
+
+  const refresh = () => refreshKeepingScroll(() => renderContasPagar());
+  const list = document.getElementById('obligations-list');
+  let nextCursor = page.next_cursor;
+  const paint = () => {
+    if (!items.length) {
+      list.innerHTML = hasFilter
+        ? '<div class="empty-state">Nenhuma obrigação com estes filtros.</div>'
+        : '<div class="empty-state">Nenhuma conta em aberto. Novas despesas entram aqui a partir de Custos e Despesas.</div>';
+      return;
+    }
+    list.innerHTML = `
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Descrição</th><th>Vencimento</th><th class="num">Total</th><th class="num">Pago</th><th class="num">Saldo</th><th>Status</th><th>Ações</th></tr></thead>
+        <tbody>${items.map(obligationRow).join('')}</tbody>
+      </table></div>
+      <p class="muted">Exibindo ${items.length} de ${page.total}.</p>
+      ${nextCursor ? '<div class="btn-row"><button type="button" class="btn-secondary" data-obligations-more>Carregar mais</button></div>' : ''}`;
+    const byKey = Object.fromEntries(items.map((item) => [item.key, item]));
+    list.querySelectorAll('[data-obligation-pay]').forEach((button) => button.addEventListener('click', () =>
+      openPaymentForm(byKey[button.dataset.obligationPay], {trigger: button, onSaved: refresh})));
+    list.querySelectorAll('[data-obligation-details]').forEach((button) => button.addEventListener('click', () => {
+      const item = byKey[button.dataset.obligationDetails];
+      openObligationDetails(item.kind, item.id, {trigger: button, onSaved: refresh});
+    }));
+    const more = list.querySelector('[data-obligations-more]');
+    if (more) {
+      more.addEventListener('click', async () => {
+        more.disabled = true;
+        try {
+          const next = await api(obligationQuery(filters, nextCursor));
+          items.push(...next.items);
+          nextCursor = next.next_cursor;
+          paint();
+        } catch (e) {
+          more.disabled = false;
+          more.insertAdjacentHTML('afterend', `<span class="form-error" role="alert">${esc(e.message)}</span>`);
+        }
+      });
+    }
+  };
+  paint();
+
+  document.getElementById('obligations-filter').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    ['kind', 'status', 'q', 'due_from', 'due_to'].forEach((key) => { filters[key] = form.elements.namedItem(key).value.trim(); });
     renderContasPagar();
-  } catch (e) {
-    alert('Erro ao registrar pagamento: ' + e.message);
-    btn.disabled = false;
-  }
+  });
+  const clear = document.querySelector('[data-obligations-clear]');
+  if (clear) clear.addEventListener('click', () => {
+    Object.assign(filters, {kind: '', status: '', q: '', due_from: '', due_to: ''});
+    renderContasPagar();
+  });
 }

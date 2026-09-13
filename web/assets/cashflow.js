@@ -13,12 +13,9 @@ function forecastWindow() {
 
 async function renderFluxoCaixa(token) {
   token = token || beginPage();
-  const title = '📈 Fluxo de Caixa';
+  const title = `${icon('trending-up', {class: 'title-icon'})}Fluxo de Caixa`;
   const subtitle = 'Contas, saldo consolidado e projeção de caixa realizada e prevista (90 dias).';
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
-    <div class="page-subtitle">${subtitle}</div>
-    <div class="skeleton-block" aria-label="Carregando fluxo de caixa"></div>`;
+  financeLoading(title, subtitle, 'Carregando fluxo de caixa');
   const {start, end} = forecastWindow();
   let accounts, balance, forecastData;
   try {
@@ -37,7 +34,7 @@ async function renderFluxoCaixa(token) {
     <tr>
       <td>${esc(a.name)}</td>
       <td>${esc(CASHFLOW_KIND_LABELS[a.kind] || a.kind)}</td>
-      <td>${money(a.balance_cents)}</td>
+      <td class="num">${money(a.balance_cents)}</td>
     </tr>`).join('');
 
   const movementDays = forecastData.days.filter((d) => d.items.length);
@@ -45,17 +42,17 @@ async function renderFluxoCaixa(token) {
     <tr>
       <td>${dateBR(d.date)}</td>
       <td>${esc(item.description)}</td>
-      <td>${money(item.amount_cents)}</td>
+      <td class="num">${money(item.amount_cents)}</td>
       <td>${esc(CASHFLOW_CONFIDENCE_LABELS[item.confidence] || item.confidence)}</td>
     </tr>`)).join('');
 
   const alertBanner = forecastData.alerts.length
-    ? `<div class="story-box mt-16">⚠️ Projeção de caixa negativo em ${dateBR(forecastData.alerts[0].date)}:
+    ? `<div class="story-box mt-16">${icon('triangle-alert')} Projeção de caixa negativo em ${dateBR(forecastData.alerts[0].date)}:
         ${money(forecastData.alerts[0].balance_cents)}.</div>`
     : '';
 
   document.getElementById('content').innerHTML = `
-    <div class="page-title">${title}</div>
+    <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
     <hr class="divider">
     <div class="kpi-grid kpi-grid-3">
@@ -69,7 +66,7 @@ async function renderFluxoCaixa(token) {
     ${alertBanner}
     <div class="settings-block">
       <h2>Contas de caixa</h2>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Nome</th><th>Tipo</th><th>Saldo</th></tr></thead>
         <tbody>${accountRows || '<tr><td colspan="3">Nenhuma conta cadastrada.</td></tr>'}</tbody>
       </table></div>
@@ -108,7 +105,7 @@ async function renderFluxoCaixa(token) {
       </form>
     </div>
     <div class="section-header">Próximos 90 dias — realizado e previsto</div>
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Data</th><th>Descrição</th><th>Valor</th><th>Origem</th></tr></thead>
       <tbody>${movementRows || '<tr><td colspan="4">Nenhuma movimentação prevista.</td></tr>'}</tbody>
     </table></div>`;

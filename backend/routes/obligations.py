@@ -147,7 +147,39 @@ def get_obligation(
 
     if not can_write:
         _strip_write_actions(item)
+    item["payments"] = _obligation_payments(company, kind, numeric_id)
     return item
+
+
+def _obligation_payments(company: int, kind: str, obligation_id: int) -> list:
+    """Every payment recorded against one obligation, reversed ones included,
+    so the detail view can offer "Estornar" on a specific payment. Only
+    display fields: idempotency keys and stored responses stay server-side."""
+    with db.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id,amount_cents,principal_cents,interest_cents,paid_at,
+                   cash_event_id,owns_cash_event,reversed_at,reversal_reason,created_at
+            FROM obligation_payments
+            WHERE company=? AND obligation_kind=? AND obligation_id=?
+            ORDER BY paid_at,created_at,id
+            """,
+            (company, kind, obligation_id),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "amount_cents": row["amount_cents"],
+            "principal_cents": row["principal_cents"],
+            "interest_cents": row["interest_cents"],
+            "paid_at": row["paid_at"],
+            "cash_event_id": None if row["cash_event_id"] is None else str(row["cash_event_id"]),
+            "generated_cash_event": bool(row["owns_cash_event"]),
+            "reversed_at": row["reversed_at"],
+            "reversal_reason": row["reversal_reason"],
+        }
+        for row in rows
+    ]
 
 
 @router.post("/obligations/{kind}/{obligation_id}/payments")
