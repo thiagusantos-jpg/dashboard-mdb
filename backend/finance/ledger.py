@@ -220,3 +220,42 @@ def list_events(company: int, *, cash_account_id: Optional[int] = None, limit: i
                 params,
             )
         ]
+
+
+class VersionConflict(RuntimeError):
+    """The cash account changed since the caller read it (maps to HTTP 409)."""
+
+
+def update_account(
+    company: int,
+    account_id: int,
+    *,
+    expected_version: int,
+    name: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> dict:
+    """Rename or (un)archive a cash account. Movements and balance are never
+    touched: an archived account still reports its balance and history."""
+    changes = {}
+    if name is not None:
+        clean = name.strip()
+        if not clean or len(clean) > 180:
+            raise ValueError("O nome deve ter entre 1 e 180 caracteres.")
+        changes["name"] = clean
+    if archived is not None:
+        changes["archived"] = int(bool(archived))
+    if not changes:
+        raise ValueError("Nenhuma alteração informada.")
+    with db.connection() as conn:
+        if not conn.execute("SELECT 1 FROM cash_accounts WHERE id=? AND company=?", (account_id, company)).fetchone():
+            raise LookupError("Conta de caixa não encontrada nesta empresa.")
+        assignments = ",".join(f"{column}=?" for column in changes)
+        changed = conn.execute(
+            f"UPDATE cash_accounts SET {assignments},version=version+1,updated_at=? WHERE id=? AND company=? AND version=?",
+            (*changes.values(), db.now(), account_id, company, expected_version),
+        )
+        if changed.rowcount != 1:
+            raise VersionConflict("Esta conta foi alterada por outro usuário. Recarregue e tente de novo.")
+        row = dict(conn.execute("SELECT * FROM cash_accounts WHERE id=?", (account_id,)).fetchone())
+    row["archived"] = bool(row["archived"])
+    return row

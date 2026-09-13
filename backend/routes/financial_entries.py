@@ -251,6 +251,20 @@ def add_entry(
     ),
 ):
     _require_sensitive_if_needed(company, body.account_id, auth)
+    if body.counterparty_id is not None:
+        # Same rule as editing (B1): a counterparty from another company is rejected.
+        from ..finance.validators import validate_counterparty
+
+        class _FieldError(ValueError):
+            def __init__(self, message, fields=None):
+                super().__init__(message)
+                self.fields = fields or []
+
+        with db.connection() as conn:
+            try:
+                validate_counterparty(conn, company, body.counterparty_id, error_cls=_FieldError)
+            except _FieldError as exc:
+                raise HTTPException(422, _error_detail("invalid_fields", str(exc), exc.fields)) from exc
     try:
         return create_entry(
             EntryCommand(

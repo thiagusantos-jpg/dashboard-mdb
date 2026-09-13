@@ -623,7 +623,7 @@ const MODULE_LABELS = {analises: 'Análises', financeiro: 'Financeiro'};
 const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'reposicao', 'produto', 'acoes',
   'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis', 'configuracoes'];
 const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis'];
-const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
+const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/cadastros', 'configuracoes/calendario',
   'configuracoes/metas', 'configuracoes/alertas', 'configuracoes/integracoes'];
 const SETTINGS_SECTIONS = SETTINGS_ROUTES.map((route) => route.split('/')[1]);
 

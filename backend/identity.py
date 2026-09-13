@@ -265,3 +265,15 @@ def change_own_password(
     return _bump(
         conn, user_id, expected_version, "password_hash=?, password_salt=?", (digest.hex(), salt.hex())
     )
+
+
+def update_user_name(user_id: int, *, name: str, expected_version: int) -> dict:
+    """Administrator edit of another user's display name, version-guarded.
+    Credentials are never changed here (Minha conta owns them)."""
+    clean_name = (name or "").strip()
+    if not clean_name or len(clean_name) > 120:
+        raise ProfileError("O nome deve ter entre 1 e 120 caracteres.", fields=["name"])
+    with db.connection() as conn:
+        user = _active_user(conn, user_id)
+        _check_version(user, expected_version)
+        return _bump(conn, user_id, expected_version, "name=?", (clean_name,))

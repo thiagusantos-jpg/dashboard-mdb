@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .. import organization, permissions
@@ -137,3 +137,19 @@ def update_calendar(company: int, body: CalendarException):
         )
     except (ValueError, organization.ConcurrentUpdateError) as exc:
         _translate_error(exc)
+
+
+@router.delete("/calendar/{day}", status_code=204)
+def delete_calendar(
+    company: int,
+    day: str,
+    expected_version: int = Query(ge=1),
+    store: Optional[int] = Query(default=None, ge=1),
+):
+    try:
+        organization.delete_calendar_exception(company, day, expected_version=expected_version, store=store)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, organization.ConcurrentUpdateError) as exc:
+        _translate_error(exc)
+    return Response(status_code=204)

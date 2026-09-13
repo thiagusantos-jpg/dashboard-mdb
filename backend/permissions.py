@@ -117,3 +117,40 @@ def companies_for(auth: security.AuthContext):
                 (auth.user_id,),
             )
         ]
+
+
+def usable_administrators(company: int, *, excluding_user_id: Optional[int] = None) -> int:
+    """Active users who can still administer this company: global
+    administrators plus holders of the administrator role in its scope."""
+    with db.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT u.id FROM users u
+            LEFT JOIN user_scopes s ON s.user_id=u.id AND s.company=? AND s.role='administrator'
+            WHERE u.active=1 AND (u.is_admin=1 OR s.user_id IS NOT NULL)
+            """,
+            (company,),
+        ).fetchall()
+    return sum(1 for row in rows if excluding_user_id is None or int(row["id"]) != int(excluding_user_id))
+
+
+def ensure_administrator_remains(company: int, user_id: int, *, new_role: Optional[str] = None) -> None:
+    """Refuses demoting (new_role) or disabling (new_role=None) the last user
+    able to administer the company, which would lock everyone out of Usuários."""
+    if new_role == "administrator":
+        return
+    with db.connection() as conn:
+        target = conn.execute(
+            """
+            SELECT u.is_admin, s.role FROM users u
+            LEFT JOIN user_scopes s ON s.user_id=u.id AND s.company=?
+            WHERE u.id=? AND u.active=1
+            """,
+            (company, user_id),
+        ).fetchone()
+    if not target or not (target["is_admin"] or target["role"] == "administrator"):
+        return
+    if new_role is not None and target["is_admin"]:
+        return  # a global administrator keeps administering after a scoped role change
+    if usable_administrators(company, excluding_user_id=user_id) == 0:
+        raise ValueError("Não é possível remover o último administrador com acesso a esta empresa.")

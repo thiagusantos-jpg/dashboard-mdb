@@ -845,3 +845,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 /* Resumo: secondary reference to Financeiro → Resultado gerencial (task C4). */
 .management-summary { margin: 20px 0; padding-top: 16px; border-top: 1px solid var(--divider); }
 .management-summary .settings-heading { align-items: flex-start; }
+
+/* Quick counterparty creation inside the expense drawer (task C5). */
+.quick-create { margin: 8px 0 12px; padding: 12px; border: 1px dashed var(--border); border-radius: 8px; }
+.row-actions .muted { align-self: center; }

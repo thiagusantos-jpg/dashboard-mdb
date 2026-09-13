@@ -308,3 +308,90 @@ def resolve_parameter(
             (company, key, on_date, on_date, store or 0, category or 0, product or 0),
         ).fetchone()
     return json.loads(row["value_json"]) if row else None
+
+
+class VersionConflict(RuntimeError):
+    """The record changed since the caller read it (maps to HTTP 409)."""
+
+
+COUNTERPARTY_KINDS = {"supplier", "beneficiary", "owner", "employee", "lender", "other"}
+
+
+def _versioned_update(conn, table: str, record_id: int, company: int, expected_version: int, changes: dict) -> dict:
+    """UPDATE guarded by company and version; LookupError when the record is not
+    this company's, VersionConflict when someone saved it first."""
+    if not changes:
+        raise ValueError("Nenhuma alteração informada.")
+    exists = conn.execute(f"SELECT 1 FROM {table} WHERE id=? AND company=?", (record_id, company)).fetchone()
+    if not exists:
+        raise LookupError("Cadastro não encontrado nesta empresa.")
+    assignments = ",".join(f"{column}=?" for column in changes)
+    changed = conn.execute(
+        f"UPDATE {table} SET {assignments},version=version+1,updated_at=? WHERE id=? AND company=? AND version=?",
+        (*changes.values(), db.now(), record_id, company, expected_version),
+    )
+    if changed.rowcount != 1:
+        raise VersionConflict("Este cadastro foi alterado por outro usuário. Recarregue e tente de novo.")
+    row = dict(conn.execute(f"SELECT * FROM {table} WHERE id=?", (record_id,)).fetchone())
+    row["archived"] = bool(row["archived"])
+    return row
+
+
+def _clean_name(name: str, limit: int) -> str:
+    clean = (name or "").strip()
+    if not clean or len(clean) > limit:
+        raise ValueError(f"O nome deve ter entre 1 e {limit} caracteres.")
+    return clean
+
+
+def update_account(
+    company: int,
+    account_id: int,
+    *,
+    expected_version: int,
+    name: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> dict:
+    """Rename or (un)archive a category. Archiving hides it from new entries;
+    history and reports keep it (reporting lists archived accounts)."""
+    changes = {}
+    if name is not None:
+        changes["name"] = _clean_name(name, 160)
+    if archived is not None:
+        changes["archived"] = int(bool(archived))
+    with db.connection() as conn:
+        if archived:
+            current = conn.execute(
+                "SELECT system_key FROM finance_accounts WHERE id=? AND company=?", (account_id, company)
+            ).fetchone()
+            if current and current["system_key"]:
+                # Loans, card fees and receivables post to these by key; renaming is fine.
+                raise ValueError("Categorias padrão do sistema não podem ser arquivadas; renomeie se precisar.")
+        row = _versioned_update(conn, "finance_accounts", account_id, company, expected_version, changes)
+    row["sensitive"] = bool(row["sensitive"])
+    return row
+
+
+def update_counterparty(
+    company: int,
+    counterparty_id: int,
+    *,
+    expected_version: int,
+    name: Optional[str] = None,
+    kind: Optional[str] = None,
+    document: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> dict:
+    changes = {}
+    if name is not None:
+        changes["name"] = _clean_name(name, 180)
+    if kind is not None:
+        if kind not in COUNTERPARTY_KINDS:
+            raise ValueError("Tipo de favorecido inválido.")
+        changes["kind"] = kind
+    if document is not None:
+        changes["document"] = document.strip()[:30]
+    if archived is not None:
+        changes["archived"] = int(bool(archived))
+    with db.connection() as conn:
+        return _versioned_update(conn, "counterparties", counterparty_id, company, expected_version, changes)

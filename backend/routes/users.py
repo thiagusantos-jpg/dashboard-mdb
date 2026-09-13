@@ -19,6 +19,11 @@ class UserCreate(BaseModel):
     store: Optional[int] = Field(default=None, ge=1)
 
 
+class UserPatch(BaseModel):
+    expected_version: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=120)
+
+
 class RoleChange(BaseModel):
     role: str
     store: Optional[int] = Field(default=None, ge=1)
@@ -103,6 +108,12 @@ def change_role(
     auth=Depends(permissions.require_permission("users.manage")),
 ):
     _require_company(company)
+    if auth.user_id == user_id:
+        raise HTTPException(409, "Você não pode alterar o próprio perfil.")
+    try:
+        permissions.ensure_administrator_remains(company, user_id, new_role=body.role)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     try:
         permissions.grant_role(user_id, company, body.role, body.store)
     except ValueError as exc:
@@ -122,6 +133,31 @@ def disable_scoped_user(
     if auth.user_id == user_id:
         raise HTTPException(409, "Você não pode desativar seu próprio usuário.")
     try:
+        permissions.ensure_administrator_remains(company, user_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
         identity.disable_user(user_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.patch("/api/companies/{company}/users/{user_id}")
+def update_scoped_user(
+    company: int,
+    user_id: int,
+    body: UserPatch,
+    auth: security.AuthContext = Depends(permissions.require_permission("users.manage")),
+):
+    _require_company(company)
+    with db.connection() as conn:
+        scope = conn.execute(
+            "SELECT role,store FROM user_scopes WHERE user_id=? AND company=?", (user_id, company)
+        ).fetchone()
+    if not scope:
+        raise HTTPException(404, "Usuário não encontrado nesta empresa.")
+    try:
+        user = identity.update_user_name(user_id, name=body.name, expected_version=body.expected_version)
+    except identity.ProfileError as exc:
+        raise HTTPException(exc.status, {"code": exc.code, "message": str(exc), "fields": exc.fields}) from exc
+    return _public_user(user, scope["role"], scope["store"] or None)

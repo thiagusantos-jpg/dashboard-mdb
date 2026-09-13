@@ -369,3 +369,28 @@ def calendar_exceptions(company: int, store: Optional[int] = None) -> list:
                 (company, store or 0),
             )
         ]
+
+
+def delete_calendar_exception(
+    company: int,
+    day: str,
+    *,
+    expected_version: int,
+    store: Optional[int] = None,
+) -> None:
+    """Removes one exception; the date then follows the regular business hours.
+    Other dates are untouched, and a stale version never deletes."""
+    date.fromisoformat(day)
+    with db.connection() as conn:
+        current = conn.execute(
+            "SELECT version FROM calendar_exceptions WHERE company=? AND store=? AND date=?",
+            (company, store or 0, day),
+        ).fetchone()
+        if current is None:
+            raise LookupError("Data não encontrada no calendário.")
+        changed = conn.execute(
+            "DELETE FROM calendar_exceptions WHERE company=? AND store=? AND date=? AND version=?",
+            (company, store or 0, day, expected_version),
+        )
+        if changed.rowcount != 1:
+            raise ConcurrentUpdateError("A data foi alterada por outro usuário.")

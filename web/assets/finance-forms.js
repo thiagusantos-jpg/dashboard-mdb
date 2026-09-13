@@ -448,6 +448,92 @@ function bindDrawerForm(drawer, buildRequest, after) {
   return {form, ui};
 }
 
+/* Same wiring as a drawer form, for a form placed directly on a page. */
+function bindForm(form, buildRequest, after) {
+  const ui = formUiFor(form);
+  const controller = createFormController({buildRequest});
+  const markDirty = () => { if (APP.pageState) APP.pageState.markDirty(true); };
+  form.addEventListener('input', markDirty);
+  form.addEventListener('change', markDirty);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const outcome = await controller.submit(readFormValues(form), ui);
+    if (outcome.ok) {
+      if (typeof clearDirty === 'function') clearDirty();
+      after(outcome.result, ev.submitter && ev.submitter.value, form);
+    }
+  });
+  return {form, ui};
+}
+
+/* ---------------------------------------------------------------- supporting records (task C5) */
+
+var MAINTENANCE_PATHS = {category: 'accounts', counterparty: 'counterparties', cashAccount: 'cash-accounts'};
+var MAINTENANCE_LABELS = {category: 'categoria', counterparty: 'favorecido', cashAccount: 'conta de caixa'};
+var COUNTERPARTY_KIND_LABELS = {supplier: 'Fornecedor', beneficiary: 'Favorecido', owner: 'Sócio', employee: 'Funcionário', lender: 'Credor', other: 'Outro'};
+
+function buildArchiveRequest(resource, record, archived) {
+  return {
+    method: 'PATCH', path: `${financeBasePath()}/${MAINTENANCE_PATHS[resource]}/${record.id}`,
+    body: {expected_version: record.version, archived: !!archived},
+  };
+}
+
+function buildRenameRequest(resource, record, values) {
+  const name = String(values.name || '').trim();
+  if (!name) return {errors: {name: 'Informe o nome.'}};
+  if (name === record.name) return {errors: {name: 'O nome não mudou.'}};
+  return {
+    method: 'PATCH', path: `${financeBasePath()}/${MAINTENANCE_PATHS[resource]}/${record.id}`,
+    body: {expected_version: record.version, name},
+  };
+}
+
+function buildCounterpartyRequest(values) {
+  const name = String(values.name || '').trim();
+  if (!name || name.length > 180) return {errors: {name: 'Informe o nome do favorecido (até 180 caracteres).'}};
+  const kind = COUNTERPARTY_KIND_LABELS[values.kind] ? values.kind : 'supplier';
+  return {
+    method: 'POST', path: `${financeBasePath()}/counterparties`,
+    body: {name, kind, document: String(values.document || '').trim()},
+  };
+}
+
+function openRenameForm(resource, record, ctx) {
+  ctx = ctx || {};
+  const drawer = openDrawer({
+    title: `Renomear ${MAINTENANCE_LABELS[resource]}`, trigger: ctx.trigger,
+    body: `<form class="drawer-form" novalidate>
+      ${formField('name', 'Nome', textInput(record.name, 180))}
+      <p class="field-help">O histórico passa a mostrar o novo nome; valores e vínculos não mudam.</p>
+      ${formActions('Salvar nome')}
+    </form>`,
+  });
+  bindDrawerForm(drawer, (values) => buildRenameRequest(resource, record, values), (result) => {
+    drawer.close();
+    if (ctx.onSaved) ctx.onSaved(result);
+  });
+}
+
+function openArchiveForm(resource, record, archived, ctx) {
+  ctx = ctx || {};
+  const verb = archived ? 'Arquivar' : 'Reativar';
+  const drawer = openDrawer({
+    title: `${verb} ${MAINTENANCE_LABELS[resource]}`, trigger: ctx.trigger,
+    body: `<form class="drawer-form" novalidate>
+      ${summaryList([['Cadastro', esc(record.name)]])}
+      <div class="story-box">${ctx.effect || (archived
+        ? 'Efeito: deixa de aparecer para novos lançamentos. Lançamentos, pagamentos e relatórios antigos continuam com este cadastro.'
+        : 'Efeito: volta a aparecer para novos lançamentos.')}</div>
+      ${formActions(verb).replace('>Cancelar</button>', '>Voltar</button>')}
+    </form>`,
+  });
+  bindDrawerForm(drawer, () => buildArchiveRequest(resource, record, archived), (result) => {
+    drawer.close();
+    if (ctx.onSaved) ctx.onSaved(result);
+  });
+}
+
 function summaryList(pairs) {
   return `<dl class="summary-list">${pairs.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
 }
@@ -544,6 +630,13 @@ async function openExpenseForm(entry, ctx) {
       <details class="form-details"${v.counterparty_id || v.notes ? ' open' : ''}>
         <summary>Fornecedor e observações</summary>
         ${formField('counterparty_id', 'Fornecedor ou favorecido', withLock(selectControl(counterpartyOptions, v.counterparty_id, 'Nenhum'), 'counterparty_id'))}
+        ${lock('counterparty_id') ? '' : `<button type="button" class="btn-link" data-counterparty-new aria-expanded="false">+ Novo favorecido</button>
+        <div class="quick-create" data-counterparty-panel hidden>
+          ${formField('new_counterparty_name', 'Nome do novo favorecido', textInput('', 180))}
+          ${formField('new_counterparty_kind', 'Tipo', selectControl(Object.entries(COUNTERPARTY_KIND_LABELS).map(([value, label]) => ({value, label})), 'supplier'))}
+          <div class="btn-row"><button type="button" class="btn-secondary" data-counterparty-save>Adicionar e selecionar</button></div>
+          <p class="form-error" data-counterparty-error role="alert"></p>
+        </div>`}
         ${formField('notes', 'Observações', withLock(`<textarea class="login-input" rows="3" maxlength="2000">${esc(v.notes || '')}</textarea>`, 'notes'))}
       </details>
       ${editable.length ? formActions(entry ? 'Salvar alterações' : 'Salvar', entry ? '' : '<button type="submit" class="btn-secondary" value="again">Salvar e adicionar outra</button>')
@@ -553,6 +646,7 @@ async function openExpenseForm(entry, ctx) {
 
   const form = drawer.dialog.querySelector('form');
   let previewSignature = null;
+  wireQuickCounterparty(form, lookups);
   const scheduleSignature = (values) => JSON.stringify([values.amount, values.count, values.first_due, values.competence_mode, values.competence]);
   const syncMode = () => {
     const mode = entry ? 'single' : readFormValues(form).mode;
@@ -612,6 +706,57 @@ async function openExpenseForm(entry, ctx) {
     drawer.close();
     if (ctx.onSaved) ctx.onSaved(result);
     if (intent === 'again') openExpenseForm(null, Object.assign({}, ctx, lookups, {trigger: ctx.trigger}));
+  });
+}
+
+/* "+ Novo favorecido" inside the expense form: creates the counterparty,
+ * selects it and returns to the same form with every typed field intact. Its
+ * buttons are type="button" and Enter is intercepted, so the expense itself is
+ * never submitted by accident. */
+function wireQuickCounterparty(form, lookups) {
+  const toggle = form.querySelector('[data-counterparty-new]');
+  if (!toggle) return;
+  const panel = form.querySelector('[data-counterparty-panel]');
+  const nameInput = form.elements.namedItem('new_counterparty_name');
+  const kindInput = form.elements.namedItem('new_counterparty_kind');
+  const save = form.querySelector('[data-counterparty-save]');
+  const error = form.querySelector('[data-counterparty-error]');
+  toggle.addEventListener('click', () => {
+    panel.hidden = !panel.hidden;
+    toggle.setAttribute('aria-expanded', String(!panel.hidden));
+    if (!panel.hidden) nameInput.focus();
+  });
+  panel.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' || ev.target.tagName === 'BUTTON') return;
+    ev.preventDefault();
+    save.click();
+  });
+  save.addEventListener('click', async () => {
+    const request = buildCounterpartyRequest({name: nameInput.value, kind: kindInput.value});
+    if (request.errors) {
+      error.textContent = request.errors.name;
+      nameInput.setAttribute('aria-invalid', 'true');
+      nameInput.focus();
+      return;
+    }
+    save.disabled = true;
+    error.textContent = '';
+    nameInput.setAttribute('aria-invalid', 'false');
+    try {
+      const created = await api(request.path, {method: request.method, body: JSON.stringify(request.body)});
+      const select = form.elements.namedItem('counterparty_id');
+      select.insertAdjacentHTML('beforeend', `<option value="${esc(created.id)}">${esc(created.name)}</option>`);
+      select.value = String(created.id);
+      if (lookups && lookups.counterparties) lookups.counterparties.push(created);
+      nameInput.value = '';
+      panel.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      select.focus();
+    } catch (e) {
+      error.textContent = e.message;
+    } finally {
+      save.disabled = false;
+    }
   });
 }
 

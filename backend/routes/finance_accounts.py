@@ -82,6 +82,41 @@ def get_counterparties(company: int):
         ]
 
 
+class AccountPatch(BaseModel):
+    expected_version: int = Field(ge=1)
+    name: Optional[str] = Field(default=None, max_length=160)
+    archived: Optional[bool] = None
+
+
+class CounterpartyPatch(BaseModel):
+    expected_version: int = Field(ge=1)
+    name: Optional[str] = Field(default=None, max_length=180)
+    kind: Optional[str] = None
+    document: Optional[str] = Field(default=None, max_length=30)
+    archived: Optional[bool] = None
+
+
+def _maintenance_errors(action):
+    try:
+        return action()
+    except LookupError as exc:
+        raise HTTPException(404, {"code": "not_found", "message": str(exc), "fields": []}) from exc
+    except accounts.VersionConflict as exc:
+        raise HTTPException(409, {"code": "version_conflict", "message": str(exc), "fields": ["expected_version"]}) from exc
+    except ValueError as exc:
+        raise HTTPException(422, {"code": "invalid_fields", "message": str(exc), "fields": []}) from exc
+
+
+@router.patch(
+    "/accounts/{account_id}",
+    dependencies=[Depends(permissions.require_permission("finance.write"))],
+)
+def patch_account(company: int, account_id: int, body: AccountPatch):
+    return _maintenance_errors(lambda: accounts.update_account(
+        company, account_id, expected_version=body.expected_version, name=body.name, archived=body.archived,
+    ))
+
+
 @router.post(
     "/counterparties",
     status_code=201,
@@ -109,7 +144,17 @@ def add_counterparty(company: int, body: CounterpartyCreate):
                 timestamp,
             ),
         )
-        row = conn.execute(
-            "SELECT * FROM counterparties WHERE id=?", (counterparty_id,)
-        ).fetchone()
-    return dict(row)
+        row = dict(conn.execute("SELECT * FROM counterparties WHERE id=?", (counterparty_id,)).fetchone())
+    row["archived"] = bool(row["archived"])
+    return row
+
+
+@router.patch(
+    "/counterparties/{counterparty_id}",
+    dependencies=[Depends(permissions.require_permission("finance.write"))],
+)
+def patch_counterparty(company: int, counterparty_id: int, body: CounterpartyPatch):
+    return _maintenance_errors(lambda: accounts.update_counterparty(
+        company, counterparty_id, expected_version=body.expected_version,
+        name=body.name, kind=body.kind, document=body.document, archived=body.archived,
+    ))

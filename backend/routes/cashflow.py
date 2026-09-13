@@ -20,6 +20,12 @@ class CashAccountCreate(BaseModel):
     store: Optional[int] = None
 
 
+class CashAccountPatch(BaseModel):
+    expected_version: int = Field(ge=1)
+    name: Optional[str] = Field(default=None, max_length=180)
+    archived: Optional[bool] = None
+
+
 class CashEventCreate(BaseModel):
     cash_account_id: int
     amount_cents: int
@@ -160,3 +166,23 @@ def reverse_cash_event(
         return ledger.reverse_event(event_id, reason=body.reason, created_by=auth.user_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.patch(
+    "/cash-accounts/{account_id}",
+    dependencies=[Depends(permissions.require_permission("finance.write"))],
+)
+def patch_cash_account(company: int, account_id: int, body: CashAccountPatch):
+    _require_company(company)
+    try:
+        account = ledger.update_account(
+            company, account_id, expected_version=body.expected_version, name=body.name, archived=body.archived,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, {"code": "not_found", "message": str(exc), "fields": []}) from exc
+    except ledger.VersionConflict as exc:
+        raise HTTPException(409, {"code": "version_conflict", "message": str(exc), "fields": ["expected_version"]}) from exc
+    except ValueError as exc:
+        raise HTTPException(422, {"code": "invalid_fields", "message": str(exc), "fields": []}) from exc
+    account["balance_cents"] = ledger.account_balance(account["id"])
+    return account

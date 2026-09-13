@@ -3,13 +3,51 @@
 'use strict';
 
 const SETTINGS_LABELS = {
-  empresa: 'Empresa e lojas',
+  empresa: 'Dados da empresa',
   usuarios: 'Usuários',
+  cadastros: 'Categorias e favorecidos',
   calendario: 'Calendário',
   metas: 'Metas',
   alertas: 'Alertas',
   integracoes: 'Integrações e sincronização',
 };
+
+var BR_STATES = ['AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE',
+  'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'];
+
+function onlyDigits(value) { return String(value || '').replace(/\D/g, ''); }
+
+function formatCnpj(value) {
+  const d = onlyDigits(value).slice(0, 14);
+  let out = d.slice(0, 2);
+  if (d.length > 2) out += '.' + d.slice(2, 5);
+  if (d.length > 5) out += '.' + d.slice(5, 8);
+  if (d.length > 8) out += '/' + d.slice(8, 12);
+  if (d.length > 12) out += '-' + d.slice(12, 14);
+  return out;
+}
+
+// Check digits (mod 11), not only the length.
+function isValidCnpj(value) {
+  const d = onlyDigits(value);
+  if (d.length !== 14 || /^(\d)\1{13}$/.test(d)) return false;
+  const digit = (length) => {
+    const weights = length === 12 ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2] : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    const rest = weights.reduce((sum, weight, i) => sum + Number(d[i]) * weight, 0) % 11;
+    return rest < 2 ? 0 : 11 - rest;
+  };
+  return digit(12) === Number(d[12]) && digit(13) === Number(d[13]);
+}
+
+function formatPhone(value) {
+  const d = onlyDigits(value).slice(0, 11);
+  if (!d) return '';
+  if (d.length <= 2) return `(${d}`;
+  const rest = d.slice(2);
+  if (rest.length <= 4) return `(${d.slice(0, 2)}) ${rest}`;
+  const split = rest.length === 9 ? 5 : 4;
+  return `(${d.slice(0, 2)}) ${rest.slice(0, split)}-${rest.slice(split)}`;
+}
 
 function settingsShell(section, body) {
   const tabs = Object.entries(SETTINGS_LABELS).map(([id, label]) =>
@@ -37,6 +75,7 @@ async function renderSettingsPage(token) {
   try {
     if (section === 'empresa') return await renderCompanySettings(token);
     if (section === 'usuarios') return await renderUserSettings(token);
+    if (section === 'cadastros') return await renderCatalogSettings(token);
     if (section === 'calendario') return await renderCalendarSettings(token);
     if (section === 'integracoes') return await renderIntegrationsSettings(token);
     if (section === 'metas') return await renderGoalsSettings(token);
@@ -54,31 +93,24 @@ async function renderSettingsPage(token) {
 
 async function renderCompanySettings(token) {
   token = token || beginPage();
-  const [profile, stores] = await Promise.all([
-    api(`/api/companies/${APP.company}/settings/company`),
-    api(`/api/companies/${APP.company}/settings/stores`),
-  ]);
+  const profile = await api(`/api/companies/${APP.company}/settings/company`);
   if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   const address = profile.address || {};
   const contacts = profile.contacts || {};
-  const storeRows = stores.length ? stores.map((store) => `
-    <tr>
-      <td>${esc(store.name)}</td>
-      <td>${store.mobne_id == null ? 'Local' : 'Mobne ' + esc(store.mobne_id)}</td>
-      <td>${esc(store.timezone)}</td>
-      <td>${store.active ? 'Ativa' : 'Inativa'}</td>
-    </tr>`).join('') : '<tr><td colspan="4">Nenhuma loja local cadastrada.</td></tr>';
+  const currentState = String(address.state || '').toUpperCase();
+  const stateOptions = ['<option value="">Selecione</option>'].concat(BR_STATES.map((uf) =>
+    `<option value="${uf}"${uf === currentState ? ' selected' : ''}>${uf}</option>`)).join('');
 
   document.getElementById('content').innerHTML = settingsShell('empresa', `
-    <form id="company-settings-form" class="settings-form">
+    <form id="company-settings-form" class="settings-form" novalidate>
       <div class="settings-heading">
-        <div><h2>Dados cadastrais</h2><p>O ID da Mobne é preservado e não pode ser editado.</p></div>
+        <div><h2>Dados da empresa</h2><p>Estes dados identificam a loja nos relatórios. O ID da Mobne é preservado e não pode ser editado.</p></div>
         <span class="periodo-badge muted">Mobne ID ${esc(APP.company)}</span>
       </div>
       <div class="form-grid">
         <div>
           <label for="settings-legal-name" class="field-label">Razão social</label>
-          <input id="settings-legal-name" class="login-input" maxlength="180" value="${esc(profile.legal_name)}">
+          <input id="settings-legal-name" class="login-input" maxlength="180" autocomplete="organization" value="${esc(profile.legal_name)}">
         </div>
         <div>
           <label for="settings-trade-name" class="field-label">Nome fantasia</label>
@@ -86,27 +118,28 @@ async function renderCompanySettings(token) {
         </div>
         <div>
           <label for="settings-cnpj" class="field-label">CNPJ</label>
-          <input id="settings-cnpj" class="login-input" maxlength="18" inputmode="numeric" value="${esc(profile.cnpj)}">
+          <input id="settings-cnpj" class="login-input" maxlength="18" inputmode="numeric" aria-describedby="settings-cnpj-help" value="${esc(formatCnpj(profile.cnpj))}">
+          <p id="settings-cnpj-help" class="field-help">14 dígitos; os dígitos verificadores são conferidos antes de salvar.</p>
         </div>
         <div>
           <label for="settings-logo-url" class="field-label">URL do logotipo</label>
-          <input id="settings-logo-url" class="login-input" maxlength="500" value="${esc(profile.logo_url)}">
+          <input id="settings-logo-url" class="login-input" type="url" maxlength="500" value="${esc(profile.logo_url)}">
         </div>
         <div class="form-grid-wide">
           <label for="settings-address" class="field-label">Endereço</label>
-          <input id="settings-address" class="login-input" maxlength="250" value="${esc(address.line || '')}">
+          <input id="settings-address" class="login-input" maxlength="250" autocomplete="street-address" value="${esc(address.line || '')}">
         </div>
         <div>
           <label for="settings-city" class="field-label">Cidade</label>
-          <input id="settings-city" class="login-input" maxlength="100" value="${esc(address.city || '')}">
+          <input id="settings-city" class="login-input" maxlength="100" autocomplete="address-level2" value="${esc(address.city || '')}">
         </div>
         <div>
-          <label for="settings-state" class="field-label">Estado</label>
-          <input id="settings-state" class="login-input" maxlength="2" value="${esc(address.state || '')}">
+          <label for="settings-state" class="field-label">Estado (UF)</label>
+          <select id="settings-state" class="login-input" autocomplete="address-level1">${stateOptions}</select>
         </div>
         <div>
           <label for="settings-phone" class="field-label">Telefone</label>
-          <input id="settings-phone" class="login-input" autocomplete="tel" value="${esc(contacts.phone || '')}">
+          <input id="settings-phone" class="login-input" type="tel" inputmode="tel" autocomplete="tel" maxlength="15" value="${esc(formatPhone(contacts.phone || ''))}">
         </div>
         <div>
           <label for="settings-contact-email" class="field-label">E-mail da empresa</label>
@@ -115,25 +148,32 @@ async function renderCompanySettings(token) {
       </div>
       <div class="settings-actions">
         <button class="btn-primary" type="submit">Salvar dados</button>
-        <span id="company-settings-status" class="sim-status" role="status" aria-live="polite"></span>
+        <span id="company-settings-status" class="form-success" role="status" aria-live="polite"></span>
       </div>
-    </form>
+    </form>`);
 
-    <div class="settings-block">
-      <h2>Lojas</h2>
-      <div class="table-wrap"><table><thead><tr><th>Nome</th><th>Origem</th><th>Fuso</th><th>Status</th></tr></thead>
-        <tbody>${storeRows}</tbody></table></div>
-      <form id="store-create-form" class="inline-form">
-        <div><label for="settings-store-name" class="field-label">Nova loja</label>
-          <input id="settings-store-name" class="login-input" maxlength="180" required></div>
-        <button class="btn-secondary" type="submit">Adicionar loja</button>
-        <span id="store-create-status" class="sim-status" role="status" aria-live="polite"></span>
-      </form>
-    </div>`);
-
-  watchForm(document.getElementById('company-settings-form')).addEventListener('submit', async (event) => {
+  const form = watchForm(document.getElementById('company-settings-form'));
+  const cnpj = document.getElementById('settings-cnpj');
+  const phone = document.getElementById('settings-phone');
+  cnpj.addEventListener('input', () => { cnpj.value = formatCnpj(cnpj.value); });
+  phone.addEventListener('input', () => { phone.value = formatPhone(phone.value); });
+  let saving = false;
+  form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (saving) return;
     const status = document.getElementById('company-settings-status');
+    const button = form.querySelector('button[type="submit"]');
+    cnpj.setAttribute('aria-invalid', 'false');
+    if (cnpj.value.trim() && !isValidCnpj(cnpj.value)) {
+      status.className = 'form-error';
+      status.textContent = 'CNPJ inválido: confira os 14 dígitos.';
+      cnpj.setAttribute('aria-invalid', 'true');
+      cnpj.focus();
+      return;
+    }
+    saving = true;
+    button.disabled = true;
+    status.className = 'form-success';
     status.textContent = 'Salvando…';
     try {
       const saved = await api(`/api/companies/${APP.company}/settings/company`, {
@@ -142,43 +182,29 @@ async function renderCompanySettings(token) {
           expected_version: profile.version,
           legal_name: document.getElementById('settings-legal-name').value.trim(),
           trade_name: document.getElementById('settings-trade-name').value.trim(),
-          cnpj: document.getElementById('settings-cnpj').value.trim(),
+          cnpj: cnpj.value.trim(),
           logo_url: document.getElementById('settings-logo-url').value.trim(),
           address: {
             line: document.getElementById('settings-address').value.trim(),
             city: document.getElementById('settings-city').value.trim(),
-            state: document.getElementById('settings-state').value.trim().toUpperCase(),
+            state: document.getElementById('settings-state').value,
           },
           contacts: {
-            phone: document.getElementById('settings-phone').value.trim(),
+            phone: phone.value.trim(),
             email: document.getElementById('settings-contact-email').value.trim(),
           },
         }),
       });
       profile.version = saved.version;
       clearDirty();
-      status.className = 'sim-status ok';
+      status.className = 'form-success';
       status.textContent = 'Dados salvos.';
     } catch (error) {
-      status.className = 'sim-status error';
+      status.className = 'form-error';
       status.textContent = error.message;
-    }
-  });
-
-  watchForm(document.getElementById('store-create-form')).addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const status = document.getElementById('store-create-status');
-    status.textContent = 'Salvando…';
-    try {
-      await api(`/api/companies/${APP.company}/settings/stores`, {
-        method: 'POST',
-        body: JSON.stringify({name: document.getElementById('settings-store-name').value.trim()}),
-      });
-      clearDirty();
-      await renderCompanySettings();
-    } catch (error) {
-      status.className = 'sim-status error';
-      status.textContent = error.message;
+    } finally {
+      saving = false;
+      button.disabled = false;
     }
   });
 }
@@ -193,32 +219,40 @@ async function renderUserSettings(token) {
   const rows = users.length ? users.map((user) => `
     <tr><td>${esc(user.name)}</td><td>${esc(user.email)}</td>
       <td>${esc(SETTINGS_ROLE_LABELS[user.role] || user.role)}</td>
-      <td>${user.active ? 'Ativo' : 'Inativo'}</td></tr>`).join('') :
-    '<tr><td colspan="4">Nenhum usuário vinculado.</td></tr>';
+      <td>${user.active ? 'Ativo' : 'Inativo'}</td>
+      <td><div class="row-actions">${user.active ? `
+        <button type="button" class="btn-secondary" data-user-edit="${esc(user.id)}" aria-label="Editar ${esc(user.name)}">Editar</button>
+        <button type="button" class="btn-secondary" data-user-disable="${esc(user.id)}" aria-label="Desativar usuário ${esc(user.name)}">Desativar usuário</button>` : ''}</div></td></tr>`).join('') :
+    '<tr><td colspan="5">Nenhum usuário vinculado.</td></tr>';
   const options = roles.map((role) =>
     `<option value="${esc(role.id)}">${esc(SETTINGS_ROLE_LABELS[role.id] || role.id)}</option>`
   ).join('');
   document.getElementById('content').innerHTML = settingsShell('usuarios', `
     <h2>Usuários e perfis</h2>
-    <div class="table-wrap"><table><thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th></tr></thead>
+    <p class="field-help">Cada pessoa altera o próprio e-mail e senha em Minha conta. Não é possível alterar o próprio perfil nem remover o último administrador.</p>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th>Ações</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <form id="settings-user-form" class="settings-form mt-16">
+      <h3 class="drawer-subtitle">Novo usuário</h3>
       <div class="form-grid">
         <div><label for="settings-user-name" class="field-label">Nome</label>
           <input id="settings-user-name" class="login-input" required maxlength="120"></div>
         <div><label for="settings-user-email" class="field-label">E-mail</label>
           <input id="settings-user-email" class="login-input" type="email" required maxlength="254"></div>
         <div><label for="settings-user-password" class="field-label">Senha inicial</label>
-          <input id="settings-user-password" class="login-input" type="password" required minlength="8"></div>
+          <input id="settings-user-password" class="login-input" type="password" required minlength="8" autocomplete="new-password"></div>
         <div><label for="settings-user-role" class="field-label">Perfil</label>
           <select id="settings-user-role" class="login-input">${options}</select></div>
       </div>
       <div class="settings-actions"><button class="btn-primary" type="submit">Criar usuário</button>
-        <span id="settings-user-status" class="sim-status" role="status" aria-live="polite"></span></div>
+        <span id="settings-user-status" class="form-error" role="status" aria-live="polite"></span></div>
     </form>`);
   watchForm(document.getElementById('settings-user-form')).addEventListener('submit', async (event) => {
     event.preventDefault();
     const status = document.getElementById('settings-user-status');
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    if (button.disabled) return;
+    button.disabled = true;
     try {
       await api(`/api/companies/${APP.company}/users`, {
         method: 'POST',
@@ -232,8 +266,88 @@ async function renderUserSettings(token) {
       clearDirty();
       await renderUserSettings();
     } catch (error) {
-      status.className = 'sim-status error';
       status.textContent = error.message;
+      button.disabled = false;
+    }
+  });
+  const byId = Object.fromEntries(users.map((user) => [String(user.id), user]));
+  document.querySelectorAll('[data-user-edit]').forEach((button) => button.addEventListener('click', () =>
+    openUserEditForm(byId[button.dataset.userEdit], roles, button)));
+  document.querySelectorAll('[data-user-disable]').forEach((button) => button.addEventListener('click', () =>
+    openUserDisableForm(byId[button.dataset.userDisable], button)));
+}
+
+function openUserEditForm(user, roles, trigger) {
+  const roleOptions = roles.map((role) => ({value: role.id, label: SETTINGS_ROLE_LABELS[role.id] || role.id}));
+  const drawer = openDrawer({
+    title: `Editar ${user.name}`, trigger,
+    body: `<form class="drawer-form" novalidate>
+      ${formField('name', 'Nome', textInput(user.name, 120))}
+      ${formField('role', 'Perfil', selectControl(roleOptions, user.role))}
+      <p class="field-help">E-mail e senha são alterados pela própria pessoa em Minha conta.</p>
+      ${formActions('Salvar alterações')}
+    </form>`,
+  });
+  const form = drawer.dialog.querySelector('form');
+  const ui = formUiFor(form);
+  let busy = false;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    const values = readFormValues(form);
+    const name = String(values.name || '').trim();
+    if (!name) return ui.showError('Informe o nome.', ['name']);
+    busy = true;
+    ui.setBusy(true);
+    ui.clearError();
+    try {
+      if (name !== user.name) {
+        const saved = await api(`/api/companies/${APP.company}/users/${user.id}`, {
+          method: 'PATCH', body: JSON.stringify({expected_version: user.version, name}),
+        });
+        user.version = saved.version;
+        user.name = saved.name;
+      }
+      if (values.role !== user.role) {
+        await api(`/api/companies/${APP.company}/users/${user.id}/role`, {method: 'PUT', body: JSON.stringify({role: values.role})});
+      }
+      drawer.close();
+      renderUserSettings();
+    } catch (e) {
+      ui.showError(e.message, mapServerFields(e.fields));
+    } finally {
+      busy = false;
+      ui.setBusy(false);
+    }
+  });
+}
+
+function openUserDisableForm(user, trigger) {
+  const drawer = openDrawer({
+    title: 'Desativar usuário', trigger,
+    body: `<form class="drawer-form" novalidate>
+      ${summaryList([['Usuário', esc(user.name)], ['E-mail', esc(user.email)]])}
+      <div class="story-box">Efeito: o acesso desta pessoa é bloqueado em todas as empresas e as sessões abertas são encerradas. Lançamentos e histórico permanecem.</div>
+      ${formActions('Desativar usuário').replace('>Cancelar</button>', '>Voltar</button>')}
+    </form>`,
+  });
+  const form = drawer.dialog.querySelector('form');
+  const ui = formUiFor(form);
+  let busy = false;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    busy = true;
+    ui.setBusy(true);
+    try {
+      await api(`/api/companies/${APP.company}/users/${user.id}`, {method: 'DELETE'});
+      drawer.close();
+      renderUserSettings();
+    } catch (e) {
+      ui.showError(e.message, []);
+    } finally {
+      busy = false;
+      ui.setBusy(false);
     }
   });
 }
@@ -245,49 +359,112 @@ const SETTINGS_ROLE_LABELS = {
   viewer: 'Consulta',
 };
 
+function calendarRequest(values, editing) {
+  const errors = {};
+  if (!values.date) errors.date = 'Informe a data.';
+  if (!['open', 'closed'].includes(values.status)) errors.status = 'Escolha se a loja abre ou fecha.';
+  if (Object.keys(errors).length) return {errors};
+  return {
+    method: 'PUT', path: `/api/companies/${APP.company}/settings/calendar`,
+    body: {date: values.date, status: values.status, description: String(values.description || '').trim(), expected_version: editing ? editing.version : null},
+  };
+}
+
+function calendarDeletePath(entry) {
+  return `/api/companies/${APP.company}/settings/calendar/${encodeURIComponent(entry.date)}?expected_version=${entry.version}`;
+}
+
 async function renderCalendarSettings(token) {
   token = token || beginPage();
   const entries = await api(`/api/companies/${APP.company}/settings/calendar`);
   if (!APP.pageState.isCurrent(token)) return;
   const rows = entries.length ? entries.map((entry) => `
-    <tr><td>${esc(entry.date)}</td><td>${entry.status === 'closed' ? 'Fechado' : 'Aberto'}</td>
-      <td>${esc(entry.description)}</td><td>v${entry.version}</td></tr>`).join('') :
+    <tr><td>${dateBR(entry.date)}</td><td>${entry.status === 'closed' ? 'Fechado' : 'Aberto'}</td>
+      <td>${esc(entry.description)}</td>
+      <td><div class="row-actions">
+        <button type="button" class="btn-secondary" data-calendar-edit="${esc(entry.date)}" aria-label="Editar ${dateBR(entry.date)}">Editar</button>
+        <button type="button" class="btn-secondary" data-calendar-remove="${esc(entry.date)}" aria-label="Remover ${dateBR(entry.date)}">Remover</button>
+      </div></td></tr>`).join('') :
     '<tr><td colspan="4">Nenhuma exceção cadastrada.</td></tr>';
   document.getElementById('content').innerHTML = settingsShell('calendario', `
     <h2>Calendário de operação</h2>
     <p>Cadastre feriados, fechamentos extraordinários ou dias com abertura excepcional.</p>
-    <div class="table-wrap"><table><thead><tr><th>Data</th><th>Operação</th><th>Motivo</th><th>Versão</th></tr></thead>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Data</th><th>Operação</th><th>Motivo</th><th>Ações</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <form id="settings-calendar-form" class="inline-form mt-16">
-      <div><label for="settings-calendar-date" class="field-label">Data</label>
-        <input id="settings-calendar-date" class="login-input" type="date" required></div>
-      <div><label for="settings-calendar-status" class="field-label">Operação</label>
-        <select id="settings-calendar-status" class="login-input"><option value="closed">Fechado</option><option value="open">Aberto</option></select></div>
-      <div><label for="settings-calendar-description" class="field-label">Motivo</label>
-        <input id="settings-calendar-description" class="login-input" maxlength="200"></div>
-      <button class="btn-secondary" type="submit">Adicionar data</button>
-      <span id="settings-calendar-message" class="sim-status" role="status" aria-live="polite"></span>
+    <form id="settings-calendar-form" class="settings-form mt-16" novalidate>
+      <h3 class="drawer-subtitle" id="calendar-form-title">Adicionar data</h3>
+      <div class="form-grid">
+        <div><label for="settings-calendar-date" class="field-label">Data</label>
+          <input id="settings-calendar-date" name="date" class="login-input" type="date" required></div>
+        <div><label for="settings-calendar-status" class="field-label">Operação</label>
+          <select id="settings-calendar-status" name="status" class="login-input"><option value="closed">Fechado</option><option value="open">Aberto</option></select></div>
+        <div class="form-grid-wide"><label for="settings-calendar-description" class="field-label">Motivo</label>
+          <input id="settings-calendar-description" name="description" class="login-input" maxlength="200"></div>
+      </div>
+      <div class="form-error" data-form-error role="alert"></div>
+      <div class="settings-actions">
+        <button class="btn-primary" type="submit">Salvar data</button>
+        <button type="button" class="btn-secondary" data-calendar-cancel hidden>Cancelar edição</button>
+      </div>
     </form>`);
-  watchForm(document.getElementById('settings-calendar-form')).addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const message = document.getElementById('settings-calendar-message');
-    try {
-      await api(`/api/companies/${APP.company}/settings/calendar`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          date: document.getElementById('settings-calendar-date').value,
-          status: document.getElementById('settings-calendar-status').value,
-          description: document.getElementById('settings-calendar-description').value.trim(),
-          expected_version: null,
-        }),
-      });
-      clearDirty();
-      await renderCalendarSettings();
-    } catch (error) {
-      message.className = 'sim-status error';
-      message.textContent = error.message;
-    }
-  });
+  const form = document.getElementById('settings-calendar-form');
+  const dateInputEl = document.getElementById('settings-calendar-date');
+  const cancel = form.querySelector('[data-calendar-cancel]');
+  let editing = null;
+  const stopEditing = () => {
+    editing = null;
+    form.reset();
+    dateInputEl.readOnly = false;
+    cancel.hidden = true;
+    document.getElementById('calendar-form-title').textContent = 'Adicionar data';
+  };
+  bindForm(form, (values) => calendarRequest(values, editing), () => renderCalendarSettings());
+  cancel.addEventListener('click', () => { stopEditing(); clearDirty(); });
+  const byDate = Object.fromEntries(entries.map((entry) => [entry.date, entry]));
+  document.querySelectorAll('[data-calendar-edit]').forEach((button) => button.addEventListener('click', () => {
+    editing = byDate[button.dataset.calendarEdit];
+    dateInputEl.value = editing.date;
+    dateInputEl.readOnly = true;  // the date identifies the exception; remove and add to move it
+    document.getElementById('settings-calendar-status').value = editing.status;
+    document.getElementById('settings-calendar-description').value = editing.description || '';
+    document.getElementById('calendar-form-title').textContent = `Editar ${dateBR(editing.date)}`;
+    cancel.hidden = false;
+    document.getElementById('settings-calendar-status').focus();
+  }));
+  document.querySelectorAll('[data-calendar-remove]').forEach((button) => button.addEventListener('click', () => {
+    const entry = byDate[button.dataset.calendarRemove];
+    const drawer = openDrawer({
+      title: 'Remover data do calendário', trigger: button,
+      body: `<form class="drawer-form" novalidate>
+        ${summaryList([['Data', dateBR(entry.date)], ['Operação', entry.status === 'closed' ? 'Fechado' : 'Aberto'], ['Motivo', esc(entry.description || '—')]])}
+        <div class="story-box">Efeito: a data volta a seguir o horário normal da loja. As demais datas não mudam.</div>
+        <div class="form-error" data-form-error role="alert"></div>
+        <div class="btn-row drawer-actions">
+          <button type="submit" class="btn-primary btn-wide">Remover data</button>
+          <button type="button" class="btn-secondary" data-drawer-close>Voltar</button>
+        </div>
+      </form>`,
+    });
+    const confirmForm = drawer.dialog.querySelector('form');
+    const ui = formUiFor(confirmForm);
+    let busy = false;
+    confirmForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (busy) return;
+      busy = true;
+      ui.setBusy(true);
+      try {
+        await api(calendarDeletePath(entry), {method: 'DELETE'});
+        drawer.close();
+        renderCalendarSettings();
+      } catch (e) {
+        ui.showError(e.message, []);
+      } finally {
+        busy = false;
+        ui.setBusy(false);
+      }
+    });
+  }));
 }
 
 function renderPlannedSettings(section) {
@@ -531,4 +708,103 @@ function refreshSyncPanel() {
   const wasOpen = !!(details && details.open);
   panel.innerHTML = syncPanelHtml(APP.status);
   if (wasOpen) panel.querySelector('details').open = true;
+}
+
+/* ---------------------------------------------------------------- Categorias e favorecidos */
+
+var CATALOG_NATURE_LABELS = {
+  operating_expense: 'Despesa operacional', tax_expense: 'Impostos', financial_expense: 'Despesa financeira',
+  cost_of_goods: 'Custo de mercadoria', profit_distribution: 'Distribuição de lucros', financing_inflow: 'Entrada de financiamento',
+  loan_principal: 'Amortização de principal', transfer: 'Transferência', revenue: 'Receita',
+};
+
+async function renderCatalogSettings(token) {
+  token = token || beginPage();
+  const base = `/api/companies/${APP.company}/finance`;
+  const [categories, counterparties] = await Promise.all([
+    api(`${base}/accounts?include_archived=true`),
+    api(`${base}/counterparties`),
+  ]);
+  if (!APP.pageState.isCurrent(token)) return;
+  const categoryRows = categories.map((c) => `
+    <tr>
+      <td>${esc(c.name)}<div class="muted">${esc(c.code)}</div></td>
+      <td>${esc(CATALOG_NATURE_LABELS[c.nature] || c.nature)}</td>
+      <td>${c.archived ? '<span class="badge-muted">Arquivada</span>' : '<span class="badge-success">Ativa</span>'}</td>
+      <td><div class="row-actions">
+        <button type="button" class="btn-secondary" data-category-rename="${esc(c.id)}" aria-label="Renomear ${esc(c.name)}">Renomear</button>
+        ${c.system_key ? '<span class="muted">Padrão do sistema</span>'
+          : `<button type="button" class="btn-secondary" data-category-archive="${esc(c.id)}" aria-label="${c.archived ? 'Reativar' : 'Arquivar'} ${esc(c.name)}">${c.archived ? 'Reativar' : 'Arquivar'}</button>`}
+      </div></td>
+    </tr>`).join('');
+  const counterpartyRows = counterparties.map((c) => `
+    <tr>
+      <td>${esc(c.name)}</td>
+      <td>${esc(COUNTERPARTY_KIND_LABELS[c.kind] || c.kind)}</td>
+      <td>${esc(c.document || '—')}</td>
+      <td><div class="row-actions">
+        <button type="button" class="btn-secondary" data-counterparty-rename="${esc(c.id)}" aria-label="Renomear ${esc(c.name)}">Renomear</button>
+        <button type="button" class="btn-secondary" data-counterparty-archive="${esc(c.id)}" aria-label="Arquivar ${esc(c.name)}">Arquivar</button>
+      </div></td>
+    </tr>`).join('');
+  const natureOptions = ['operating_expense', 'tax_expense', 'financial_expense']
+    .map((value) => ({value, label: CATALOG_NATURE_LABELS[value]}));
+  const kindOptions = Object.entries(COUNTERPARTY_KIND_LABELS).map(([value, label]) => ({value, label}));
+
+  document.getElementById('content').innerHTML = settingsShell('cadastros', `
+    <section aria-labelledby="catalog-categories-title">
+      <h2 id="catalog-categories-title">Categorias da despesa</h2>
+      <p class="field-help">Arquivar tira a categoria de novos lançamentos; relatórios e lançamentos antigos a mantêm. Categorias padrão só podem ser renomeadas.</p>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Categoria</th><th>Natureza</th><th>Status</th><th>Ações</th></tr></thead>
+        <tbody>${categoryRows || '<tr><td colspan="4">Nenhuma categoria.</td></tr>'}</tbody>
+      </table></div>
+      <form id="catalog-category-form" class="settings-form" novalidate>
+        <h3 class="drawer-subtitle">Nova categoria</h3>
+        <div class="form-grid">
+          ${formField('name', 'Nome', textInput('', 160))}
+          ${formField('nature', 'Natureza', selectControl(natureOptions, 'operating_expense'))}
+        </div>
+        <div class="form-error" data-form-error role="alert"></div>
+        <div class="settings-actions"><button class="btn-primary" type="submit">Adicionar categoria</button></div>
+      </form>
+    </section>
+    <section class="settings-block" aria-labelledby="catalog-counterparties-title">
+      <h2 id="catalog-counterparties-title">Fornecedores e favorecidos</h2>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Nome</th><th>Tipo</th><th>Documento</th><th>Ações</th></tr></thead>
+        <tbody>${counterpartyRows || '<tr><td colspan="4">Nenhum favorecido cadastrado.</td></tr>'}</tbody>
+      </table></div>
+      <form id="catalog-counterparty-form" class="settings-form" novalidate>
+        <h3 class="drawer-subtitle">Novo favorecido</h3>
+        <div class="form-grid">
+          ${formField('name', 'Nome', textInput('', 180))}
+          ${formField('kind', 'Tipo', selectControl(kindOptions, 'supplier'))}
+          ${formField('document', 'CPF ou CNPJ (opcional)', textInput('', 30))}
+        </div>
+        <div class="form-error" data-form-error role="alert"></div>
+        <div class="settings-actions"><button class="btn-primary" type="submit">Adicionar favorecido</button></div>
+      </form>
+    </section>`);
+
+  const refresh = () => renderCatalogSettings();
+  bindForm(document.getElementById('catalog-category-form'), (values) => {
+    const name = String(values.name || '').trim();
+    if (!name) return {errors: {name: 'Informe o nome da categoria.'}};
+    return {method: 'POST', path: `${base}/accounts`, body: {name, nature: values.nature}};
+  }, refresh);
+  bindForm(document.getElementById('catalog-counterparty-form'), (values) => buildCounterpartyRequest(values), refresh);
+
+  const categoriesById = Object.fromEntries(categories.map((c) => [String(c.id), c]));
+  const counterpartiesById = Object.fromEntries(counterparties.map((c) => [String(c.id), c]));
+  document.querySelectorAll('[data-category-rename]').forEach((button) => button.addEventListener('click', () =>
+    openRenameForm('category', categoriesById[button.dataset.categoryRename], {trigger: button, onSaved: refresh})));
+  document.querySelectorAll('[data-category-archive]').forEach((button) => button.addEventListener('click', () => {
+    const category = categoriesById[button.dataset.categoryArchive];
+    openArchiveForm('category', category, !category.archived, {trigger: button, onSaved: refresh});
+  }));
+  document.querySelectorAll('[data-counterparty-rename]').forEach((button) => button.addEventListener('click', () =>
+    openRenameForm('counterparty', counterpartiesById[button.dataset.counterpartyRename], {trigger: button, onSaved: refresh})));
+  document.querySelectorAll('[data-counterparty-archive]').forEach((button) => button.addEventListener('click', () =>
+    openArchiveForm('counterparty', counterpartiesById[button.dataset.counterpartyArchive], true, {trigger: button, onSaved: refresh})));
 }
