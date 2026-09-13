@@ -80,10 +80,15 @@ async function api(path, opts) {
     throw new Error('unauthenticated');
   }
   if (!res.ok) {
-    let detail = 'Erro ' + res.status;
-    try { detail = (await res.json()).detail || detail; } catch (e) {}
-    const err = new Error(detail);
+    // detail is either a plain message or the shared {code, message, fields}
+    // contract; callers always get a readable message plus the flagged fields.
+    let detail = null;
+    try { detail = (await res.json()).detail; } catch (e) {}
+    const message = typeof detail === 'string' ? detail : (detail && detail.message);
+    const err = new Error(message || 'Erro ' + res.status);
     err.status = res.status;
+    err.code = detail && typeof detail === 'object' ? detail.code : undefined;
+    err.fields = detail && Array.isArray(detail.fields) ? detail.fields : [];
     throw err;
   }
   if (res.status === 204) return null;
@@ -170,6 +175,7 @@ function boot() {
   document.getElementById('forgot-password-link').addEventListener('click', showResetPassword);
   document.getElementById('back-to-login-link').addEventListener('click', showLoginForm);
   document.getElementById('custo-fixo-input').addEventListener('change', updateCustoFixo);
+  if (typeof initProfile === 'function') initProfile();
   document.querySelectorAll('img[data-fallback]').forEach((img) => {
     img.addEventListener('error', () => img.classList.add('hidden'));
   });

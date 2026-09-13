@@ -29,6 +29,7 @@ from .routes.loans import router as loans_router
 from .routes.obligations import router as obligations_router
 from .routes.open_finance import router as open_finance_router
 from .routes.products import router as products_router
+from .routes.profile import router as profile_router
 from .routes.receivables import router as receivables_router
 from .routes.replenishment import router as replenishment_router
 from .routes.reconciliation import router as reconciliation_router
@@ -76,6 +77,7 @@ async def lifespan(app):
 
 app=FastAPI(title='Mercado duBairro',version='3.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None,default_response_class=BigIntSafeJSONResponse)
 app.include_router(users_router)
+app.include_router(profile_router)
 app.include_router(settings_router)
 app.include_router(finance_accounts_router)
 app.include_router(financial_entries_router)
@@ -142,7 +144,7 @@ class Login(BaseModel):
 @app.post('/api/login')
 def login(body: Login,request:Request,response:Response):
     raw=security.login(request,body.password,body.email)
-    response.set_cookie(security.COOKIE,raw,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=43200)
+    security.set_session_cookie(response,request,raw)
     return {'csrf':security.csrf(raw)}
 
 class PasswordReset(BaseModel):

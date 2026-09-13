@@ -93,7 +93,9 @@
 
         <div class="sidebar-footer">
             <span id="sidebar-user"></span><br>
-            <button class="btn-secondary footer-btn w-full mt-8" data-logout>Sair</button>
+            <button type="button" class="btn-secondary footer-btn w-full mt-8" data-profile-open="profile">Minha conta</button>
+            <button type="button" class="btn-link footer-link" data-profile-open="password">Alterar senha</button>
+            <button type="button" class="btn-secondary footer-btn w-full mt-8" data-logout>Sair</button>
             <div class="mt-8">Mercado duBairro &copy; 2026</div>
         </div>
     </nav>
@@ -118,6 +120,60 @@
     </div>
 </div>
 
+<!-- Minha conta (web/assets/profile.js): native dialog = focus contained, Escape closes, background inert. -->
+<dialog id="profile-dialog" class="app-dialog" aria-labelledby="profile-dialog-title">
+    <div class="dialog-header">
+        <h2 id="profile-dialog-title">Minha conta</h2>
+        <button type="button" class="dialog-close" data-profile-close aria-label="Fechar Minha conta"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg></button>
+    </div>
+    <div id="profile-load-error" class="form-error" role="alert"></div>
+
+    <form id="profile-form" class="dialog-section" novalidate>
+        <h3>Dados pessoais</h3>
+        <label for="profile-name" class="field-label">Nome</label>
+        <input id="profile-name" class="login-input" maxlength="120" autocomplete="name" required>
+        <label for="profile-email" class="field-label">E-mail</label>
+        <input id="profile-email" class="login-input" type="email" maxlength="254" autocomplete="username" required aria-describedby="profile-email-help">
+        <p id="profile-email-help" class="field-help">Usado para entrar. Não há confirmação por e-mail nesta versão: confira antes de salvar.</p>
+        <div id="profile-email-password-group" hidden>
+            <label for="profile-email-password" class="field-label">Senha atual (para trocar o e-mail)</label>
+            <input id="profile-email-password" class="login-input" type="password" maxlength="200" autocomplete="current-password">
+        </div>
+        <div id="profile-error" class="form-error" role="alert"></div>
+        <div id="profile-success" class="form-success" role="status" aria-live="polite"></div>
+        <div class="btn-row">
+            <button type="submit" id="profile-submit" class="btn-primary btn-wide">Salvar dados</button>
+        </div>
+    </form>
+
+    <form id="profile-password-form" class="dialog-section" novalidate>
+        <h3>Alterar senha</h3>
+        <label for="profile-current-password" class="field-label">Senha atual</label>
+        <div class="password-field">
+            <input id="profile-current-password" class="login-input" type="password" maxlength="200" autocomplete="current-password" required>
+            <button type="button" class="btn-secondary" data-password-toggle data-target="profile-current-password" aria-pressed="false" aria-label="Mostrar senha atual">Mostrar</button>
+        </div>
+        <label for="profile-new-password" class="field-label">Nova senha</label>
+        <div class="password-field">
+            <input id="profile-new-password" class="login-input" type="password" minlength="8" maxlength="200" autocomplete="new-password" required aria-describedby="profile-password-rules">
+            <button type="button" class="btn-secondary" data-password-toggle data-target="profile-new-password" aria-pressed="false" aria-label="Mostrar nova senha">Mostrar</button>
+        </div>
+        <p id="profile-password-rules" class="field-help">Entre 8 e 200 caracteres. Pode usar o gerenciador de senhas.</p>
+        <label for="profile-confirm-password" class="field-label">Confirmar nova senha</label>
+        <div class="password-field">
+            <input id="profile-confirm-password" class="login-input" type="password" minlength="8" maxlength="200" autocomplete="new-password" required>
+            <button type="button" class="btn-secondary" data-password-toggle data-target="profile-confirm-password" aria-pressed="false" aria-label="Mostrar confirmação da senha">Mostrar</button>
+        </div>
+        <p class="field-help">Ao trocar a senha, esta sessão continua ativa e as demais são encerradas.</p>
+        <div id="profile-password-error" class="form-error" role="alert"></div>
+        <div id="profile-password-success" class="form-success" role="status" aria-live="polite"></div>
+        <div class="btn-row">
+            <button type="submit" id="profile-password-submit" class="btn-primary btn-wide">Alterar senha</button>
+            <button type="button" class="btn-secondary" data-profile-close>Fechar</button>
+        </div>
+    </form>
+</dialog>
+
 <!-- Lucide icon paths (ISC license), inlined by web/assets/icons.js — see assets/vendor/lucide/README.md -->
 <script src="assets/icons.js?v=20260912-ux8"></script>
 <script src="assets/charts.js?v=20260912-ux8"></script>
@@ -136,6 +192,7 @@
 <script src="assets/receivables.js?v=20260912-recv1"></script>
 <script src="assets/product-detail.js?v=20260912-a4"></script>
 <script src="assets/actions.js?v=20260912-a4"></script>
-<script src="assets/app.js?v=20260912-a4"></script>
+<script src="assets/profile.js?v=20260913-c1"></script>
+<script src="assets/app.js?v=20260913-c1"></script>
 </body>
 </html>

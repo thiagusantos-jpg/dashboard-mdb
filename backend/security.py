@@ -12,6 +12,7 @@ from . import settings, database as db, identity
 from fastapi import HTTPException, Request
 
 COOKIE='mdb_session'
+SESSION_SECONDS=43200
 _lock=threading.Lock()
 _attempts={}
 
@@ -105,11 +106,24 @@ def login(request, password, email: Optional[str] = None):
     user=identity.verify_credentials(email or 'admin@mercadodubairro.local',password)
     if user is None:
         raise HTTPException(401,'E-mail ou senha incorretos.')
-    raw=secrets.token_urlsafe(32)
     with db.connection() as conn:
         conn.execute('DELETE FROM sessions WHERE expires<?',(time.time(),))
-        conn.execute(
-            'INSERT INTO sessions(hash,expires,user_id) VALUES(?,?,?)',
-            (fingerprint(raw),time.time()+43200,user['id']),
-        )
+        raw=issue_session(conn,user['id'])
     return raw
+
+def issue_session(conn,user_id,*,revoke_others=False):
+    """New session token inside the caller's transaction. With revoke_others,
+    every earlier session of the user dies in that same transaction, so a
+    credential change can never leave an old session alive nor sign the
+    current browser out."""
+    raw=secrets.token_urlsafe(32)
+    if revoke_others:
+        conn.execute('DELETE FROM sessions WHERE user_id=?',(user_id,))
+    conn.execute(
+        'INSERT INTO sessions(hash,expires,user_id) VALUES(?,?,?)',
+        (fingerprint(raw),time.time()+SESSION_SECONDS,user_id),
+    )
+    return raw
+
+def set_session_cookie(response,request,raw):
+    response.set_cookie(COOKIE,raw,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=SESSION_SECONDS)
