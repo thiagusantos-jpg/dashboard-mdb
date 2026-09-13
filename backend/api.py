@@ -204,10 +204,11 @@ def pct_change(new,old):
 def status(company:int):
     authorized_company(company)
     periods=db.periods(company)
-    catalogs={}
-    for r in ['products','categories','stock','prices']:
-        d=db.dataset(company,r)
-        catalogs[r]={'count':len(d['payload']),'updated_at':d['updated_at']} if d else None
+    # Count and timestamp only: this endpoint is polled every 60s by every open tab,
+    # and reading each catalog's payload just to len() it moved megabytes per poll.
+    names=['products','categories','stock','prices']
+    meta=db.catalog_meta(company,names)
+    catalogs={r:meta.get(r) for r in names}
     return {'jobs':db.jobs(company),'periods':periods,'catalogs':catalogs,
             'interval_minutes':settings.SYNC_SECONDS//60,'source':'Mobne · vendas PDV'}
 
