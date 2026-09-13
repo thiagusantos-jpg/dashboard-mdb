@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import socket
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -11,6 +12,35 @@ PG = bool(settings.DATABASE_URL)
 if PG:
     import psycopg
     from psycopg.rows import dict_row
+
+
+def _pg_hostaddr(dsn: str) -> str | None:
+    """Resolve the DSN's host to an IPv4 address for libpq's `hostaddr`
+    parameter, bypassing the OS resolver's default AAAA-first ordering.
+    Vercel's serverless runtime has no outbound IPv6 route; Neon's pooler
+    hostname (like many providers fronted by an AWS NLB) publishes both A
+    and AAAA records, so a plain psycopg.connect(dsn) picks the IPv6
+    address and fails with "Cannot assign requested address" on every
+    invocation (verified live via Vercel's runtime error logs). Passing
+    `hostaddr` alongside the DSN's own `host` still lets libpq use `host`
+    for TLS SNI/certificate verification and SCRAM channel binding — those
+    depend on the server's certificate, not on which IP address the TCP
+    connection actually dials — so only the connection's destination
+    changes, not its identity checks.
+    Returns None (falls back to psycopg's own resolution) if the DSN names
+    no single resolvable host, already pins a hostaddr itself, or has no
+    IPv4 address at all.
+    """
+    info = psycopg.conninfo.conninfo_to_dict(dsn)
+    host = info.get("host")
+    if not host or "," in host or info.get("hostaddr"):
+        return None
+    port = int(str(info.get("port") or 5432).split(",")[0])
+    try:
+        return socket.getaddrinfo(host, port, family=socket.AF_INET, proto=socket.IPPROTO_TCP)[0][4][0]
+    except OSError:
+        return None
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -80,7 +110,9 @@ def connection(path=None, snapshot=False):
       same guarantee as the SQLite path above.
     """
     if PG:
-        conn = psycopg.connect(settings.DATABASE_URL, row_factory=dict_row)
+        hostaddr = _pg_hostaddr(settings.DATABASE_URL)
+        kwargs = {"hostaddr": hostaddr} if hostaddr else {}
+        conn = psycopg.connect(settings.DATABASE_URL, row_factory=dict_row, **kwargs)
         if snapshot:
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         db = _PGConn(conn)
