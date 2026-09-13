@@ -298,17 +298,20 @@ def test_injected_failure_rolls_back_everything_then_retry_succeeds(payments_db)
 
 def test_reconciled_payment_cannot_be_reversed_until_undone(payments_db):
     bank = bank_account()
-    # Due date close to paid_at so reconciliation.suggest's +-5 day window
-    # around the cash event's occurred_at actually finds this entry as a
-    # candidate.
+    # Anchored to "today" (not a hardcoded past date) so the final "open"
+    # assertion below doesn't flip to "overdue" once real time moves past
+    # whatever date this was written on — due_date stays == paid_at, which
+    # is what reconciliation.suggest's +-5 day window around the cash
+    # event's occurred_at actually needs to find this entry as a candidate.
+    today = date.today()
     account = accounts.account_by_key(COMPANY, "rent")
     entry = create_entry(EntryCommand(
         company_id=COMPANY, account_id=account["id"], amount_cents=40_000,
-        competence="2026-09", due_date=date(2026, 9, 12), source="manual",
+        competence=today.isoformat()[:7], due_date=today, source="manual",
         external_id=None, description="Aluguel",
     ))
     paid = record_payment(
-        1, "entry", entry["id"], amount_cents=40_000, paid_at=date(2026, 9, 12),
+        1, "entry", entry["id"], amount_cents=40_000, paid_at=today,
         expected_version=1, idempotency_key="pay-1", cash_account_id=bank["id"],
     )
     cash_event_id = int(paid["cash_event_id"])
@@ -318,14 +321,14 @@ def test_reconciled_payment_cannot_be_reversed_until_undone(payments_db):
     with pytest.raises(PaymentConflictError):
         reverse_payment(
             1, _payment_id_int(paid["payment_id"]), reason="Tentando estornar conciliado",
-            reversed_at=date(2026, 9, 12), expected_version=2, idempotency_key="undo-1",
+            reversed_at=today, expected_version=2, idempotency_key="undo-1",
         )
 
     reconciliation.undo(group["id"], reason="Conciliação errada")
 
     result = reverse_payment(
         1, _payment_id_int(paid["payment_id"]), reason="Agora pode",
-        reversed_at=date(2026, 9, 12), expected_version=2, idempotency_key="undo-2",
+        reversed_at=today, expected_version=2, idempotency_key="undo-2",
     )
     assert result["obligation"]["status"] == "open"
 
