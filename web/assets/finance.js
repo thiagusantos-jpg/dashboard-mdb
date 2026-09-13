@@ -27,6 +27,9 @@ const FINANCE_STATUS_BADGES = {
   overdue: 'badge-error', cancelled: 'badge-muted', reversed: 'badge-muted',
 };
 
+// Financeiro competence (navigation.js): any calendar month, not only synced sales months.
+function financeCompetence() { return APP.financePeriod || APP.period; }
+
 function financePeriodLabel(period) {
   const [y, m] = (period || '').split('-').map(Number);
   return m ? `${MONTHS[m - 1]}/${y}` : '—';
@@ -91,12 +94,12 @@ function renderFinancePage(token) {
 
 async function renderFinanceiro(token) {
   token = token || beginPage();
-  const title = `${icon('gauge', {class: 'title-icon'})}Financeiro`;
+  const title = `${icon('gauge', {class: 'title-icon'})}Resultado gerencial`;
   const subtitle = 'Resultado gerencial da competência: receita, custos, despesas e distribuições.';
   financeLoading(title, subtitle, 'Carregando resultado gerencial');
   let result;
   try {
-    result = await api(`/api/companies/${APP.company}/finance/management-result?period=${APP.period}`);
+    result = await api(`/api/companies/${APP.company}/finance/management-result?period=${financeCompetence()}`);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     return financeError(title, subtitle, e, () => renderFinanceiro());
@@ -125,7 +128,7 @@ async function renderFinanceiro(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(APP.period)}</span>
+    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(financeCompetence())}</span>
     <hr class="divider">
     <div class="kpi-grid kpi-grid-4">${kpis}</div>
     <h2 class="section-header">Contas — Realizado vs. Orçado</h2>
@@ -159,7 +162,7 @@ function expenseRowActions(entry) {
 
 async function renderDespesas(token) {
   token = token || beginPage();
-  const title = `${icon('dollar-sign', {class: 'title-icon'})}Custos e Despesas`;
+  const title = `${icon('dollar-sign', {class: 'title-icon'})}Custos e despesas`;
   const subtitle = 'Lançamentos de despesas por competência.';
   financeLoading(title, subtitle, 'Carregando despesas');
   const base = `/api/companies/${APP.company}/finance`;
@@ -168,7 +171,7 @@ async function renderDespesas(token) {
     [accounts, counterparties, entries] = await Promise.all([
       api(`${base}/accounts`),
       api(`${base}/counterparties`),
-      api(`${base}/entries?competence=${APP.period}`),
+      api(`${base}/entries?competence=${financeCompetence()}`),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -199,13 +202,13 @@ async function renderDespesas(token) {
     .map(([value, f]) => `<option value="${value}"${value === filters.status ? ' selected' : ''}>${f.label}</option>`).join('');
   const emptyMessage = expenseEntries.length
     ? '<div class="empty-state">Nenhum lançamento com este filtro.</div>'
-    : `<div class="empty-state">Nenhuma despesa lançada em ${financePeriodLabel(APP.period)}.
+    : `<div class="empty-state">Nenhuma despesa lançada em ${financePeriodLabel(financeCompetence())}.
         <div><button type="button" class="btn-primary" data-expense-new>Lançar primeira despesa</button></div></div>`;
 
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(APP.period)}</span>
+    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(financeCompetence())}</span>
     <div class="kpi-grid kpi-grid-3 mt-16">
       ${kpi('Realizado na competência', money(realized))}
       ${kpi('Previsto a confirmar', money(forecast))}
@@ -277,15 +280,20 @@ function obligationRow(item) {
 
 async function renderContasPagar(token) {
   token = token || beginPage();
-  const title = `${icon('calendar', {class: 'title-icon'})}Contas a Pagar`;
+  const title = `${icon('calendar', {class: 'title-icon'})}Contas a pagar`;
   const subtitle = 'Despesas e parcelas de empréstimo em aberto, vencidas ou parcialmente pagas, em qualquer competência.';
   const routeKind = APP.routeParams && APP.routeParams.get('tipo') === 'emprestimo' ? 'loan_installment' : '';
   const filters = financeFilters('contas-pagar', {kind: routeKind, status: '', q: '', due_from: '', due_to: ''});
   if (routeKind) filters.kind = routeKind;
   financeLoading(title, subtitle, 'Carregando contas a pagar');
-  let page;
+  let page, positions = null;
   try {
-    page = await api(obligationQuery(filters));
+    // The loan filter also shows the contracts (ficha, renegotiation), which
+    // used to live on their own Empréstimos page.
+    [page, positions] = await Promise.all([
+      api(obligationQuery(filters)),
+      filters.kind === 'loan_installment' ? api(`/api/companies/${APP.company}/finance/loans`) : Promise.resolve(null),
+    ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
     return financeError(title, subtitle, e, () => renderContasPagar());
@@ -302,6 +310,10 @@ async function renderContasPagar(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
+    <div class="btn-row">
+      <button type="button" class="btn-primary btn-wide" data-expense-new>Nova despesa</button>
+      <button type="button" class="btn-secondary" data-loan-new>Novo empréstimo</button>
+    </div>
     <div class="kpi-grid kpi-grid-3 mt-16">
       ${kpi('Saldo em aberto', money(page.open_cents), hasFilter ? 'no filtro atual' : null)}
       ${kpi('Obrigações', page.total)}
@@ -324,7 +336,8 @@ async function renderContasPagar(token) {
         ${hasFilter ? '<button type="button" class="btn-secondary" data-obligations-clear>Limpar filtros</button>' : ''}
       </div>
     </form>
-    <div id="obligations-list"></div>`;
+    <div id="obligations-list"></div>
+    ${positions ? `<h2 class="section-header">Contratos de empréstimo</h2>${loanContractsHtml(positions)}` : ''}`;
 
   const refresh = () => refreshKeepingScroll(() => renderContasPagar());
   const list = document.getElementById('obligations-list');
@@ -367,6 +380,12 @@ async function renderContasPagar(token) {
     }
   };
   paint();
+  const content = document.getElementById('content');
+  content.querySelectorAll('[data-expense-new]').forEach((button) =>
+    button.addEventListener('click', () => openExpenseForm(null, {trigger: button, onSaved: refresh})));
+  content.querySelectorAll('[data-loan-new]').forEach((button) =>
+    button.addEventListener('click', () => openLoanForm(null, {trigger: button, onSaved: refresh})));
+  if (positions) bindLoanCards(content, positions, refresh);
 
   document.getElementById('obligations-filter').addEventListener('submit', (ev) => {
     ev.preventDefault();

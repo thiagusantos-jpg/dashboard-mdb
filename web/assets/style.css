@@ -814,3 +814,30 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
     .summary-list, .drawer-form .form-grid { grid-template-columns: 1fr; }
     .login-input, .search-input { min-height: 44px; font-size: 16px; }
 }
+
+/* ============================================================
+   MODULES (navigation.js) — Análises / Financeiro switcher
+   ============================================================ */
+.module-switch {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin: 4px 0 12px;
+    background: rgba(255, 255, 255, 0.06); border-radius: 10px;
+}
+.module-link {
+    display: flex; align-items: center; justify-content: center; min-height: 44px; border-radius: 8px;
+    color: var(--sidebar-text); font-size: 14px; font-weight: 600; text-decoration: none;
+    transition: background-color 0.2s, color 0.2s;
+}
+.module-link:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.module-link[aria-current="true"] { background: var(--yellow); color: var(--dark); }
+.module-nav[hidden] { display: none; }
+.sidebar-footer .footer-nav { margin: 8px 0 0; font-size: 13px; text-align: center; }
+.topbar-module { font-size: 12px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); margin-right: 8px; }
+.period-control[hidden] { display: none; }
+.status-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.status-link:hover { color: var(--link); }
+.visually-hidden {
+    position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.sync-progress { margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.sync-progress progress { width: 100%; height: 10px; margin: 8px 0 4px; accent-color: var(--amber); }

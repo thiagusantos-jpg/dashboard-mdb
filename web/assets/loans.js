@@ -70,9 +70,7 @@ async function renderEmprestimos(token) {
   }
   if (!APP.pageState.isCurrent(token)) return;
   const totalOpen = positions.reduce((sum, p) => sum + (p.loan.status === 'active' ? p.principal_cents : 0), 0);
-  const cards = positions.map(loanCard).join('')
-    || `<div class="empty-state">Nenhum empréstimo cadastrado.
-         <div><button type="button" class="btn-primary" data-loan-new>Cadastrar empréstimo</button></div></div>`;
+  const cards = loanContractsHtml(positions);
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
@@ -84,9 +82,21 @@ async function renderEmprestimos(token) {
 
   const refresh = () => refreshKeepingScroll(() => renderEmprestimos());
   const content = document.getElementById('content');
-  const byId = Object.fromEntries(positions.map((p) => [String(p.loan.id), p]));
   content.querySelectorAll('[data-loan-new]').forEach((button) =>
     button.addEventListener('click', () => openLoanForm(null, {trigger: button, onSaved: refresh})));
+  bindLoanCards(content, positions, refresh);
+}
+
+function loanContractsHtml(positions) {
+  return positions.map(loanCard).join('')
+    || `<div class="empty-state">Nenhum empréstimo cadastrado.
+         <div><button type="button" class="btn-primary" data-loan-new>Cadastrar empréstimo</button></div></div>`;
+}
+
+// Edit, renegotiate and pay buttons of the contract cards; "new loan" buttons
+// are bound by the page that owns the toolbar.
+function bindLoanCards(content, positions, refresh) {
+  const byId = Object.fromEntries(positions.map((p) => [String(p.loan.id), p]));
   content.querySelectorAll('[data-loan-edit]').forEach((button) =>
     button.addEventListener('click', () => openLoanForm(byId[button.dataset.loanEdit], {trigger: button, onSaved: refresh})));
   content.querySelectorAll('[data-loan-renegotiate]').forEach((button) =>

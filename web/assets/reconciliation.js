@@ -13,14 +13,15 @@ const RECONCILIATION_STATUS_LABELS = {
 
 async function renderConciliacao(token) {
   token = token || beginPage();
-  const title = `${icon('circle-check', {class: 'title-icon'})}Conciliação`;
+  const title = `${icon('circle-check', {class: 'title-icon'})}Conciliação bancária`;
   const subtitle = 'Casa lançamentos de caixa com lançamentos financeiros — um crédito pode fechar várias vendas.';
   financeLoading(title, subtitle, 'Carregando conciliação');
-  let events, groups;
+  let events, groups, cashAccounts;
   try {
-    [events, groups] = await Promise.all([
+    [events, groups, cashAccounts] = await Promise.all([
       api(`/api/companies/${APP.company}/finance/cash-events`),
       api(`/api/companies/${APP.company}/finance/reconciliation`),
+      api(`/api/companies/${APP.company}/finance/cash-accounts`),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -31,11 +32,21 @@ async function renderConciliacao(token) {
   const linkedEventIds = new Set(
     groups.flatMap((g) => g.links.filter((l) => l.item_type === 'cash_event').map((l) => String(l.item_id)))
   );
-  const pending = events.filter((e) => !linkedEventIds.has(String(e.id)));
+  // Interval and account filters apply to the cash movements and to the groups anchored on them.
+  const filters = financeFilters('conciliacao', {account: '', from: '', to: ''});
+  const matches = (e) => (!filters.account || String(e.cash_account_id) === filters.account)
+    && (!filters.from || e.occurred_at >= filters.from) && (!filters.to || e.occurred_at <= filters.to);
+  const eventsById = Object.fromEntries(events.map((e) => [String(e.id), e]));
+  const pending = events.filter((e) => !linkedEventIds.has(String(e.id))).filter(matches);
+  const visibleGroups = groups.filter((g) => {
+    const anchor = g.links.find((l) => l.item_type === 'cash_event');
+    const event = anchor && eventsById[String(anchor.item_id)];
+    return !event || matches(event);
+  });
   const pendingOptions = pending.map((e) =>
     `<option value="${esc(e.id)}">${dateBR(e.occurred_at)} — ${esc(e.description)} — ${money(e.amount_cents)}</option>`).join('');
 
-  const groupRows = groups.map((g) => {
+  const groupRows = visibleGroups.map((g) => {
     const anchor = g.links.find((l) => l.item_type === 'cash_event');
     const entryLinks = g.links.filter((l) => l.item_type === 'financial_entry');
     const needsReview = g.status === 'suggested';
@@ -63,7 +74,20 @@ async function renderConciliacao(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <hr class="divider">
+    <form id="reconciliation-filter" class="page-toolbar">
+      <div class="filters">
+        <div><label class="field-label" for="reconciliation-account">Conta</label>
+          <select id="reconciliation-account" name="account" class="login-input">
+            <option value="">Todas as contas</option>
+            ${cashAccounts.map((a) => `<option value="${esc(a.id)}"${String(a.id) === filters.account ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}
+          </select></div>
+        <div><label class="field-label" for="reconciliation-from">De</label>
+          <input id="reconciliation-from" name="from" type="date" class="login-input" value="${esc(filters.from)}"></div>
+        <div><label class="field-label" for="reconciliation-to">Até</label>
+          <input id="reconciliation-to" name="to" type="date" class="login-input" value="${esc(filters.to)}"></div>
+      </div>
+      <button type="submit" class="btn-secondary">Filtrar</button>
+    </form>
     <div class="settings-block">
       <h2>Sugerir conciliação</h2>
       <form id="reconciliation-suggest-form" class="inline-form">
@@ -83,6 +107,12 @@ async function renderConciliacao(token) {
     </table></div>`;
 
   RECONCILIATION_STATE.groups = groups;
+  document.getElementById('reconciliation-filter').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    ['account', 'from', 'to'].forEach((key) => { filters[key] = form.elements.namedItem(key).value; });
+    renderConciliacao();
+  });
   const search = document.getElementById('reconciliation-search');
   const eventSelect = document.getElementById('reconciliation-event');
   search.addEventListener('input', () => {

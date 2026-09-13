@@ -10,9 +10,11 @@ test('loans navigation and page exist', () => {
   const app = fs.readFileSync(path.join(root, 'web/assets/app.js'), 'utf8');
   const loans = fs.readFileSync(path.join(root, 'web/assets/loans.js'), 'utf8');
 
-  assert.match(html, /data-page="emprestimos"/);
+  const nav = fs.readFileSync(path.join(root, 'web/assets/navigation.js'), 'utf8');
+  // Empréstimos lives inside Contas a pagar since task C3; the old route still resolves there.
   assert.match(html, /assets\/loans\.js/);
-  assert.match(app, /['"]emprestimos['"]/);
+  assert.match(nav, /emprestimos: \(\) => '#\/contas-pagar\?tipo=emprestimo'/);
+  assert.match(app, /renderFinancePage/);
   assert.match(loans, /finance\/loans/);
   assert.match(loans, /function renderEmprestimos/);
 });

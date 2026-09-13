@@ -224,11 +224,12 @@ def trigger_sync(company:int,body:SyncRequest):
     # already re-validates the id against the live Mobne company list before touching anything,
     # so this endpoint can safely bootstrap a brand-new database the same way the old local-only
     # CLI entrypoint (`python -m backend.sync --company ...`) always did.
-    job_id=db.create_job(company,body.mode)
-    if settings.IS_SERVERLESS:
-        # No background Worker is running here to pick the job off the queue.
+    job_id,created=db.claim_job(company,body.mode)
+    if settings.IS_SERVERLESS and created:
+        # No background Worker is running here to pick the job off the queue. An
+        # already-active job is followed, never run a second time on the same row.
         sync.run(company,body.mode,job_id=job_id)
-    return {'job_id':job_id}
+    return {'job_id':job_id,'already_running':not created}
 
 @app.get('/api/sync-jobs/{job_id}')
 def sync_job(job_id:int,auth=Depends(security.authenticate)):
@@ -249,9 +250,10 @@ def cron_sync(request:Request):
         raise HTTPException(401,'Não autorizado.')
     results=[]
     for c in db.companies():
-        job_id=db.create_job(c['id'],'recent')
-        sync.run(c['id'],'recent',job_id=job_id)
-        results.append(c['id'])
+        job_id,created=db.claim_job(c['id'],'recent')
+        if created:
+            sync.run(c['id'],'recent',job_id=job_id)
+            results.append(c['id'])
     return {'synced':results}
 
 class Config(BaseModel):

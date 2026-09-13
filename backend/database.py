@@ -364,24 +364,33 @@ def periods(company):
     with connection() as db:
         return [dict(r) for r in db.execute('SELECT period,updated_at,version,documents FROM datasets WHERE company=? AND resource=? ORDER BY period DESC', (company, 'sales'))]
 
-def create_job(company, mode):
+def claim_job(company, mode):
+    """(job_id, created). A company has at most one queued/running job
+    (one_active_job index): asking for another returns the active one with
+    created=False. Whoever executes runs itself (serverless trigger, cron) must
+    only do so when created is True — running an already-active job id again
+    makes two runs write the same progress row, which is how a finished job
+    ended up showing 9/6 with a stale "Cupons ... página" detail."""
     with connection() as db:
         if PG:
             try:
                 cur = db.execute('INSERT INTO jobs(company,mode,state,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING id',
                                  (company,mode,'queued',now(),now()))
-                return cur.fetchone()['id']
+                return cur.fetchone()['id'], True
             except Exception:
                 db.rollback()
                 row = db.execute("SELECT id FROM jobs WHERE company=? AND state IN ('queued','running')", (company,)).fetchone()
-                return row['id']
+                return row['id'], False
         try:
             cur = db.execute('INSERT INTO jobs(company,mode,state,created_at,updated_at) VALUES(?,?,?,?,?)',
                              (company,mode,'queued',now(),now()))
-            return cur.lastrowid
+            return cur.lastrowid, True
         except sqlite3.IntegrityError:
             row = db.execute("SELECT id FROM jobs WHERE company=? AND state IN ('queued','running')", (company,)).fetchone()
-            return row['id']
+            return row['id'], False
+
+def create_job(company, mode):
+    return claim_job(company, mode)[0]
 
 def update_job(job, **fields):
     allowed = {'state','detail','error','completed','total'}

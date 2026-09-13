@@ -180,7 +180,7 @@ function renderPrecos(data) {
     money(r.last_cost), pct1(r.md), pct1(r.mdu), `${r.erosao >= 0 ? '+' : ''}${dec2(r.erosao)} pts`]));
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('dollar-sign', 'Inteligência de Preços', 'Onde estou deixando dinheiro na mesa?', P)}
+    ${insightHeader('dollar-sign', 'Preços e margens', 'Onde estou deixando dinheiro na mesa?', P)}
     ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-3">
       ${kpi('Markdown Médio Ponderado', pct1(mdm), mdm == null ? 'Custo incompleto no período'
@@ -272,7 +272,7 @@ function renderMapa(data) {
   const byRevenue = (arr) => arr.slice().sort((a, b) => b.revenue - a.revenue);
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('map', 'Mapa de Produtos — Matriz de Rentabilidade', 'Quais produtos são estrelas e quais são peso morto?', P)}
+    ${insightHeader('map', 'Mapa de produtos', 'Quais produtos são estrelas e quais são peso morto?', P)}
     ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-4">
       ${kpi(`${icon('star')} Estrelas`, num(est.length), `${brl(lucro(est))} lucro`)}
@@ -372,7 +372,7 @@ function renderDiagnostico(data) {
   };
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('search', 'Diagnóstico de Faturamento', 'Menos clientes, menos gasto, ou mix mudou?', P)}
+    ${insightHeader('search', 'Desempenho de vendas', 'Menos clientes, menos gasto, ou mix mudou?', P)}
     <div class="kpi-grid kpi-grid-4">
       ${kpi('FATURAMENTO =', brl(fat), 'Cupons × Ticket Médio')}
       ${kpi('Nº Cupons', num(cup), vc == null ? 'Sem comparação' : `${deltaArrow(vc)} ${signedPct(vc)}${vsTxt}`, deltaClass(vc))}
@@ -499,7 +499,7 @@ function renderSazonalidade(data) {
   };
 
   document.getElementById('content').innerHTML = `
-    <div class="page-title">${icon('trending-up')} Sazonalidade e Tendências</div>
+    <div class="page-title">${icon('trending-up')} Sazonalidade e tendências</div>
     <div class="page-subtitle">Padrão de ${R} para planejar ${P.y}</div>
     <hr class="divider">
     ${refNote}
@@ -616,7 +616,7 @@ function renderVisao(data) {
     : `Sem ${nx.curto}/${String(nx.y - 1).slice(2)} para projetar pela sazonalidade — base = ritmo atual de ${P.label}.`;
 
   document.getElementById('content').innerHTML = `
-    <div class="page-title">${icon('sparkles')} Visão Futurista — Cenários e Projeções</div>
+    <div class="page-title">${icon('sparkles')} Projeções de vendas</div>
     <div class="page-subtitle">Baseado nos dados, o que esperar e como se preparar?</div>
     <span class="periodo-badge">${icon('calendar')} Base: ${P.nome}/${P.y}${P.partial ? ` · parcial até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}` : ''}</span>
     <hr class="divider">

@@ -6,17 +6,27 @@
 const CASHFLOW_KIND_LABELS = {bank: 'Conta bancária', payment: 'Maquininha/adquirente', cash: 'Dinheiro em caixa'};
 const CASHFLOW_CONFIDENCE_LABELS = {realized: 'Realizado', forecast: 'Previsto', simulated: 'Simulado'};
 
-function forecastWindow() {
-  const start = new Date().toISOString().slice(0, 10);
-  return {start, end: addMonthsISO(start, 3)};
+const CASHFLOW_HORIZONS = [30, 60, 90];
+
+function cashflowHorizon() {
+  const filters = financeFilters('fluxo-caixa', {horizon: 90});
+  return CASHFLOW_HORIZONS.includes(Number(filters.horizon)) ? Number(filters.horizon) : 90;
+}
+
+function forecastWindow(days) {
+  const start = todayISO();
+  const end = new Date(`${start}T00:00:00Z`);
+  end.setUTCDate(end.getUTCDate() + days);
+  return {start, end: end.toISOString().slice(0, 10)};
 }
 
 async function renderFluxoCaixa(token) {
   token = token || beginPage();
-  const title = `${icon('trending-up', {class: 'title-icon'})}Fluxo de Caixa`;
-  const subtitle = 'Contas, saldo consolidado e projeção de caixa realizada e prevista (90 dias).';
+  const title = `${icon('trending-up', {class: 'title-icon'})}Fluxo de caixa`;
+  const horizon = cashflowHorizon();
+  const subtitle = `Contas, saldo consolidado e projeção dos movimentos cadastrados para os próximos ${horizon} dias.`;
   financeLoading(title, subtitle, 'Carregando fluxo de caixa');
-  const {start, end} = forecastWindow();
+  const {start, end} = forecastWindow(horizon);
   let accounts, balance, forecastData;
   try {
     [accounts, balance, forecastData] = await Promise.all([
@@ -54,10 +64,15 @@ async function renderFluxoCaixa(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <hr class="divider">
+    <div class="page-toolbar">
+      <div class="filters">
+        <div><label class="field-label" for="cashflow-horizon">Horizonte da projeção</label>
+          <select id="cashflow-horizon" class="login-input">${CASHFLOW_HORIZONS.map((d) => `<option value="${d}"${d === horizon ? ' selected' : ''}>${d} dias</option>`).join('')}</select></div>
+      </div>
+    </div>
     <div class="kpi-grid kpi-grid-3">
       ${kpi('Saldo consolidado', money(balance.balance_cents))}
-      ${kpi('Ponto mais baixo projetado (90 dias)',
+      ${kpi(`Ponto mais baixo projetado (${horizon} dias)`,
         forecastData.lowest ? money(forecastData.lowest.balance_cents) : '—',
         forecastData.lowest ? `em ${dateBR(forecastData.lowest.date)}` : null,
         forecastData.lowest && forecastData.lowest.balance_cents < 0 ? 'kpi-negative' : null)}
@@ -104,12 +119,16 @@ async function renderFluxoCaixa(token) {
         </div>
       </form>
     </div>
-    <div class="section-header">Próximos 90 dias — realizado e previsto</div>
+    <h2 class="section-header">Próximos ${horizon} dias — realizado e previsto</h2>
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Data</th><th>Descrição</th><th>Valor</th><th>Origem</th></tr></thead>
       <tbody>${movementRows || '<tr><td colspan="4">Nenhuma movimentação prevista.</td></tr>'}</tbody>
     </table></div>`;
 
+  document.getElementById('cashflow-horizon').addEventListener('change', (ev) => {
+    financeFilters('fluxo-caixa', {horizon: 90}).horizon = Number(ev.target.value);
+    renderFluxoCaixa();
+  });
   watchForm(document.getElementById('cash-account-form')).addEventListener('submit', onCreateCashAccount);
   watchForm(document.getElementById('cash-event-form')).addEventListener('submit', onCreateCashEvent);
 }

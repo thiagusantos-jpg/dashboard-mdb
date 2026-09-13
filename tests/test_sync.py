@@ -180,3 +180,72 @@ def test_a_failing_backfill_does_not_mask_a_mobne_error(isolated_db, monkeypatch
     assert job['state'] == 'failed'
     assert 'Mobne' in job['error']
     assert 'boom' not in (job['error'] or '')
+
+
+# --- Job progress stays coherent (task C3) ----------------------------------
+
+
+def _clean_client():
+    return FakeClient({'2026-08': [raw_receipt(1, '2026-08-10')], '2026-09': [raw_receipt(2, '2026-09-10')]},
+                      {'2026-08': [raw_analysis(1, '2026-08-10')], '2026-09': [raw_analysis(2, '2026-09-10')]})
+
+
+def test_finished_job_reports_progress_within_total_and_a_final_message(isolated_db, monkeypatch):
+    monkeypatch.setattr(sync, 'datetime', _frozen_datetime('2026-09-15'))
+    job_id = sync.run(COMPANY, 'recent', client=_clean_client())
+
+    job = next(j for j in db.jobs(COMPANY) if j['id'] == job_id)
+    assert job['state'] == 'completed'
+    assert job['total'] > 0
+    assert job['completed'] == job['total']
+    assert job['detail'] == 'Sincronização concluída'
+
+
+def test_starting_a_sync_while_one_is_active_reuses_it_without_running_twice(isolated_db, monkeypatch):
+    db.initialize()
+    active_id, created = db.claim_job(COMPANY, 'recent')
+    assert created is True
+    again_id, created_again = db.claim_job(COMPANY, 'history')
+    assert again_id == active_id
+    assert created_again is False
+
+
+def test_serverless_trigger_does_not_start_a_second_run_on_an_active_job(isolated_db, monkeypatch):
+    from fastapi.testclient import TestClient
+    from backend import api, security, settings
+
+    monkeypatch.setattr(db, 'PG', False)
+    monkeypatch.setattr(security, 'access_password', lambda: 'bootstrap-password')
+    monkeypatch.setenv('MDB_DISABLE_WORKER', '1')
+    security._attempts.clear()
+    db.initialize()
+    with db.connection() as conn:
+        conn.execute("INSERT OR IGNORE INTO companies(id,name) VALUES(?, 'Loja Teste')", (COMPANY,))
+    active_id, _ = db.claim_job(COMPANY, 'recent')
+    runs = []
+    monkeypatch.setattr(sync, 'run', lambda *args, **kwargs: runs.append((args, kwargs)))
+    monkeypatch.setattr(settings, 'IS_SERVERLESS', True)
+
+    with TestClient(api.app) as client:
+        login = client.post('/api/login', json={'email': 'admin@loja.test', 'password': 'bootstrap-password'})
+        assert login.status_code == 200, login.text
+        client.headers['x-csrf-token'] = login.json()['csrf']
+        response = client.post(f'/api/companies/{COMPANY}/sync', json={'mode': 'recent'})
+
+    assert response.status_code == 202, response.text
+    assert response.json()['job_id'] == active_id
+    assert response.json()['already_running'] is True
+    assert runs == []
+
+
+def _frozen_datetime(day):
+    """sync.run reads the civil date from datetime.now(); pin it so 'recent'
+    always means the month before `day` and the month of `day`."""
+    from datetime import datetime as real_datetime
+
+    class Frozen(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromisoformat(day + 'T12:00:00').replace(tzinfo=tz)
+
+    return Frozen

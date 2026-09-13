@@ -14,6 +14,9 @@ const APP = {
   periods: [],       // [{period, updated_at, version, documents}], newest first
   period: null,
   page: 'resumo',
+  module: null,        // 'analises' | 'financeiro': last module shown; Configurações keeps it
+  moduleRoutes: null,  // last route of each module (navigation.js), restored by the switcher
+  financePeriod: null, // competence month of Financeiro pages, independent of synced sales months
   settingsSection: 'empresa',
   routeParams: new URLSearchParams(),  // ?query part of the #/página/período route (e.g. filtro=ruptura)
   pickerYear: null,   // year shown in the period popover (browsing it does not change the period)
@@ -176,6 +179,7 @@ function boot() {
   document.getElementById('back-to-login-link').addEventListener('click', showLoginForm);
   document.getElementById('custo-fixo-input').addEventListener('change', updateCustoFixo);
   if (typeof initProfile === 'function') initProfile();
+  APP.moduleRoutes = typeof createModuleRoutes === 'function' ? createModuleRoutes(safeSessionStorage()) : null;
   document.querySelectorAll('img[data-fallback]').forEach((img) => {
     img.addEventListener('error', () => img.classList.add('hidden'));
   });
@@ -255,7 +259,7 @@ function onDelegatedClick(ev) {
   const period = ev.target.closest('[data-period]');
   if (period) return selectPeriod(period.dataset.period);
   const sync = ev.target.closest('[data-sync]');
-  if (sync) return triggerSync(sync.dataset.sync);
+  if (sync) return triggerSync(sync.dataset.sync, sync);
   const createAction = ev.target.closest('[data-create-action]');
   if (createAction) return onCreateActionFromAlert({currentTarget: createAction});
   if (ev.target.closest('[data-logout]')) return logout();
@@ -378,6 +382,7 @@ async function onAuthenticated(session) {
     return;
   }
   APP.company = APP.companies[0].id;
+  if (!APP.financePeriod) APP.financePeriod = navCurrentMonth();
   await refreshStatus();
   onRouteChange();  // applies #/página/período from the URL (reload, favoritos), else the defaults
   // The automatic worker (backend/sync.py Worker) can finish a sync with nobody watching
@@ -419,7 +424,10 @@ async function backgroundRefresh() {
   } catch (e) {
     return;  // status indisponível: preserva o conteúdo já renderizado
   }
-  if (APP.page === 'sync') return renderSyncPage();
+  if (APP.page === 'configuracoes' && APP.settingsSection === 'integracoes') {
+    if (typeof refreshSyncPanel === 'function') refreshSyncPanel();
+    return;
+  }
   // Redraw only when the data changed — a blind redraw would wipe the Estoque search mid-typing.
   const info = APP.periods.find((p) => p.period === APP.period);
   if (APP.dashboard && !(info && info.version !== APP.dashboard.version)) return;
@@ -442,7 +450,7 @@ async function refreshStatus() {
       } catch (e) {
         return;  // uma leitura de status que falhou não apaga a página
       }
-      if (APP.page === 'sync') renderSyncPage();
+      if (APP.page === 'configuracoes' && APP.settingsSection === 'integracoes' && typeof refreshSyncPanel === 'function') refreshSyncPanel();
     }, 4000);
   } else if (!hasActiveJob && APP.pollTimer) {
     clearInterval(APP.pollTimer);
@@ -465,11 +473,18 @@ function buildPeriodSelector() {
   const current = document.getElementById('period-current');
   const status = document.getElementById('period-status');
   const steps = document.querySelectorAll('[data-period-step]');
+  // Análises filters by synced sales month; Financeiro competence pages by any
+  // calendar month; the other pages carry their own filters (see navigation.js).
+  const mode = navRules.mode(APP.page);
+  const control = document.getElementById('period-control');
+  if (control) control.hidden = mode === 'none';
+  if (mode === 'none') { status.innerHTML = syncStatusLink(); return; }
+  if (mode === 'competence') return buildCompetenceSelector(current, status, steps);
   if (!APP.periods.length) {
     current.textContent = 'Sem períodos';
     current.disabled = true;
     steps.forEach((b) => { b.disabled = true; });
-    status.textContent = 'Nenhum período sincronizado ainda.';
+    status.innerHTML = '<a href="#/configuracoes/integracoes" class="status-link">Nenhum período sincronizado ainda.</a>';
     return;
   }
   if (!APP.period || !APP.periods.some((p) => p.period === APP.period)) {
@@ -487,14 +502,38 @@ function buildPeriodSelector() {
     b.title = target ? periodLabel(target) : '';
   });
   const info = APP.periods.find((p) => p.period === APP.period);
-  status.textContent = !info ? '' : info.documents
-    ? `Dados atualizados em ${dt(info.updated_at)}` : 'Mobne não tem vendas registradas neste período';
+  status.innerHTML = syncStatusLink() || (!info ? '' : `<a href="#/configuracoes/integracoes" class="status-link">${info.documents
+    ? `Dados atualizados em ${dt(info.updated_at)}` : 'Mobne não tem vendas registradas neste período'}</a>`);
   // The grid is (re)drawn when the popover opens; redrawing it here would steal keyboard focus.
 }
 
+// Compact status outside Configurações: a running sync, linked to where it can be followed.
+function syncStatusLink() {
+  const active = ((APP.status && APP.status.jobs) || []).some((j) => j.state === 'queued' || j.state === 'running');
+  return active ? '<a href="#/configuracoes/integracoes" class="status-link">Sincronizando dados do Mobne…</a>' : '';
+}
+
+function buildCompetenceSelector(current, status, steps) {
+  if (!APP.financePeriod) APP.financePeriod = navCurrentMonth();
+  current.disabled = false;
+  current.innerHTML = `${icon('calendar')} Competência ${esc(periodLabel(APP.financePeriod))} <span class="caret" aria-hidden="true">▾</span>`;
+  current.setAttribute('aria-label', `Competência ${periodLabel(APP.financePeriod)} — trocar mês`);
+  steps.forEach((b) => {
+    b.disabled = false;
+    b.title = periodLabel(navShift(APP.financePeriod, parseInt(b.dataset.periodStep, 10)));
+  });
+  const sync = syncStatusLink();
+  status.innerHTML = 'Mês de competência dos lançamentos, independente das vendas sincronizadas.' + (sync ? ` · ${sync}` : '');
+}
+
 function renderPickerGrid() {
-  const years = [...new Set(APP.periods.map((p) => p.period.slice(0, 4)))].sort().reverse();
-  const year = APP.pickerYear || APP.period.slice(0, 4);
+  const competence = navRules.mode(APP.page) === 'competence';
+  const selected = competence ? APP.financePeriod : APP.period;
+  const thisYear = Number(navCurrentMonth().slice(0, 4));
+  const years = competence
+    ? [thisYear + 1, thisYear, thisYear - 1, thisYear - 2, thisYear - 3].map(String)
+    : [...new Set(APP.periods.map((p) => p.period.slice(0, 4)))].sort().reverse();
+  const year = APP.pickerYear || selected.slice(0, 4);
   document.getElementById('year-tabs').innerHTML = years.map((y) =>
     `<button type="button" class="tab-btn-period ${y === year ? 'active' : ''}" aria-pressed="${y === year}" data-year="${y}">${y}</button>`
   ).join('');
@@ -502,9 +541,9 @@ function renderPickerGrid() {
   document.getElementById('month-buttons').innerHTML = MONTHS.map((label, i) => {
     const period = `${year}-${String(i + 1).padStart(2, '0')}`;
     const info = known.get(period);
-    const empty = info && !info.documents;  // synced, but Mobne has no sales for this period
-    const active = period === APP.period;
-    const disabled = info ? '' : 'disabled';  // empty stays clickable, so its explanation is reachable
+    const empty = !competence && info && !info.documents;  // synced, but Mobne has no sales for this period
+    const active = period === selected;
+    const disabled = competence || info ? '' : 'disabled';  // empty stays clickable, so its explanation is reachable
     const cls = ['month-btn', active ? 'active' : '', empty ? 'month-btn-empty' : ''].filter(Boolean).join(' ');
     const title = empty ? ' title="Mobne não tem vendas registradas neste período"' : '';
     return `<button type="button" class="${cls}" aria-pressed="${active}" ${disabled}${title} data-period="${period}">${label}</button>`;
@@ -514,8 +553,9 @@ function renderPickerGrid() {
 const isPickerOpen = () => { const p = document.getElementById('period-popover'); return !!p && !p.hidden; };
 
 function openPeriodPicker() {
-  if (!APP.period) return;
-  APP.pickerYear = APP.period.slice(0, 4);
+  const selected = navRules.mode(APP.page) === 'competence' ? APP.financePeriod : APP.period;
+  if (!selected) return;
+  APP.pickerYear = selected.slice(0, 4);
   renderPickerGrid();
   document.getElementById('period-popover').hidden = false;
   document.getElementById('period-current').setAttribute('aria-expanded', 'true');
@@ -546,6 +586,7 @@ function selectPeriod(period) {
 }
 
 function stepPeriod(delta) {
+  if (navRules.mode(APP.page) === 'competence') return go(APP.page, navShift(APP.financePeriod, delta));
   const target = neighborPeriod(delta);
   if (target) go(APP.page, target, APP.page === 'estoque' ? APP.routeParams : null);
 }
@@ -569,8 +610,19 @@ function closeNav(returnFocus) {
   if (returnFocus) toggle.focus();
 }
 
+/* Module and route rules live in navigation.js; the guards keep this shell
+ * loadable on its own in the vm-based unit tests. */
+const navRules = {
+  canonical: (hash) => (typeof canonicalRoute === 'function' ? canonicalRoute(hash) : hash),
+  module: (page) => (typeof moduleForPage === 'function' ? moduleForPage(page) : null),
+  mode: (page) => (typeof periodModeForPage === 'function' ? periodModeForPage(page) : 'sales'),
+};
+const navShift = (period, delta) => (typeof shiftMonth === 'function' ? shiftMonth(period, delta) : period);
+const navCurrentMonth = () => (typeof currentMonth === 'function' ? currentMonth() : new Date().toISOString().slice(0, 7));
+const MODULE_LABELS = {analises: 'Análises', financeiro: 'Financeiro'};
+
 const PAGES = ['resumo', 'precos', 'mapa', 'diagnostico', 'sazonalidade', 'visao', 'estoque', 'reposicao', 'produto', 'acoes',
-  'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis', 'sync', 'configuracoes'];
+  'financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis', 'configuracoes'];
 const FINANCE_PAGES = ['financeiro', 'despesas', 'contas-pagar', 'emprestimos', 'fluxo-caixa', 'conciliacao', 'recebiveis'];
 const SETTINGS_ROUTES = ['configuracoes/empresa', 'configuracoes/usuarios', 'configuracoes/calendario',
   'configuracoes/metas', 'configuracoes/alertas', 'configuracoes/integracoes'];
@@ -590,46 +642,80 @@ function routeHash(page, period, params) {
     const section = SETTINGS_SECTIONS.includes(period) ? period : (APP.settingsSection || 'empresa');
     return `#/configuracoes/${section}`;
   }
+  const segment = navRules.mode(page) === 'none' ? null : period;
   const q = params ? params.toString() : '';
-  return `#/${page}${period ? '/' + period : ''}${q ? '?' + q : ''}`;
+  return `#/${page}${segment ? '/' + segment : ''}${q ? '?' + q : ''}`;
 }
 
 // Every page/period change goes through the URL, so Voltar, reload and favoritos all work.
 function go(page, period, params) {
-  const hash = routeHash(page, period || APP.period, params);
+  const fallback = navRules.mode(page) === 'competence' ? APP.financePeriod : APP.period;
+  const hash = routeHash(page, period || fallback, params);
   if (location.hash === hash) onRouteChange(); else location.hash = hash;  // → hashchange → onRouteChange
 }
 
 function navigate(page) { go(page); }
 
+/* Shows only the active module's menu, points each module link at that
+ * module's last route, names the module in the top bar and announces a switch.
+ * Configurações/Minha conta belong to no module and keep the last one open. */
+function applyModuleNav(page) {
+  const module = navRules.module(page);
+  const previous = APP.module;
+  if (module) APP.module = module;
+  const active = APP.module || 'analises';
+  document.querySelectorAll('[data-module-nav]').forEach((el) => { el.hidden = el.dataset.moduleNav !== active; });
+  document.querySelectorAll('[data-module-link]').forEach((link) => {
+    if (link.dataset.moduleLink === active) link.setAttribute('aria-current', 'true');
+    else link.removeAttribute('aria-current');
+    if (APP.moduleRoutes) link.setAttribute('href', APP.moduleRoutes.routeFor(link.dataset.moduleLink));
+  });
+  const label = document.getElementById('topbar-module');
+  if (label) label.textContent = page === 'configuracoes' ? 'Configurações' : MODULE_LABELS[active];
+  const announce = document.getElementById('module-status');
+  if (announce && module && previous && module !== previous) announce.textContent = `Módulo ${MODULE_LABELS[module]} aberto.`;
+}
+
 function onRouteChange() {
   if (!APP.company) return;  // before login the hash is kept and applied by onAuthenticated
+  // Retired routes (#/sync, #/emprestimos) resolve to their new home first.
+  const canonical = navRules.canonical(location.hash);
+  if (canonical !== location.hash) history.replaceState(null, '', canonical);
   const r = parseRoute();
   const page = r.page || 'resumo';
-  const period = r.period && APP.periods.some((p) => p.period === r.period) ? r.period : APP.period;
+  const mode = navRules.mode(page);
+  const period = mode === 'sales' && r.period && APP.periods.some((p) => p.period === r.period) ? r.period : APP.period;
+  const financePeriod = mode === 'competence' && r.period ? r.period : APP.financePeriod;
   // Leaving a page with unsaved edits (nav link, Voltar, period change, go())
   // asks first; "Continuar editando" keeps the original route on screen.
   const section = page === 'configuracoes' ? r.section : APP.settingsSection;
-  const leaving = page !== APP.page || period !== APP.period ||
+  const leaving = page !== APP.page || period !== APP.period || financePeriod !== APP.financePeriod ||
     (page === 'configuracoes' && section !== APP.settingsSection);
   if (leaving && !confirmDiscardChanges()) {
-    const stay = routeHash(APP.page, APP.page === 'configuracoes' ? APP.settingsSection : APP.period, APP.routeParams);
+    const stayPeriod = APP.page === 'configuracoes' ? APP.settingsSection
+      : navRules.mode(APP.page) === 'competence' ? APP.financePeriod : APP.period;
+    const stay = routeHash(APP.page, stayPeriod, APP.routeParams);
     if (location.hash !== stay) history.replaceState(null, '', stay);
     return;
   }
-  APP.settingsSection = page === 'configuracoes' ? r.section : APP.settingsSection;
-  const hash = routeHash(page, page === 'configuracoes' ? APP.settingsSection : period, r.params);
+  APP.settingsSection = section;
+  const segment = page === 'configuracoes' ? APP.settingsSection : mode === 'competence' ? financePeriod : period;
+  const hash = routeHash(page, segment, r.params);
   if (location.hash !== hash) history.replaceState(null, '', hash);  // normalize, no extra history entry
+  if (APP.moduleRoutes) APP.moduleRoutes.remember(hash);
   const pageChanged = page !== APP.page;
   APP.page = page;
   APP.period = period;
+  APP.financePeriod = financePeriod;
   APP.routeParams = r.params;
   document.querySelectorAll('.nav-item').forEach((a) => {
     const on = a.dataset.page === page;
     a.classList.toggle('active', on);
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-    a.setAttribute('href', routeHash(a.dataset.page, period));  // open-in-new-tab keeps the period
+    const linkPeriod = navRules.mode(a.dataset.page) === 'competence' ? financePeriod : period;
+    a.setAttribute('href', routeHash(a.dataset.page, linkPeriod));  // open-in-new-tab keeps the period
   });
+  applyModuleNav(page);
   closeNav();
   closePeriodPicker();
   buildPeriodSelector();
@@ -645,12 +731,11 @@ async function renderPage() {
   // a fetch still in flight for the page the user just left.
   const token = beginPage();
   if (APP.page === 'configuracoes') return renderSettingsPage(token);
-  if (APP.page === 'sync') return renderSyncPage();
   // Finance pages read their own /finance/* endpoints by competence — they don't need
   // the Mobne /dashboard payload this function fetches below for every other page.
   if (FINANCE_PAGES.includes(APP.page)) return renderFinancePage(token);
   if (!APP.period) {
-    return renderEmptyState('Nenhum período sincronizado ainda. Vá em "Sincronização Mobne" e clique em Sincronizar agora.');
+    return renderEmptyState('Nenhum período sincronizado ainda. Abra Configurações → Integrações e sincronização e clique em Sincronizar agora.');
   }
   // Identity of this request, captured before the await: APP may already point
   // at another company/period by the time the response arrives.
@@ -686,7 +771,6 @@ async function renderPage() {
   const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
     diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao,
     reposicao: renderReposicao, produto: renderProdutoDetalhe, acoes: renderAcoes};
-  if (APP.page === 'sync') return renderSyncPage();  // user navigated away mid-fetch
   (renderers[page] || renderResumo)(APP.dashboard);
 }
 
@@ -769,7 +853,7 @@ function headerBlock(data) {
   const label = `${MONTHS[parseInt(m, 10) - 1]}/${y}`;
   const partial = data.partial_month ? ` · em andamento (dados até ${data.as_of})` : '';
   return `
-    <div class="page-title">${icon('bar-chart-3')} Resumo Executivo</div>
+    <div class="page-title">${icon('bar-chart-3')} Resumo executivo</div>
     <div class="page-subtitle">Vendas PDV reconciliadas diretamente do Mobne — sem Excel, sem localStorage.</div>
     <span class="periodo-badge">${label}${partial}</span>
     <span class="periodo-badge muted">Atualizado ${dt(data.updated_at)} · v${data.version}</span>
@@ -849,7 +933,12 @@ async function onCreateActionFromAlert(event) {
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Criar ação';
-    alert('Erro ao criar ação: ' + e.message);
+    let message = btn.nextElementSibling;
+    if (!message || !message.matches('[data-action-error]')) {
+      btn.insertAdjacentHTML('afterend', '<span class="form-error" data-action-error role="alert"></span>');
+      message = btn.nextElementSibling;
+    }
+    message.textContent = 'Não foi possível criar a ação: ' + e.message;
   }
 }
 
@@ -927,7 +1016,7 @@ function renderResumo(data) {
     <div class="chart-container chart-h-330" id="echart-top10"></div>
     ${topProfit.length ? `<div class="story-box">${icon('lightbulb')} Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
       ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.
-      <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de Produtos →</button></div>` : ''}
+      <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de produtos →</button></div>` : ''}
 
     <div class="section-header">Histórico mensal</div>
     <div class="chart-container chart-box" id="echart-timeline"></div>
@@ -967,7 +1056,7 @@ function renderEstoque(data) {
   const inv = data.inventory || [];
   const active = estoqueFilter().key;
   document.getElementById('content').innerHTML = `
-    <div class="page-title">${icon('package')} Produtos &amp; Estoque</div>
+    <div class="page-title">${icon('package')} Produtos e estoque</div>
     <div class="page-subtitle">Estoque e preço são o retrato ATUAL do Mobne — não representam o histórico do período selecionado.</div>
     <span class="periodo-badge muted">Estoque: ${dt(data.stock_updated_at)}</span>
     <span class="periodo-badge muted">Preços: ${dt(data.prices_updated_at)}</span>
@@ -1052,71 +1141,25 @@ function sortEstoque(key) {
   if (btn) btn.focus();  // the header was redrawn; keep keyboard users where they were
 }
 
-/* ---------------------------------------------------------------- sync page */
+/* ---------------------------------------------------------------- sync trigger */
 
-function jobBadge(state) {
-  const map = {queued: 'badge-info', running: 'badge-info', completed: 'badge-success',
-    completed_with_errors: 'badge-warning', failed: 'badge-error'};
-  const label = {queued: 'Na fila', running: 'Em execução', completed: 'Concluído',
-    completed_with_errors: 'Concluído com falhas', failed: 'Falhou'};
-  return `<span class="${map[state] || 'badge-muted'}">${label[state] || state}</span>`;
-}
-
-const SYNC_MODE_LABELS = {recent: 'Recente', history: 'Histórico completo', reconcile: 'Reconciliação completa', month: 'Mês específico'};
-
-function renderSyncPage() {
-  const s = APP.status;
-  const catalogs = s.catalogs || {};
-  const catalogRows = ['categories', 'products', 'stock', 'prices'].map((key) => {
-    const c = catalogs[key];
-    const labels = {categories: 'Categorias', products: 'Produtos', stock: 'Estoque', prices: 'Preços'};
-    return `<tr><td>${labels[key]}</td><td>${c ? num(c.count) : '—'}</td><td>${c ? dt(c.updated_at) : 'Não sincronizado'}</td></tr>`;
-  }).join('');
-
-  document.getElementById('content').innerHTML = `
-    <div class="page-title">${icon('link')} Sincronização Mobne</div>
-    <div class="page-subtitle">${esc(s.source)} · intervalo automático: ${s.interval_minutes} min</div>
-
-    <div class="btn-row">
-      <button class="btn-primary btn-wide" data-sync="recent">Sincronizar agora (recente)</button>
-      <button class="btn-secondary" data-sync="reconcile">Reconciliar todo o histórico</button>
-      <button class="btn-secondary" data-sync="history">Carregar histórico completo</button>
-    </div>
-
-    <div class="section-header">Catálogos</div>
-    <div class="data-table-container">
-      <table class="data-table"><thead><tr><th>Base</th><th>Itens</th><th>Atualizado</th></tr></thead>
-      <tbody>${catalogRows}</tbody></table>
-    </div>
-
-    <div class="section-header">Períodos de vendas sincronizados</div>
-    <div class="data-table-container table-scroll-md">
-      <table class="data-table"><thead><tr><th>Período</th><th>Documentos</th><th>Atualizado</th><th>Versão</th></tr></thead>
-      <tbody>${(s.periods || []).map((p) => `<tr><td>${p.period}</td>
-        <td>${p.documents ? num(p.documents) : 'Sem vendas no Mobne'}</td>
-        <td>${dt(p.updated_at)}</td><td>${p.version}</td></tr>`).join('') || '<tr><td colspan="4">Nenhum período ainda.</td></tr>'}</tbody></table>
-    </div>
-
-    <div class="section-header">Execuções recentes</div>
-    <div class="jobs-list">
-      ${(s.jobs || []).map((j) => `<div class="job-row">
-          <div><strong>${SYNC_MODE_LABELS[j.mode] || j.mode}</strong> ${jobBadge(j.state)}
-            <div class="job-detail">${esc(j.detail || '')}</div>
-            ${j.error ? `<div class="job-error">${esc(j.error)}</div>` : ''}
-          </div>
-          <div class="job-detail">${dt(j.updated_at)}${j.total ? ` · ${j.completed}/${j.total}` : ''}</div>
-        </div>`).join('') || '<div class="story-box">Nenhuma execução ainda.</div>'}
-    </div>
-  `;
-}
-
-async function triggerSync(mode) {
+// The panel lives in Configurações → Integrações (settings.js syncPanelHtml).
+async function triggerSync(mode, button) {
+  const status = document.getElementById('sync-action-status');
+  if (button) button.disabled = true;
+  if (status) status.textContent = '';
   try {
-    await api(`/api/companies/${APP.company}/sync`, {method: 'POST', body: JSON.stringify({mode})});
+    const result = await api(`/api/companies/${APP.company}/sync`, {method: 'POST', body: JSON.stringify({mode})});
+    if (status) {
+      status.textContent = result && result.already_running
+        ? 'Já existe uma sincronização em andamento: acompanhe o progresso abaixo.'
+        : 'Sincronização iniciada.';
+    }
     await refreshStatus();
-    renderSyncPage();
+    if (typeof refreshSyncPanel === 'function') refreshSyncPanel();
   } catch (e) {
-    alert('Não foi possível iniciar a sincronização: ' + e.message);
+    if (status) status.textContent = 'Não foi possível iniciar a sincronização: ' + e.message;
+    if (button) button.disabled = false;
   }
 }
 

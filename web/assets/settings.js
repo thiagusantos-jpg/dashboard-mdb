@@ -8,7 +8,7 @@ const SETTINGS_LABELS = {
   calendario: 'Calendário',
   metas: 'Metas',
   alertas: 'Alertas',
-  integracoes: 'Integrações',
+  integracoes: 'Integrações e sincronização',
 };
 
 function settingsShell(section, body) {
@@ -17,7 +17,7 @@ function settingsShell(section, body) {
        href="#/configuracoes/${id}" ${id === section ? 'aria-current="page"' : ''}>${label}</a>`
   ).join('');
   return `
-    <div class="page-title">⚙️ Configurações</div>
+    <h1 class="page-title">${icon('sliders-horizontal', {class: 'title-icon'})}Configurações</h1>
     <div class="page-subtitle">Cadastros, acessos e regras usadas na gestão da empresa.</div>
     <nav class="settings-tabs" aria-label="Seções de configurações">${tabs}</nav>
     <section class="settings-panel">${body}</section>`;
@@ -302,10 +302,15 @@ function renderPlannedSettings(section) {
 
 async function renderIntegrationsSettings(token) {
   token = token || beginPage();
-  const [connections, cashAccounts] = await Promise.all([
-    api(`/api/companies/${APP.company}/finance/open-finance/connections`),
-    api(`/api/companies/${APP.company}/finance/cash-accounts`),
-  ]);
+  let connections = [], cashAccounts = [], stoneError = null;
+  try {
+    [connections, cashAccounts] = await Promise.all([
+      api(`/api/companies/${APP.company}/finance/open-finance/connections`),
+      api(`/api/companies/${APP.company}/finance/cash-accounts`),
+    ]);
+  } catch (e) {
+    stoneError = e;  // Stone unavailable (permission, outage) must not hide the Mobne sync panel
+  }
   if (!APP.pageState.isCurrent(token)) return;
   const rows = connections.map((c) => `
     <tr>
@@ -321,9 +326,13 @@ async function renderIntegrationsSettings(token) {
   const accountOptions = cashAccounts.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
 
   document.getElementById('content').innerHTML = settingsShell('integracoes', `
+    <div id="sync-action-status" class="form-success" role="status" aria-live="polite"></div>
+    <section id="sync-panel" aria-labelledby="sync-title">${syncPanelHtml(APP.status)}</section>
+    <section class="settings-block" aria-labelledby="stone-title">
     <div class="settings-heading">
-      <div><h2>Stone Open Finance</h2><p>Conecta uma conta de pagamento Stone para sincronizar saldo e extrato automaticamente.</p></div>
+      <div><h2 id="stone-title">Stone Open Finance</h2><p>Conecta uma conta de pagamento Stone para sincronizar saldo e extrato automaticamente.</p></div>
     </div>
+    ${stoneError ? `<div class="story-box">Não foi possível carregar a integração Stone: ${esc(stoneError.message)}</div>` : ''}
     <div class="table-wrap"><table>
       <thead><tr><th>Provedor</th><th>Status</th><th>Último saldo</th><th>Última sincronização</th><th>Erro</th><th></th></tr></thead>
       <tbody>${rows || '<tr><td colspan="6">Nenhuma conexão configurada.</td></tr>'}</tbody>
@@ -333,7 +342,8 @@ async function renderIntegrationsSettings(token) {
       <button type="submit" class="btn-primary">Conectar conta Stone</button>
       <span id="of-consent-status" class="sim-status" role="status" aria-live="polite"></span>
     </form>
-    <div id="of-consent-result"></div>`);
+    <div id="of-consent-result"></div>
+    </section>`);
 
   watchForm(document.getElementById('of-consent-form')).addEventListener('submit', onStartStoneConsent);
   document.querySelectorAll('[data-of-sync]').forEach((btn) => btn.addEventListener('click', onSyncStoneConnection));
@@ -368,7 +378,7 @@ async function onSyncStoneConnection(event) {
     await api(`/api/companies/${APP.company}/finance/open-finance/connections/${connectionId}/sync`, {method: 'POST'});
     renderIntegrationsSettings();
   } catch (e) {
-    alert('Erro ao sincronizar: ' + e.message);
+    document.getElementById('of-consent-status').textContent = 'Não foi possível sincronizar a Stone: ' + e.message;
   }
 }
 
@@ -378,7 +388,7 @@ async function onRevokeStoneConnection(event) {
     await api(`/api/companies/${APP.company}/finance/open-finance/connections/${connectionId}/revoke`, {method: 'POST'});
     renderIntegrationsSettings();
   } catch (e) {
-    alert('Erro ao revogar: ' + e.message);
+    document.getElementById('of-consent-status').textContent = 'Não foi possível revogar a conexão: ' + e.message;
   }
 }
 
@@ -388,7 +398,7 @@ async function renderGoalsSettings(token) {
   if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   document.getElementById('content').innerHTML = settingsShell('metas', `
     <div class="settings-heading">
-      <div><h2>Metas de faturamento e margem</h2><p>Usadas no Resumo Executivo e na Visão Futurista.</p></div>
+      <div><h2>Metas de faturamento e margem</h2><p>Usadas no Resumo executivo e em Projeções de vendas.</p></div>
     </div>
     ${progress ? `
       <div class="kpi-grid kpi-grid-3">
@@ -438,4 +448,87 @@ async function onSaveGoals(event) {
   } catch (e) {
     status.textContent = 'Erro: ' + e.message;
   }
+}
+
+/* ---------------------------------------------------------------- Mobne sync (Integrações) */
+
+function jobBadge(state) {
+  const map = {queued: 'badge-info', running: 'badge-info', completed: 'badge-success',
+    completed_with_errors: 'badge-warning', failed: 'badge-error'};
+  const label = {queued: 'Na fila', running: 'Em execução', completed: 'Concluído',
+    completed_with_errors: 'Concluído com falhas', failed: 'Falhou'};
+  return `<span class="${map[state] || 'badge-muted'}">${label[state] || state}</span>`;
+}
+
+const SYNC_MODE_LABELS = {recent: 'Recente', history: 'Histórico completo', reconcile: 'Reconciliação completa', month: 'Mês específico'};
+
+/* The daily task is one button; the diagnosis (catalogs, periods, every run)
+ * stays one click away under "Opções avançadas". Progress shows the job's own
+ * counters as reported — never capped on screen to hide a miscount. */
+function syncPanelHtml(s) {
+  s = s || {};
+  const jobs = s.jobs || [];
+  const active = jobs.find((j) => j.state === 'queued' || j.state === 'running');
+  const last = jobs.find((j) => j.state !== 'queued' && j.state !== 'running');
+  const latest = (s.periods || [])[0];
+  const catalogs = s.catalogs || {};
+  const catalogLabels = {categories: 'Categorias', products: 'Produtos', stock: 'Estoque', prices: 'Preços'};
+  const catalogRows = Object.keys(catalogLabels).map((key) => {
+    const c = catalogs[key];
+    return `<tr><td>${catalogLabels[key]}</td><td class="num">${c ? num(c.count) : '—'}</td><td>${c ? dt(c.updated_at) : 'Não sincronizado'}</td></tr>`;
+  }).join('');
+  const progress = active ? `
+    <div class="sync-progress" role="status">
+      <div><strong>${SYNC_MODE_LABELS[active.mode] || esc(active.mode)}</strong> ${jobBadge(active.state)}</div>
+      ${active.total ? `<progress max="${active.total}" value="${active.completed}" aria-label="Progresso da sincronização"></progress>
+        <div class="muted">${active.completed} de ${active.total} etapas</div>` : ''}
+      <div class="job-detail">${esc(active.detail || 'Aguardando o início…')}</div>
+    </div>` : '';
+  const lastRun = last ? `
+    <p>Última execução: ${jobBadge(last.state)} ${dt(last.updated_at)}${last.detail ? ` — ${esc(last.detail)}` : ''}</p>
+    ${last.error ? `<div class="job-error">${esc(last.error)}</div>` : ''}` : '<p>Nenhuma execução ainda.</p>';
+  const disabled = active ? ' disabled' : '';
+  return `
+    <div class="settings-heading">
+      <div><h2 id="sync-title">Mobne — vendas, produtos e estoque</h2>
+        <p>${esc(s.source || 'Mobne')} · atualização automática a cada ${s.interval_minutes || '—'} min${latest ? ` · último período salvo: ${esc(latest.period)} em ${dt(latest.updated_at)}` : ''}</p></div>
+    </div>
+    ${progress}
+    ${lastRun}
+    <div class="btn-row"><button type="button" class="btn-primary btn-wide" data-sync="recent"${disabled}>Sincronizar agora</button></div>
+    <details class="form-details">
+      <summary>Opções avançadas e diagnóstico</summary>
+      <div class="btn-row">
+        <button type="button" class="btn-secondary" data-sync="reconcile"${disabled}>Reconciliar todo o histórico</button>
+        <button type="button" class="btn-secondary" data-sync="history"${disabled}>Carregar histórico completo</button>
+      </div>
+      <h3 class="drawer-subtitle">Catálogos</h3>
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>Base</th><th class="num">Itens</th><th>Atualizado</th></tr></thead>
+        <tbody>${catalogRows}</tbody></table></div>
+      <h3 class="drawer-subtitle">Períodos de vendas sincronizados</h3>
+      <div class="table-wrap table-scroll-md"><table class="data-table"><thead><tr><th>Período</th><th>Documentos</th><th>Atualizado</th><th>Versão</th></tr></thead>
+        <tbody>${(s.periods || []).map((p) => `<tr><td>${esc(p.period)}</td>
+          <td>${p.documents ? num(p.documents) : 'Sem vendas no Mobne'}</td>
+          <td>${dt(p.updated_at)}</td><td>${p.version}</td></tr>`).join('') || '<tr><td colspan="4">Nenhum período ainda.</td></tr>'}</tbody></table></div>
+      <h3 class="drawer-subtitle">Execuções recentes</h3>
+      <div class="jobs-list">
+        ${jobs.map((j) => `<div class="job-row">
+            <div><strong>${SYNC_MODE_LABELS[j.mode] || esc(j.mode)}</strong> ${jobBadge(j.state)}
+              <div class="job-detail">${esc(j.detail || '')}</div>
+              ${j.error ? `<div class="job-error">${esc(j.error)}</div>` : ''}
+            </div>
+            <div class="job-detail">${dt(j.updated_at)}${j.total ? ` · ${j.completed}/${j.total}` : ''}</div>
+          </div>`).join('') || '<div class="story-box">Nenhuma execução ainda.</div>'}
+      </div>
+    </details>`;
+}
+
+// Repaints only the sync panel (status polling), keeping the Stone form intact.
+function refreshSyncPanel() {
+  const panel = document.getElementById('sync-panel');
+  if (!panel) return;
+  const details = panel.querySelector('details');
+  const wasOpen = !!(details && details.open);
+  panel.innerHTML = syncPanelHtml(APP.status);
+  if (wasOpen) panel.querySelector('details').open = true;
 }

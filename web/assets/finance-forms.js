@@ -494,7 +494,7 @@ async function openExpenseForm(entry, ctx) {
   const lock = (field) => (editable.includes(field) ? '' : ' disabled');
   const withLock = (html, field) => html.replace(/^<(input|select|textarea)/, `<$1${lock(field)}`);
   const v = entry || {};
-  const period = APP.period || todayISO().slice(0, 7);
+  const period = APP.financePeriod || APP.period || todayISO().slice(0, 7);
 
   const lockNote = !entry ? '' : !editable.length
     ? `<div class="story-box">${entry.source !== 'manual'
@@ -799,6 +799,7 @@ async function openObligationDetails(kind, id, ctx) {
     <div class="btn-row drawer-actions">
       ${obligation.allowed_actions.includes('pay') ? '<button type="button" class="btn-primary btn-wide" data-detail-pay>Registrar pagamento</button>' : ''}
       ${kind === 'entry' ? '<button type="button" class="btn-secondary" data-detail-history>Histórico</button>' : ''}
+      ${kind === 'loan_installment' ? '<a class="btn-secondary" href="#/contas-pagar?tipo=emprestimo" data-drawer-close>Ver contrato</a>' : ''}
       <button type="button" class="btn-secondary" data-drawer-close>Fechar</button>
     </div>`);
   const reopen = (result) => { if (ctx.onSaved) ctx.onSaved(result); };

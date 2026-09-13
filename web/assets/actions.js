@@ -48,9 +48,10 @@ async function renderAcoes(data, token) {
     <div class="page-title">${title}</div>
     <div class="page-subtitle">${subtitle}</div>
     <hr class="divider">
-    <div class="table-wrap"><table>
+    <div id="actions-status" class="form-error" role="alert"></div>
+    <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Ação</th><th>Prioridade</th><th>Status</th><th>Criada em</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5">Nenhuma ação criada ainda — use "Criar ação" nos alertas do Resumo Executivo.</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="5">Nenhuma ação criada ainda — use "Criar ação" nos alertas do Resumo executivo.</td></tr>'}</tbody>
     </table></div>`;
   document.querySelectorAll('[data-action-transition]').forEach((btn) => btn.addEventListener('click', onTransitionAction));
 }
@@ -67,7 +68,7 @@ async function onTransitionAction(event) {
     });
     renderAcoes();
   } catch (e) {
-    alert('Erro ao atualizar ação: ' + e.message);
+    document.getElementById('actions-status').textContent = 'Não foi possível atualizar a ação: ' + e.message;
     btn.disabled = false;
   }
 }
