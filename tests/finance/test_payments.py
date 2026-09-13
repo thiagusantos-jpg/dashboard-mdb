@@ -9,7 +9,13 @@ import pytest
 from backend import database as db
 from backend.finance import accounts, ledger, loans
 from backend.finance import payments
-from backend.finance.entries import EntryCommand, create_entry, get_entry, settle_entry
+from backend.finance.entries import (
+    EntryCommand,
+    create_entry,
+    get_entry,
+    reverse_entry,
+    settle_entry,
+)
 from backend.finance.entry_management import entry_history
 from backend.finance.forecast import forecast
 from backend.finance.obligations import get_obligation
@@ -994,3 +1000,90 @@ def test_forecast_does_not_double_count_the_installments_unpaid_interest(payment
     sources = [item["source"] for item in day["items"]]
     assert "financial_entries" not in sources
     assert sum(item["amount_cents"] for item in day["items"]) == -(110_000 - 55_000)
+
+
+# --- The generic entry-reversal door onto the same damage ------------------
+#
+# Re-review follow-up. `record_payment(kind='entry', ...)` now refuses a
+# `source='loan'` entry, but `entries.reverse_entry` (POST
+# /entries/{id}/reverse) reached the same wedge by another route: it marks the
+# entry 'reversed' outright, which (a) erases already-paid interest from
+# management_result's P&L even though the cash really left the bank and the
+# installment still records paid_interest_cents, and (b) wedges the
+# installment forever — an entry reversal can never be undone.
+
+
+def test_reverse_entry_refuses_a_loan_interest_entry(payments_db):
+    bank = bank_account()
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    first = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    interest_entry_id = _interest_entry_id(installment["id"])
+    before = get_entry(interest_entry_id)
+    assert before["status"] == "partially_paid"
+    assert before["paid_cents"] == 5_000
+
+    with pytest.raises(ValueError) as excinfo:
+        reverse_entry(
+            interest_entry_id,
+            reversed_at=date(2026, 9, 11),
+            reason="Estorno indevido",
+        )
+    message = str(excinfo.value)
+    assert "juros" in message
+    # The message must point at the RIGHT mechanism (reversing the specific
+    # loan_installment PAYMENT), not at "reverse the payments on this entry"
+    # — there is no such payment here, and an entry reversal is irreversible.
+    assert "parcela do empréstimo" in message
+
+    # The entry is untouched: status, version, paid/open amounts, and its
+    # financial_events trail all exactly as before the refused call.
+    after = get_entry(interest_entry_id)
+    assert after["status"] == before["status"]
+    assert after["version"] == before["version"]
+    assert after["paid_cents"] == 5_000
+    assert after["open_cents"] == 5_000
+    with db.connection() as conn:
+        reversed_events = conn.execute(
+            "SELECT COUNT(*) AS n FROM financial_events "
+            "WHERE entry_id=? AND event_type='reversed'",
+            (interest_entry_id,),
+        ).fetchone()["n"]
+    assert reversed_events == 0
+
+    # And nothing was silently erased from the P&L: the interest expense is
+    # still fully counted for the installment's competence.
+    result = management_result(1, "2026-10")
+    assert result["financial_expenses_cents"] == 10_000
+
+    # The installment is still payable to the end — no wedge.
+    second = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 12), expected_version=first["obligation"]["version"],
+        idempotency_key="k2", cash_account_id=bank["id"],
+        principal_cents=50_000, interest_cents=5_000,
+    )
+    assert second["obligation"]["status"] == "paid"
+    assert get_entry(interest_entry_id)["paid_cents"] == 10_000
+
+
+def test_reverse_entry_still_works_for_an_ordinary_manual_entry(payments_db):
+    """No regression to reverse_entry's intended use case: a normal
+    `source='manual'` entry still reverses exactly as before."""
+    bank = bank_account()
+    entry = expense_entry(100_000)
+    record_payment(
+        1, "entry", entry["id"], amount_cents=40_000, paid_at=date(2026, 9, 12),
+        expected_version=1, idempotency_key="manual-1", cash_account_id=bank["id"],
+    )
+
+    reversed_entry = reverse_entry(
+        entry["id"], reversed_at=date(2026, 9, 13), reason="Lançamento indevido"
+    )
+    assert reversed_entry["status"] == "reversed"
+    assert get_entry(entry["id"])["status"] == "reversed"

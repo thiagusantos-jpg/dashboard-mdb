@@ -6,6 +6,16 @@ from datetime import date
 from typing import Optional
 
 from .. import database as db
+from . import obligations as _obligations
+
+
+# The `financial_entries.source` marker owned by the loan machinery. Aliased
+# from obligations.py (rather than re-spelled) so the "hide it from the
+# payable-obligation surface" filter there, the "refuse a direct payment
+# against it" guard in payments.py::record_payment and the "refuse a generic
+# reversal" guard in reverse_entry() below can never drift apart. See that
+# module's _LOAN_ENTRY_SOURCE for the full rationale.
+_LOAN_ENTRY_SOURCE = _obligations._LOAN_ENTRY_SOURCE
 
 
 VALID_STATUSES = {
@@ -353,12 +363,38 @@ def reverse_entry(
     reason: str,
     created_by: Optional[int] = None,
 ) -> dict:
+    """Revert an entry's WHOLE current balance and mark it 'reversed'
+    permanently. Correct for cancelling a manual entry outright; wrong for
+    undoing one payment among several (use
+    reverse_settlement_on_connection / payments.py::reverse_payment).
+
+    Refuses a `source='loan'` entry outright — see the guard below.
+    """
     with db.connection() as conn:
         entry = conn.execute(
             "SELECT * FROM financial_entries WHERE id=?", (entry_id,)
         ).fetchone()
         if not entry or entry["status"] in {"cancelled", "reversed"}:
             raise ValueError("Lançamento não encontrado ou já revertido.")
+        # A loan-owned entry (the interest entry of a loan installment,
+        # created by payments.py::_ensure_interest_settlement) is NEVER
+        # reversible through this generic path, paid or not. Reversing it
+        # here would (a) erase already-paid interest from the P&L
+        # (reporting.py::management_result skips 'reversed' entries) even
+        # though the cash really left the bank and the installment still
+        # records paid_interest_cents, and (b) wedge the installment
+        # permanently: every later interest-bearing payment would fail on the
+        # reversed entry, and an entry reversal can never be undone
+        # (cancel_entry/update_entry both refuse a 'reversed' row).
+        # The only correct way to undo money against a loan installment is
+        # reverse_payment(kind='loan_installment', ...), which reverses the
+        # SPECIFIC payment's interest slice instead of destroying the entry.
+        if entry["source"] == _LOAN_ENTRY_SOURCE:
+            raise ValueError(
+                "Este é o lançamento de juros de uma parcela de empréstimo e "
+                "não pode ser revertido por aqui. Para desfazer um pagamento, "
+                "estorne o pagamento correspondente na parcela do empréstimo."
+            )
         paid = _paid_cents(conn, entry_id)
         timestamp = db.now()
         conn.execute(
