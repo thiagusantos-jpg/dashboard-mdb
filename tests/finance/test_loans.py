@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
 from datetime import date
 
 import pytest
 
 from backend import database as db
 from backend.finance import ledger, loans
+from backend.finance.payments import record_payment
 from backend.finance.reporting import management_result
 
 
@@ -173,6 +175,73 @@ def test_record_disbursement_rejects_conflicting_reuse_of_idempotency_key(loan_d
             COMPANY, loan["id"], 60_000_00, date(2026, 9, 1),
             idempotency_key="disb-conflict", cash_account_id=account["id"],
         )
+
+
+def test_concurrent_disbursements_cannot_share_one_cash_event(loan_db):
+    """Final review C4, disbursement side: two requests with DIFFERENT
+    idempotency keys naming the SAME incoming bank movement for two DIFFERENT
+    loans, racing so that both clear the application-level "already linked?"
+    pre-check before either inserts. Migration 022's UNIQUE index on
+    loan_disbursements(cash_event_id) is the actual guarantee; the barrier
+    below pins the interleaving to that window, since
+    `create_entry_on_connection` is the first WRITE record_disbursement
+    performs on the linked path, right after the pre-check."""
+    loan_a = make_loan()
+    loan_b = make_loan()
+    account = ledger.create_account(COMPANY, "Banco", "bank")
+    event = ledger.post_cash_event(
+        COMPANY, account["id"], 50_000_00, date(2026, 9, 1), "Crédito recebido"
+    )
+
+    real_create = loans.create_entry_on_connection
+    gate = threading.Barrier(2, timeout=10)
+
+    def gated_create(*args, **kwargs):
+        try:
+            gate.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return real_create(*args, **kwargs)
+
+    results = {}
+    errors = {}
+
+    def attempt(name, loan_id, key):
+        try:
+            results[name] = loans.record_disbursement(
+                COMPANY, loan_id, 50_000_00, date(2026, 9, 1),
+                idempotency_key=key, existing_cash_event_id=event["id"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = exc
+
+    loans.create_entry_on_connection = gated_create
+    try:
+        t1 = threading.Thread(target=attempt, args=("a", loan_a["id"], "race-a"))
+        t2 = threading.Thread(target=attempt, args=("b", loan_b["id"], "race-b"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=60)
+        t2.join(timeout=60)
+    finally:
+        loans.create_entry_on_connection = real_create
+
+    assert len(results) == 1, f"expected exactly one winner, got results={results} errors={errors}"
+    assert isinstance(errors[list(errors)[0]], loans.LoanValidationError)
+
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT loan_id FROM loan_disbursements WHERE cash_event_id=?", (event["id"],)
+        ).fetchall()
+    assert len(rows) == 1
+    # The loser rolled back completely: no second proceeds entry, and the one
+    # pre-existing credit is still the account's only movement.
+    assert ledger.account_balance(account["id"]) == 50_000_00
+    with db.connection() as conn:
+        proceeds_entries = conn.execute(
+            "SELECT COUNT(*) AS n FROM financial_entries WHERE source='loan'"
+        ).fetchone()["n"]
+    assert proceeds_entries == 1
 
 
 def test_record_disbursement_requires_a_cash_link(loan_db):
@@ -413,3 +482,67 @@ def test_cancel_loan_leaves_zero_active_schedules(loan_db):
     # backend/finance/loans.py::cancel_loan) — verify no schedule is left
     # 'active' after a successful cancellation.
     assert _active_schedule_count(loan["id"]) == 0
+
+
+# --- Final review C3: loan_position with a partially-paid installment ------
+
+
+def test_loan_position_reports_partially_paid_split(loan_db):
+    """A real partial payment must show up on BOTH sides of the position.
+
+    Before this fix both sums filtered on a status label that predates B3's
+    `status='partially_paid'` (`paid_principal` counted only `=='paid'` rows,
+    `open_principal` only `=='open'` rows), so a partially-paid installment
+    matched neither and its money vanished from both: the position reported
+    `principal_cents: 0, paid_principal_cents: 0` for a loan that plainly
+    still owed money, and web/assets/loans.js rendered "Principal em aberto:
+    R$ 0,00" from it.
+    """
+    bank = ledger.create_account(COMPANY, "Banco", "bank")
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=95_000,
+        installments=[{"number": 1, "due_date": "2026-10-10",
+                       "principal_cents": 100_000, "interest_cents": 10_000}],
+        start_date="2026-09-01",
+    )
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=44_000,
+        paid_at=date(2026, 9, 12), expected_version=1, idempotency_key="partial-1",
+        cash_account_id=bank["id"], principal_cents=40_000, interest_cents=4_000,
+    )
+
+    position = loans.loan_position(loan["id"])
+    assert position["installments"][0]["status"] == "partially_paid"
+    # 40_000 of the 100_000 principal is amortized; 60_000 is still owed.
+    assert position["paid_principal_cents"] == 40_000
+    assert position["principal_cents"] == 60_000
+    # The two sides always add back up to the contract's principal.
+    assert position["paid_principal_cents"] + position["principal_cents"] == 100_000
+
+
+def test_loan_position_splits_stay_correct_after_full_payment(loan_db):
+    # Companion to the test above: a fully-paid installment owes nothing and
+    # contributes its whole principal to the paid side.
+    bank = ledger.create_account(COMPANY, "Banco", "bank")
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=95_000,
+        installments=[
+            {"number": 1, "due_date": "2026-10-10", "principal_cents": 50_000, "interest_cents": 5_000},
+            {"number": 2, "due_date": "2026-11-10", "principal_cents": 50_000, "interest_cents": 5_000},
+        ],
+        start_date="2026-09-01",
+    )
+    first = loans.loan_position(loan["id"])["installments"][0]
+    record_payment(
+        COMPANY, "loan_installment", first["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 12), expected_version=1, idempotency_key="full-1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+
+    position = loans.loan_position(loan["id"])
+    assert position["paid_principal_cents"] == 50_000
+    assert position["principal_cents"] == 50_000

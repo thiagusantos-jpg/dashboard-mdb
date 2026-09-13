@@ -83,7 +83,14 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
     per day (with `due_on_or_before=True` for "today" and `=` for every
     future day) — callers reproduce that exact split in Python: bucket rows
     with due_date<=today onto "today", everything else onto its own
-    due_date."""
+    due_date.
+
+    Final-review I1: the GROUP BY lists every non-aggregated selected column,
+    including the joined table's `a.nature`. `GROUP BY e.id` alone is a
+    SQLite-only permissiveness — PostgreSQL's functional-dependency relaxation
+    covers only columns of the table whose primary key is in the GROUP BY, so
+    `a.nature` would make the whole forecast fail there. Mirrors the
+    convention backend/finance/reporting.py already follows."""
     rows = conn.execute(
         """
         SELECT e.id,e.due_date,e.amount_cents,e.description,a.nature,
@@ -96,7 +103,7 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
         LEFT JOIN financial_events ev ON ev.entry_id=e.id
         WHERE e.company=? AND e.due_date<=?
           AND e.status IN ('open','overdue','partially_paid')
-        GROUP BY e.id
+        GROUP BY e.id,e.due_date,e.amount_cents,e.description,a.nature
         """,
         (company, end.isoformat()),
     ).fetchall()
@@ -122,29 +129,46 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
 
 
 def _open_installments_by_due_date_on_connection(conn, company: int, end: date) -> dict:
-    """Every open installment on the loan's ACTIVE schedule due on or before
-    `end`, grouped by due_date. Replaces the old `_open_installments_due`
-    call made once per day, same split rationale as entries above. A
-    renegotiated-away closed schedule (s.status != 'active') or a
-    cancelled-loan schedule (task B7's cancel_loan: same status column, a
-    non-'active' value) is excluded exactly as before — this query's WHERE
-    clause is unchanged from the old per-day version other than the due_date
-    comparator."""
+    """Every still-outstanding installment on the loan's ACTIVE schedule due
+    on or before `end`, grouped by due_date. Replaces the old
+    `_open_installments_due` call made once per day, same split rationale as
+    entries above. A renegotiated-away closed schedule (s.status != 'active')
+    or a cancelled-loan schedule (task B7's cancel_loan: same status column, a
+    non-'active' value) is excluded, as is a loan that is not itself active.
+
+    Final-review C2: the status filter used to be `i.status='open'` with the
+    full `-i.total_cents` emitted — pre-B3 semantics. B3 introduced
+    `status='partially_paid'` for installments, which made a partially-paid
+    installment vanish from the forecast entirely (understating the outflow
+    by its whole remaining balance and compromising the `negative_cash`
+    alert). This now mirrors backend/finance/obligations.py::
+    _loan_installment_rows exactly — the same status set and the same
+    `total - paid_principal - paid_interest` remainder — which is the source
+    of truth for "what is still owed on this installment"."""
     rows = conn.execute(
         """
-        SELECT i.due_date,i.total_cents,i.number,l.lender FROM loan_installments i
+        SELECT i.due_date,i.total_cents,i.number,
+               i.paid_principal_cents,i.paid_interest_cents,l.lender
+        FROM loan_installments i
         JOIN loans l ON l.id=i.loan_id
         JOIN loan_schedules s ON s.id=i.schedule_id
         WHERE l.company=? AND i.due_date<=?
           AND i.schedule_id=l.active_schedule_id
-          AND s.status='active' AND i.status='open'
+          AND s.status='active' AND l.status='active'
+          AND i.status IN ('open','partially_paid')
         """,
         (company, end.isoformat()),
     ).fetchall()
     by_due_date: dict = defaultdict(list)
     for row in rows:
+        # Net out what has already been paid on this installment, exactly as
+        # the entries query above nets out its own settlements.
+        paid_cents = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
+        remaining = max(0, int(row["total_cents"]) - paid_cents)
+        if remaining <= 0:
+            continue
         by_due_date[row["due_date"]].append({
-            "amount_cents": -row["total_cents"],
+            "amount_cents": -remaining,
             "description": f"Parcela {row['number']} — {row['lender']}",
             "source": "loan_installments",
             "confidence": "forecast",

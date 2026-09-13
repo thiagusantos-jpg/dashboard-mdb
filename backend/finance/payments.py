@@ -77,6 +77,33 @@ def _is_unique_violation(exc: Exception) -> bool:
     return getattr(exc, "sqlstate", None) == "23505"
 
 
+# Final review C4: obligation_payments now carries a partial UNIQUE index on
+# cash_event_id (migration 022), so the INSERT itself — not only the
+# application-level pre-check — refuses to allocate one bank movement to two
+# obligations. The two violations reachable on that INSERT must be told apart:
+# a clash on the cash-event index is a caller error about
+# existing_cash_event_id, while a clash on UNIQUE(company,idempotency_key) is
+# a genuine idempotency race that must still replay the winner's stored
+# response. Both backends name the offending column/index in the message
+# (SQLite: "UNIQUE constraint failed: obligation_payments.cash_event_id";
+# PostgreSQL: 'duplicate key value violates unique constraint
+# "obligation_payments_active_cash_event_idx"'), and both spellings contain
+# "cash_event". On PostgreSQL the constraint name is also available
+# structurally via psycopg's `exc.diag.constraint_name`, which is preferred
+# over string matching whenever it is populated.
+_CASH_EVENT_ALLOCATED_MESSAGE = "Movimento de caixa já está vinculado a outro pagamento."
+
+
+def _is_cash_event_unique_violation(exc: Exception) -> bool:
+    if not _is_unique_violation(exc):
+        return False
+    diag = getattr(exc, "diag", None)
+    constraint = getattr(diag, "constraint_name", None) if diag is not None else None
+    if constraint:
+        return "cash_event" in constraint
+    return "cash_event" in str(exc)
+
+
 def _request_hash(
     *,
     kind: str,
@@ -145,17 +172,12 @@ def _reversal_request_hash(*, payment_id: int, reason: str, reversed_at: date) -
 # `_installment_allowed_actions` are reused (pure functions, no DB access) to
 # keep field semantics identical to B2's read path without duplicating them.
 #
-# NOTE (flagged in the task report): obligations.py's own
-# `get_obligation(..., 'loan_installment', ...)` computes paid_cents as
-# `paid_principal+paid_interest if status=='paid' else 0` — correct before
-# B3, but wrong now that installments can sit at status='partially_paid'
-# with a nonzero paid_cents. This module does NOT reuse that function for
-# exactly that reason (in addition to the connection-isolation problem
-# above); backend/finance/obligations.py itself was left untouched per this
-# task's explicit instructions, so that bug still needs a follow-up fix
-# there (and its list-side counterpart, `_loan_installment_rows`'s
-# `WHERE i.status='open'` filter, which will hide a partially-paid
-# installment from `list_obligations` entirely).
+# HISTORICAL NOTE: obligations.py used to compute an installment's paid_cents
+# as `paid_principal+paid_interest if status=='paid' else 0`, and to filter
+# its list query on `i.status='open'` — pre-B3 semantics that hid a
+# partially-paid installment. Commit 94ac0ee fixed both, so the two modules
+# now agree field for field; the duplication that remains here exists purely
+# for the connection-isolation reason above.
 
 
 def _entry_obligation_item(conn, company: int, entry_id: int) -> dict:
@@ -200,21 +222,31 @@ def _loan_installment_obligation_item(conn, company: int, installment_id: int) -
     row = conn.execute(
         """
         SELECT i.id,i.number,i.due_date,i.total_cents,i.status,i.loan_id,i.version,
-               i.paid_principal_cents,i.paid_interest_cents,l.lender,
+               i.paid_principal_cents,i.paid_interest_cents,i.schedule_id,l.lender,
+               l.status AS loan_status,l.active_schedule_id,
+               s.status AS schedule_status,
                (SELECT COUNT(*) FROM loan_installments WHERE schedule_id=i.schedule_id) AS count
         FROM loan_installments i
         JOIN loans l ON l.id=i.loan_id
+        LEFT JOIN loan_schedules s ON s.id=i.schedule_id
         WHERE i.id=? AND l.company=?
         """,
         (installment_id, company),
     ).fetchone()
     if not row:
         raise PaymentNotFoundError("Parcela não encontrada.")
-    # Unlike obligations.get_obligation's loan_installment branch, paid_cents
-    # is always the real sum — see the module-level NOTE above.
+    # Identical computation to obligations.get_obligation's loan_installment
+    # branch — see the module-level HISTORICAL NOTE above.
     paid_cents = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
     open_cents = max(0, row["total_cents"] - paid_cents)
     status = obligations._compute_status(row["status"], row["due_date"], open_cents)
+    # Same "is this installment still payable at all" rule as
+    # obligations.get_obligation's detail branch (final-review C1).
+    schedule_active = (
+        row["loan_status"] == "active"
+        and row["schedule_id"] == row["active_schedule_id"]
+        and row["schedule_status"] == "active"
+    )
     return {
         "key": f"loan_installment:{row['id']}",
         "kind": "loan_installment",
@@ -231,7 +263,9 @@ def _loan_installment_obligation_item(conn, company: int, installment_id: int) -
         "loan_id": str(row["loan_id"]),
         "number": row["number"],
         "count": row["count"],
-        "allowed_actions": obligations._installment_allowed_actions(open_cents),
+        "allowed_actions": obligations._installment_allowed_actions(
+            open_cents, schedule_active=schedule_active
+        ),
     }
 
 
@@ -416,8 +450,12 @@ def record_payment(
             else:
                 installment = conn.execute(
                     """
-                    SELECT i.*, l.company AS loan_company FROM loan_installments i
+                    SELECT i.*, l.company AS loan_company, l.status AS loan_status,
+                           l.active_schedule_id AS loan_active_schedule_id,
+                           s.status AS schedule_status
+                    FROM loan_installments i
                     JOIN loans l ON l.id=i.loan_id
+                    LEFT JOIN loan_schedules s ON s.id=i.schedule_id
                     WHERE i.id=?
                     """,
                     (obligation_id,),
@@ -425,6 +463,29 @@ def record_payment(
                 if not installment or installment["loan_company"] != company:
                     raise PaymentNotFoundError("Parcela não encontrada.")
                 installment = dict(installment)
+                # Final-review C1: `status='paid'` is NOT enough of a state
+                # guard here, and neither is `expected_version`. renegotiate()
+                # and cancel_loan() only flip `loan_schedules.status` (and
+                # swap `loans.active_schedule_id`) — the installment rows
+                # attached to the superseded/cancelled schedule keep
+                # status='open' AND keep their `version` untouched, so a
+                # pre-renegotiation expected_version still matches and the
+                # optimistic lock provides zero protection. Without this
+                # check a payment against such an orphaned installment
+                # succeeds, moving real cash, while the active schedule still
+                # carries the very same principal — the same debt payable
+                # twice. obligations.get_obligation() deliberately does not
+                # filter by schedule status (history access), so an orphaned
+                # installment is genuinely reachable from the API.
+                if (
+                    installment["loan_status"] != "active"
+                    or installment["schedule_id"] != installment["loan_active_schedule_id"]
+                    or installment["schedule_status"] != "active"
+                ):
+                    raise PaymentConflictError(
+                        "Esta parcela não pertence ao cronograma vigente de um "
+                        "contrato ativo e não pode ser paga."
+                    )
                 if installment["status"] == "paid":
                     raise PaymentConflictError("Parcela já paga.")
                 if int(installment["version"]) != int(expected_version):
@@ -484,8 +545,10 @@ def record_payment(
                     """,
                     (existing_cash_event_id,),
                 ).fetchone():
+                    # Fast pre-check only — the race-proof guarantee is the
+                    # UNIQUE index caught at the INSERT below (C4).
                     raise PaymentValidationError(
-                        "Movimento de caixa já está vinculado a outro pagamento.",
+                        _CASH_EVENT_ALLOCATED_MESSAGE,
                         fields=["existing_cash_event_id"],
                     )
 
@@ -599,25 +662,40 @@ def record_payment(
                 "obligation": after_item,
                 "cash_event_id": str(cash_event_id) if cash_event_id is not None else None,
             }
-            conn.execute(
-                """
-                INSERT INTO obligation_payments(
-                    id,company,obligation_kind,obligation_id,amount_cents,
-                    principal_cents,interest_cents,paid_at,cash_event_id,
-                    owns_cash_event,financial_event_id,interest_entry_id,
-                    idempotency_key,request_hash,response_json,reversed_at,
-                    created_by,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    payment_id, company, kind, obligation_id, amount_cents,
-                    principal_cents, interest_cents, paid_at.isoformat(),
-                    cash_event_id, owns_cash_event, financial_event_id,
-                    interest_entry_id, idempotency_key, request_hash,
-                    json.dumps(response, ensure_ascii=False), None,
-                    actor_id, timestamp,
-                ),
-            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO obligation_payments(
+                        id,company,obligation_kind,obligation_id,amount_cents,
+                        principal_cents,interest_cents,paid_at,cash_event_id,
+                        owns_cash_event,financial_event_id,interest_entry_id,
+                        idempotency_key,request_hash,response_json,reversed_at,
+                        created_by,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        payment_id, company, kind, obligation_id, amount_cents,
+                        principal_cents, interest_cents, paid_at.isoformat(),
+                        cash_event_id, owns_cash_event, financial_event_id,
+                        interest_entry_id, idempotency_key, request_hash,
+                        json.dumps(response, ensure_ascii=False), None,
+                        actor_id, timestamp,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - see C4 note above
+                if not _is_cash_event_unique_violation(exc):
+                    # Anything else (notably the idempotency-key UNIQUE) is
+                    # left to the outer handler's replay recovery.
+                    raise
+                # Another transaction allocated this very movement between
+                # our pre-check and this INSERT. Raising here aborts the whole
+                # `with db.connection()` block, so the settlement/cash writes
+                # made above are rolled back with it — the loser leaves no
+                # effects, exactly like the pre-check path.
+                raise PaymentValidationError(
+                    _CASH_EVENT_ALLOCATED_MESSAGE,
+                    fields=["existing_cash_event_id"],
+                ) from exc
             return response
     except PaymentError:
         raise

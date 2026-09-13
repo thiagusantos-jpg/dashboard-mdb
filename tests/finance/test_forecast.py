@@ -10,6 +10,7 @@ from backend.finance import accounts, ledger, loans
 from backend.finance import forecast as forecast_module
 from backend.finance.entries import EntryCommand, create_entry
 from backend.finance.forecast import SCENARIOS, forecast
+from backend.finance.payments import record_payment
 
 
 COMPANY = 1
@@ -114,24 +115,47 @@ def _ref_open_entries_due(company, day, *, due_on_or_before=False):
 
 
 def _ref_open_installments_due(company, day, *, due_on_or_before=False):
+    # DELIBERATELY CORRECTED (final review C2), not a verbatim copy anymore.
+    #
+    # The frozen copy of this helper carried the pre-B3 filter
+    # `i.status='open'` and emitted the full `-i.total_cents`. That is exactly
+    # why the equivalence tests below stayed green while forecast.py dropped a
+    # partially-paid installment from the forecast entirely: both sides made
+    # the same mistake, so "equivalent to the reference" proved nothing about
+    # partial installment payments. The reference is corrected here to the
+    # REAL intended semantics — every installment that still owes something on
+    # the active schedule, netted by what has already been paid — so the
+    # equivalence tests keep testing what they were meant to test (that B7's
+    # per-day → grouped-query rewrite changed no results) rather than
+    # enshrining a bug. The independent, arithmetic-from-first-principles
+    # assertion for this behavior lives in
+    # test_partially_paid_installment_shows_remaining_balance_in_forecast
+    # below, which does not compare against this code at all.
     comparator = "<=" if due_on_or_before else "="
     with db.connection() as conn:
         rows = conn.execute(
             f"""
-            SELECT i.total_cents,i.number,l.lender FROM loan_installments i
+            SELECT i.total_cents,i.number,i.paid_principal_cents,i.paid_interest_cents,l.lender
+            FROM loan_installments i
             JOIN loans l ON l.id=i.loan_id
             JOIN loan_schedules s ON s.id=i.schedule_id
             WHERE l.company=? AND i.due_date{comparator}?
               AND i.schedule_id=l.active_schedule_id
-              AND s.status='active' AND i.status='open'
+              AND s.status='active' AND l.status='active'
+              AND i.status IN ('open','partially_paid')
             """,
             (company, day.isoformat()),
         ).fetchall()
-    return [
-        {"amount_cents": -row["total_cents"], "description": f"Parcela {row['number']} — {row['lender']}",
-         "source": "loan_installments", "confidence": "forecast"}
-        for row in rows
-    ]
+    items = []
+    for row in rows:
+        paid = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
+        remaining = max(0, int(row["total_cents"]) - paid)
+        if remaining <= 0:
+            continue
+        items.append({"amount_cents": -remaining,
+                      "description": f"Parcela {row['number']} — {row['lender']}",
+                      "source": "loan_installments", "confidence": "forecast"})
+    return items
 
 
 def _ref_average_daily_realized(company, as_of, window_days=30):
@@ -608,3 +632,89 @@ def test_forecast_snapshot_isolation_ignores_concurrent_write_mid_calculation(fo
         if i["source"] == "financial_entries"
     ]
     assert -77_000 in later_amounts
+
+
+# --- Final review C2: partial installment payments in the forecast ---------
+
+
+def test_partially_paid_installment_shows_remaining_balance_in_forecast(forecast_db):
+    """Arithmetic from first principles, deliberately NOT an equivalence check
+    against the frozen reference implementation above.
+
+    A single installment of 110_000 (100_000 principal + 10_000 interest) has
+    55_000 paid against it. Exactly 55_000 is still owed, so the forecast's
+    loan_installments line for its due date must be -55_000 — not the full
+    -110_000 (ignoring the payment), and not nothing at all, which is what
+    happened before this fix: the query filtered `i.status='open'` while B3
+    had moved the row to 'partially_paid', so the whole remaining obligation
+    silently vanished from the cash projection (and from the negative_cash
+    alert).
+    """
+    bank = ledger.create_account(COMPANY, "Banco", "bank")
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=95_000,
+        installments=[{"number": 1, "due_date": "2026-09-20",
+                       "principal_cents": 100_000, "interest_cents": 10_000}],
+        start_date="2026-09-01",
+    )
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    assert installment["total_cents"] == 110_000
+
+    record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 12), expected_version=1, idempotency_key="partial-1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT status,total_cents,paid_principal_cents,paid_interest_cents "
+            "FROM loan_installments WHERE id=?",
+            (installment["id"],),
+        ).fetchone()
+    assert row["status"] == "partially_paid"
+    still_owed = (
+        row["total_cents"] - row["paid_principal_cents"] - row["paid_interest_cents"]
+    )
+    assert still_owed == 55_000
+
+    result = forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), "base", as_of=AS_OF)
+    due_day = next(d for d in result["days"] if d["date"] == "2026-09-20")
+    installment_amounts = [
+        i["amount_cents"] for i in due_day["items"] if i["source"] == "loan_installments"
+    ]
+    assert installment_amounts == [-55_000]
+
+    # And nowhere else in the window either — no duplicate, no full-amount row.
+    every_installment_amount = [
+        i["amount_cents"] for d in result["days"] for i in d["items"]
+        if i["source"] == "loan_installments"
+    ]
+    assert every_installment_amount == [-55_000]
+
+
+def test_fully_paid_installment_is_absent_from_forecast(forecast_db):
+    # Companion case to the test above: once nothing is left owing, the
+    # installment contributes no forecast line at all.
+    bank = ledger.create_account(COMPANY, "Banco", "bank")
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=100_000, net_disbursement_cents=95_000,
+        installments=[{"number": 1, "due_date": "2026-09-20",
+                       "principal_cents": 100_000, "interest_cents": 10_000}],
+        start_date="2026-09-01",
+    )
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=110_000,
+        paid_at=date(2026, 9, 12), expected_version=1, idempotency_key="full-1",
+        cash_account_id=bank["id"], principal_cents=100_000, interest_cents=10_000,
+    )
+
+    result = forecast(COMPANY, date(2026, 9, 1), date(2026, 9, 30), "base", as_of=AS_OF)
+    amounts = [
+        i["amount_cents"] for d in result["days"] for i in d["items"]
+        if i["source"] == "loan_installments"
+    ]
+    assert amounts == []

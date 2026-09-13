@@ -35,6 +35,25 @@ def _is_unique_violation(exc: Exception) -> bool:
     return getattr(exc, "sqlstate", None) == "23505"
 
 
+# Final review C4: loan_disbursements now carries a partial UNIQUE index on
+# cash_event_id (migration 022). See payments.py::_is_cash_event_unique_violation
+# for the full rationale — the message of a violation names the column
+# (SQLite) or the index (PostgreSQL), and both spellings contain "cash_event",
+# which is what separates it from the idempotency-key UNIQUE that shares the
+# same INSERT.
+_CASH_EVENT_ALLOCATED_MESSAGE = "Movimento de caixa já está vinculado a outro desembolso."
+
+
+def _is_cash_event_unique_violation(exc: Exception) -> bool:
+    if not _is_unique_violation(exc):
+        return False
+    diag = getattr(exc, "diag", None)
+    constraint = getattr(diag, "constraint_name", None) if diag is not None else None
+    if constraint:
+        return "cash_event" in constraint
+    return "cash_event" in str(exc)
+
+
 class InstallmentVersionConflict(ValueError):
     """Raised by pay_installment_on_connection when the optimistic-concurrency
     version check fails. See entries.EntryVersionConflict for the rationale;
@@ -326,8 +345,10 @@ def record_disbursement(
                     "SELECT 1 FROM loan_disbursements WHERE cash_event_id=?",
                     (existing_cash_event_id,),
                 ).fetchone():
+                    # Fast pre-check only — the race-proof guarantee is the
+                    # UNIQUE index caught at the INSERT below (C4).
                     raise LoanValidationError(
-                        "Movimento de caixa já está vinculado a outro desembolso.",
+                        _CASH_EVENT_ALLOCATED_MESSAGE,
                         fields=["existing_cash_event_id"],
                     )
 
@@ -381,20 +402,35 @@ def record_disbursement(
                 "entry_id": str(entry["id"]),
                 "cash_event_id": str(cash_event_id) if cash_event_id is not None else None,
             }
-            conn.execute(
-                """
-                INSERT INTO loan_disbursements(
-                    id,loan_id,company,amount_cents,disbursed_at,cash_event_id,
-                    owns_cash_event,idempotency_key,request_hash,response_json,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    disbursement_id, loan_id, company, amount_cents,
-                    disbursed_at.isoformat(), cash_event_id, owns_cash_event,
-                    idempotency_key, request_hash,
-                    json.dumps(response, ensure_ascii=False), timestamp,
-                ),
-            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO loan_disbursements(
+                        id,loan_id,company,amount_cents,disbursed_at,cash_event_id,
+                        owns_cash_event,idempotency_key,request_hash,response_json,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        disbursement_id, loan_id, company, amount_cents,
+                        disbursed_at.isoformat(), cash_event_id, owns_cash_event,
+                        idempotency_key, request_hash,
+                        json.dumps(response, ensure_ascii=False), timestamp,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - see C4 note above
+                if not _is_cash_event_unique_violation(exc):
+                    # Anything else (notably the idempotency-key UNIQUE) is
+                    # left to the outer handler's replay recovery.
+                    raise
+                # Another transaction claimed this movement between our
+                # pre-check and this INSERT. Raising aborts the whole
+                # `with db.connection()` block, rolling back the cash event
+                # and the proceeds entry created above — the loser leaves no
+                # effects.
+                raise LoanValidationError(
+                    _CASH_EVENT_ALLOCATED_MESSAGE,
+                    fields=["existing_cash_event_id"],
+                ) from exc
             return response
     except LoanError:
         raise
@@ -927,8 +963,37 @@ def loan_position(loan_id: int) -> dict:
                 (loan_id, loan["active_schedule_id"]),
             )
         ]
-    paid_principal = sum(i["paid_principal_cents"] or 0 for i in installments if i["status"] == "paid")
-    open_principal = sum(i["principal_cents"] for i in installments if i["status"] == "open")
+    # Final-review C3: both sums used to filter on a status label
+    # (`=='paid'` / `=='open'`), which predates task B3's
+    # `status='partially_paid'`. A partially-paid installment matched
+    # NEITHER, so its money disappeared from both sides of the position at
+    # once — a loan with a real partial payment reported
+    # `principal_cents: 0, paid_principal_cents: 0`, and web/assets/loans.js
+    # rendered "Principal em aberto: R$ 0,00" for a loan that still owed
+    # money. Compute from the AMOUNTS instead of the labels.
+    #
+    # `paid_principal` sums every installment returned above (the active
+    # schedule's rows plus any already-paid row from a superseded schedule —
+    # see the query's `OR status='paid'`), matching
+    # _principal_outstanding_on_connection's own loan-wide view of amortized
+    # principal.
+    #
+    # `open_principal` is restricted to the ACTIVE schedule and to rows that
+    # still owe something by definition ('open'/'partially_paid'): a
+    # superseded schedule's leftover row was already replaced by the new
+    # schedule's installments, so counting it would double-count the same
+    # debt, and a 'paid' row owes nothing regardless of what its
+    # paid_principal_cents column says (pay_installment_legacy_unsafe can
+    # mark a row 'paid' while having recorded less than its full principal —
+    # see that function's documented KNOWN BUG).
+    active_schedule_id = loan["active_schedule_id"]
+    paid_principal = sum(int(i["paid_principal_cents"] or 0) for i in installments)
+    open_principal = sum(
+        max(0, int(i["principal_cents"]) - int(i["paid_principal_cents"] or 0))
+        for i in installments
+        if i["schedule_id"] == active_schedule_id
+        and i["status"] in ("open", "partially_paid")
+    )
     return {
         "loan": dict(loan),
         "installments": installments,

@@ -115,9 +115,24 @@ def _entry_allowed_actions(status: str, source: str, open_cents: int) -> list:
     return actions
 
 
-def _installment_allowed_actions(open_cents: int) -> list:
+def _installment_allowed_actions(open_cents: int, *, schedule_active: bool) -> list:
+    """`schedule_active` is "this installment belongs to the CURRENT schedule
+    of an ACTIVE loan" — i.e. `loans.status='active'` AND
+    `i.schedule_id=loans.active_schedule_id` AND `loan_schedules.status='active'`.
+
+    Final-review C1: an installment left behind on a renegotiated-away
+    (status='closed') or cancelled schedule keeps `status='open'` forever —
+    renegotiate()/cancel_loan() never touch the installment rows — so
+    `open_cents>0` alone would advertise "pay" for a debt that was already
+    replaced by the new schedule's installments (paying it would move real
+    cash against principal that is still outstanding elsewhere: the same debt
+    payable twice). `record_payment` refuses such a payment with a 409; this
+    keeps the advertised action honest instead of offering a button the
+    server will reject. Callers with no schedule context at all must say so
+    explicitly rather than defaulting.
+    """
     actions = ["details"]
-    if open_cents > 0:
+    if open_cents > 0 and schedule_active:
         actions.append("pay")
     return actions
 
@@ -140,7 +155,14 @@ def _entry_rows(company: int) -> list:
             LEFT JOIN financial_events ev ON ev.entry_id=e.id
             WHERE e.company=? AND e.status IN ({placeholders})
               AND a.nature NOT IN ({nature_placeholders})
-            GROUP BY e.id
+            -- Final-review I1: every non-aggregated selected column is listed,
+            -- the joined a.sensitive included. `GROUP BY e.id` alone is valid
+            -- on SQLite only; PostgreSQL's functional-dependency relaxation
+            -- does not extend to a joined table's columns, so this query would
+            -- 500 there. Same convention as backend/finance/reporting.py.
+            GROUP BY e.id,e.version,e.description,e.due_date,e.competence,
+                     e.amount_cents,e.status,e.source,
+                     e.installment_number,e.installment_count,a.sensitive
             """,
             (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES),
         ).fetchall()
@@ -186,7 +208,8 @@ def _loan_installment_rows(company: int) -> list:
             JOIN loans l ON l.id=i.loan_id
             JOIN loan_schedules s ON s.id=i.schedule_id
             WHERE l.company=? AND i.schedule_id=l.active_schedule_id
-              AND s.status='active' AND i.status IN ('open','partially_paid')
+              AND s.status='active' AND l.status='active'
+              AND i.status IN ('open','partially_paid')
             """,
             (company,),
         ).fetchall()
@@ -217,7 +240,10 @@ def _loan_installment_rows(company: int) -> list:
             "loan_id": str(row["loan_id"]),
             "number": row["number"],
             "count": row["count"],
-            "allowed_actions": _installment_allowed_actions(open_cents),
+            # This query already restricts itself to the active schedule of an
+            # active loan (WHERE clause below), so every row here is payable
+            # by construction.
+            "allowed_actions": _installment_allowed_actions(open_cents, schedule_active=True),
             "_sensitive": False,  # loans carry no account/sensitive linkage
         })
     return items
@@ -314,7 +340,12 @@ def get_obligation(
                 LEFT JOIN financial_events ev ON ev.entry_id=e.id
                 WHERE e.id=? AND e.company=?
                   AND a.nature NOT IN ({nature_placeholders})
-                GROUP BY e.id
+                -- Final-review I1: see _entry_rows above — every
+                -- non-aggregated selected column must be listed for
+                -- PostgreSQL, joined columns included.
+                GROUP BY e.id,e.version,e.description,e.due_date,e.competence,
+                         e.amount_cents,e.status,e.source,
+                         e.installment_number,e.installment_count,a.sensitive
                 """,
                 (item_id, company, *_NON_PAYABLE_NATURES),
             ).fetchone()
@@ -351,10 +382,13 @@ def get_obligation(
             row = conn.execute(
                 """
                 SELECT i.id,i.number,i.due_date,i.total_cents,i.status,i.loan_id,i.version,l.lender,
-                       i.paid_principal_cents,i.paid_interest_cents,
+                       i.paid_principal_cents,i.paid_interest_cents,i.schedule_id,
+                       l.status AS loan_status,l.active_schedule_id,
+                       s.status AS schedule_status,
                        (SELECT COUNT(*) FROM loan_installments WHERE schedule_id=i.schedule_id) AS count
                 FROM loan_installments i
                 JOIN loans l ON l.id=i.loan_id
+                LEFT JOIN loan_schedules s ON s.id=i.schedule_id
                 WHERE i.id=? AND l.company=?
                 """,
                 (item_id, company),
@@ -369,6 +403,15 @@ def get_obligation(
         paid_cents = int(row["paid_principal_cents"] or 0) + int(row["paid_interest_cents"] or 0)
         open_cents = max(0, row["total_cents"] - paid_cents)
         status = _compute_status(row["status"], row["due_date"], open_cents)
+        # This branch deliberately returns installments on closed/cancelled
+        # schedules too (history access) — so, unlike the list query above,
+        # "payable" has to be computed here rather than assumed. See
+        # _installment_allowed_actions / final-review C1.
+        schedule_active = (
+            row["loan_status"] == "active"
+            and row["schedule_id"] == row["active_schedule_id"]
+            and row["schedule_status"] == "active"
+        )
         return {
             "key": f"loan_installment:{row['id']}",
             "kind": "loan_installment",
@@ -385,7 +428,9 @@ def get_obligation(
             "loan_id": str(row["loan_id"]),
             "number": row["number"],
             "count": row["count"],
-            "allowed_actions": _installment_allowed_actions(open_cents),
+            "allowed_actions": _installment_allowed_actions(
+                open_cents, schedule_active=schedule_active
+            ),
         }
 
     return None

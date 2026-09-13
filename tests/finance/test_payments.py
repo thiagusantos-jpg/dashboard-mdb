@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 from datetime import date
 
@@ -7,7 +8,9 @@ import pytest
 
 from backend import database as db
 from backend.finance import accounts, ledger, loans
+from backend.finance import payments
 from backend.finance.entries import EntryCommand, create_entry, get_entry
+from backend.finance.obligations import get_obligation
 from backend.finance.payments import (
     CASH_LINK_REQUIRED_MESSAGE,
     PaymentCashLinkRequiredError,
@@ -527,3 +530,235 @@ def test_two_concurrent_payments_exceeding_balance_only_one_confirms(payments_db
     reloaded = get_entry(entry["id"])
     assert reloaded["open_cents"] == 40_000
     assert ledger.account_balance(bank["id"]) == -60_000
+
+
+# --- Final review C1: state guard on the loan-installment path -------------
+
+
+def _one_installment_loan(principal=100_000, interest=10_000, due="2026-10-10"):
+    return loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=principal, net_disbursement_cents=principal - 5_000,
+        installments=[{"number": 1, "due_date": due,
+                       "principal_cents": principal, "interest_cents": interest}],
+        start_date="2026-09-01",
+    )
+
+
+def test_payment_against_superseded_schedule_installment_is_rejected(payments_db):
+    """The orphaned installment of a renegotiated-away schedule must not be
+    payable — its principal was replaced by the new schedule's installments,
+    so paying it would move real cash against a debt that is still fully
+    outstanding on the active schedule: the same principal paid twice.
+
+    The optimistic lock offers no protection here on purpose: `renegotiate()`
+    only flips `loan_schedules.status` and swaps `loans.active_schedule_id`,
+    never touching the orphaned rows — their `status` stays 'open' and their
+    `version` stays 1, so the pre-renegotiation `expected_version` below still
+    matches. Only an explicit schedule/loan state check can refuse this.
+    """
+    bank = bank_account()
+    loan = _one_installment_loan()
+    orphaned = loans.loan_position(loan["id"])["installments"][0]
+
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-12-10",
+                       "principal_cents": 100_000, "interest_cents": 4_000}],
+        reason="Prazo estendido",
+    )
+
+    with db.connection() as conn:
+        after_renegotiation = conn.execute(
+            "SELECT status,version FROM loan_installments WHERE id=?", (orphaned["id"],)
+        ).fetchone()
+    # Precondition of the bug this guards against: untouched status/version.
+    assert after_renegotiation["status"] == "open"
+    assert after_renegotiation["version"] == 1
+
+    with pytest.raises(PaymentConflictError):
+        record_payment(
+            1, "loan_installment", orphaned["id"], amount_cents=110_000,
+            paid_at=date(2026, 9, 12), expected_version=1, idempotency_key="orphan-1",
+            cash_account_id=bank["id"], principal_cents=100_000, interest_cents=10_000,
+        )
+
+    # No cash left the company, and nothing was recorded against the orphan.
+    assert ledger.account_balance(bank["id"]) == 0
+    with db.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM obligation_payments"
+        ).fetchone()["n"] == 0
+        row = conn.execute(
+            "SELECT paid_principal_cents,paid_interest_cents FROM loan_installments WHERE id=?",
+            (orphaned["id"],),
+        ).fetchone()
+    assert (row["paid_principal_cents"] or 0) == 0
+    assert (row["paid_interest_cents"] or 0) == 0
+
+    # And the debt is still fully outstanding on the active schedule — which
+    # is precisely why paying the orphan would have been a double payment.
+    assert loans.loan_position(loan["id"])["principal_cents"] == 100_000
+
+
+def test_payment_against_cancelled_loan_installment_is_rejected(payments_db):
+    bank = bank_account()
+    loan = _one_installment_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    loans.cancel_loan(COMPANY, loan["id"], reason="Contrato não utilizado")
+
+    with pytest.raises(PaymentConflictError):
+        record_payment(
+            1, "loan_installment", installment["id"], amount_cents=110_000,
+            paid_at=date(2026, 9, 12), expected_version=1, idempotency_key="cancelled-1",
+            cash_account_id=bank["id"], principal_cents=100_000, interest_cents=10_000,
+        )
+    assert ledger.account_balance(bank["id"]) == 0
+
+
+def test_superseded_and_cancelled_installments_do_not_advertise_pay(payments_db):
+    # get_obligation deliberately still returns these rows (history access),
+    # so the guard has to live in `allowed_actions`, not in the query.
+    loan = _one_installment_loan()
+    orphaned = loans.loan_position(loan["id"])["installments"][0]
+    loans.renegotiate(
+        loan["id"],
+        installments=[{"number": 1, "due_date": "2026-12-10",
+                       "principal_cents": 100_000, "interest_cents": 4_000}],
+        reason="Prazo estendido",
+    )
+
+    detail = get_obligation(COMPANY, "loan_installment", orphaned["id"])
+    assert detail is not None, "history access to a superseded installment must be preserved"
+    assert detail["open_cents"] == 110_000
+    assert detail["allowed_actions"] == ["details"]
+
+    # The replacement installment, on the active schedule, still offers "pay".
+    active = loans.loan_position(loan["id"])["installments"]
+    active_open = [i for i in active if i["id"] != orphaned["id"]][0]
+    live = get_obligation(COMPANY, "loan_installment", active_open["id"])
+    assert "pay" in live["allowed_actions"]
+
+    cancelled_loan = _one_installment_loan(due="2026-11-10")
+    cancelled_installment = loans.loan_position(cancelled_loan["id"])["installments"][0]
+    loans.cancel_loan(COMPANY, cancelled_loan["id"], reason="Contrato não utilizado")
+    cancelled_detail = get_obligation(COMPANY, "loan_installment", cancelled_installment["id"])
+    assert cancelled_detail["allowed_actions"] == ["details"]
+
+
+# --- Final review C4: cash-event allocation is unique at the schema level --
+
+
+def test_schema_refuses_two_live_payments_on_one_cash_event(payments_db):
+    """The constraint itself, independent of record_payment's own checks:
+    obligation_payments may hold at most ONE non-reversed row per
+    cash_event_id (migration 022). Reversing that row frees the movement for
+    a new allocation — the documented "reversal frees the movement" semantic
+    that the `reversed_at IS NULL` predicate encodes."""
+    bank = bank_account()
+    imported = ledger.post_cash_event(1, bank["id"], -40_000, date(2026, 9, 12), "Débito")
+
+    def insert(payment_id, key, reversed_at=None):
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO obligation_payments(
+                    id,company,obligation_kind,obligation_id,amount_cents,
+                    principal_cents,interest_cents,paid_at,cash_event_id,
+                    owns_cash_event,financial_event_id,interest_entry_id,
+                    idempotency_key,request_hash,response_json,reversed_at,
+                    created_by,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    payment_id, 1, "entry", 1, 40_000, None, None, "2026-09-12",
+                    imported["id"], 0, None, None, key, "h", "{}", reversed_at,
+                    None, db.now(),
+                ),
+            )
+
+    insert(1001, "raw-1")
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(1002, "raw-2")
+
+    # Once the first allocation is reversed, the movement is free again.
+    with db.connection() as conn:
+        conn.execute(
+            "UPDATE obligation_payments SET reversed_at='2026-09-13' WHERE id=?", (1001,)
+        )
+    insert(1003, "raw-3")
+
+
+def test_concurrent_allocation_of_one_cash_event_leaves_a_single_payment(payments_db):
+    """Two requests with DIFFERENT idempotency keys, naming the SAME imported
+    bank movement for two DIFFERENT obligations, racing so that both clear the
+    application-level "already allocated?" pre-check before either inserts.
+
+    Before migration 022 both would commit, allocating one real bank movement
+    to two different debts. The barrier below pins the interleaving to exactly
+    that window: `settle_entry_on_connection` is the first WRITE record_payment
+    performs, immediately after the pre-check, so holding both threads there
+    guarantees both pre-checks ran against the pre-insert state.
+    """
+    bank = bank_account()
+    entry_a = expense_entry(100_000)
+    entry_b = expense_entry(100_000)
+    imported = ledger.post_cash_event(1, bank["id"], -40_000, date(2026, 9, 12), "Débito")
+
+    # `settle_entry_on_connection` is looked up as a module global inside
+    # record_payment, so rebinding it on the module is enough to wrap it.
+    real_settle = payments.settle_entry_on_connection
+    gate = threading.Barrier(2, timeout=10)
+
+    def gated_settle(*args, **kwargs):
+        try:
+            gate.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return real_settle(*args, **kwargs)
+
+    results = {}
+    errors = {}
+
+    def attempt(name, entry_id, key):
+        try:
+            results[name] = record_payment(
+                1, "entry", entry_id, amount_cents=40_000, paid_at=date(2026, 9, 12),
+                expected_version=1, idempotency_key=key,
+                existing_cash_event_id=imported["id"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = exc
+
+    payments.settle_entry_on_connection = gated_settle
+    try:
+        t1 = threading.Thread(target=attempt, args=("a", entry_a["id"], "race-a"))
+        t2 = threading.Thread(target=attempt, args=("b", entry_b["id"], "race-b"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=60)
+        t2.join(timeout=60)
+    finally:
+        payments.settle_entry_on_connection = real_settle
+
+    assert len(results) == 1, f"expected exactly one winner, got results={results} errors={errors}"
+    assert len(errors) == 1
+    loser = errors[list(errors)[0]]
+    assert isinstance(loser, PaymentValidationError), loser
+    assert "vinculado" in str(loser)
+
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT obligation_id FROM obligation_payments WHERE cash_event_id=? AND reversed_at IS NULL",
+            (imported["id"],),
+        ).fetchall()
+    assert len(rows) == 1
+
+    # The loser left no partial effects: its entry is untouched and no extra
+    # cash movement exists.
+    winner_entry_id = int(rows[0]["obligation_id"])
+    loser_entry_id = entry_b["id"] if winner_entry_id == entry_a["id"] else entry_a["id"]
+    assert get_entry(loser_entry_id)["open_cents"] == 100_000
+    assert get_entry(winner_entry_id)["open_cents"] == 60_000
+    assert ledger.account_balance(bank["id"]) == -40_000
