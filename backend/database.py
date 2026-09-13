@@ -219,7 +219,7 @@ def companies():
     with connection() as db:
         return [dict(r) for r in db.execute('SELECT * FROM companies ORDER BY name')]
 
-def put_dataset(company, resource, period, payload, db=None, documents=None):
+def put_dataset(company, resource, period, payload, db=None, documents=None, summary=None):
     # `documents` is the row's item count, kept alongside the payload so readers
     # that only need "how many" (status(), periods()) never transfer the payload
     # itself — a few MB per row against a network-attached Postgres. Derived from
@@ -227,10 +227,14 @@ def put_dataset(company, resource, period, payload, db=None, documents=None):
     # document count explicitly, since its payload is a dict, not a list of items.
     if documents is None:
         documents = len(payload) if isinstance(payload, list) else 0
-    sql = '''INSERT INTO datasets(company,resource,period,payload,updated_at,documents) VALUES(?,?,?,?,?,?)
+    # `summary` is the small per-period aggregate the dashboard's timeline needs,
+    # cached here so it never re-reads the payload to recompute it (migration 023).
+    sql = '''INSERT INTO datasets(company,resource,period,payload,updated_at,documents,summary) VALUES(?,?,?,?,?,?,?)
     ON CONFLICT(company,resource,period) DO UPDATE SET payload=excluded.payload,
-    updated_at=excluded.updated_at,version=datasets.version+1,documents=excluded.documents'''
-    args = (company, resource, period, json.dumps(payload, ensure_ascii=False, allow_nan=False), now(), documents)
+    updated_at=excluded.updated_at,version=datasets.version+1,documents=excluded.documents,
+    summary=excluded.summary'''
+    args = (company, resource, period, json.dumps(payload, ensure_ascii=False, allow_nan=False), now(), documents,
+            json.dumps(summary, ensure_ascii=False, allow_nan=False) if summary is not None else None)
     if db is not None:
         db.execute(sql, args)
     else:
@@ -255,6 +259,52 @@ def catalog_meta(company, resources):
             f"WHERE company=? AND period='current' AND resource IN ({placeholders})",
             (company, *resources)).fetchall()
     return {r['resource']: {'count': r['documents'], 'updated_at': r['updated_at']} for r in rows}
+
+
+def period_summaries(company, db=None):
+    """Cached per-period aggregates for the dashboard timeline, oldest first.
+
+    Carries no payload: the timeline needs an end date and four totals per month,
+    and reading the receipts to recompute them cost 62 MB per page load against
+    production data. A NULL summary means the row predates migration 023 — the
+    caller falls back to its payload until a sync backfills it.
+    """
+    sql = ("SELECT period,summary FROM datasets "
+           "WHERE company=? AND resource='sales' AND documents>0 ORDER BY period")
+
+    def read(conn):
+        return [(r['period'], json.loads(r['summary']) if r['summary'] else None)
+                for r in conn.execute(sql, (company,))]
+
+    if db is not None:
+        return read(db)
+    with connection() as own:
+        return read(own)
+
+
+def set_period_summary(company, period, summary, db=None):
+    """Cache a period's timeline aggregate without rewriting its payload."""
+    sql = "UPDATE datasets SET summary=? WHERE company=? AND resource='sales' AND period=?"
+    args = (json.dumps(summary, ensure_ascii=False, allow_nan=False), company, period)
+    if db is not None:
+        db.execute(sql, args)
+    else:
+        with connection() as own:
+            own.execute(sql, args)
+
+
+def periods_missing_summary(company, db=None):
+    """Periods whose timeline aggregate was never cached (see period_summaries)."""
+    sql = ("SELECT period FROM datasets WHERE company=? AND resource='sales' "
+           "AND summary IS NULL ORDER BY period")
+
+    def read(conn):
+        return [r['period'] for r in conn.execute(sql, (company,))]
+
+    if db is not None:
+        return read(db)
+    with connection() as own:
+        return read(own)
 
 
 def _backfill_catalog_counts(db):

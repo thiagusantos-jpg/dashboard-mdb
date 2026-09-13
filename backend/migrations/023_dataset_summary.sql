@@ -1,0 +1,12 @@
+-- The dashboard's `timeline` (one row per period: end date + revenue/profit/
+-- ticket/receipts) was rebuilt on every page load by reading each historical
+-- period's full `payload` and re-running models.summarize() over its whole
+-- receipts list. Measured against production data: 62.2 MB transferred and
+-- re-aggregated to produce ~200 bytes per month, and the cost grew with every
+-- month the store had ever operated.
+--
+-- `summary` caches exactly that per-period result as JSON, written by the sync
+-- that produces the payload (backend/sync.py). NULL means "not computed yet" —
+-- readers fall back to the payload for that row, so a period written before
+-- this column existed keeps rendering correctly until a sync backfills it.
+ALTER TABLE datasets ADD COLUMN summary TEXT;

@@ -12,6 +12,29 @@ def month_end(period):
     year,month=map(int,period.split('-'))
     return date(year,month,calendar.monthrange(year,month)[1])
 
+def period_summary(payload):
+    """The dashboard timeline's whole per-period need: an end date and four totals.
+
+    Cached on the row (datasets.summary) so the timeline never reads the receipts
+    again — recomputing these from every historical month cost 62 MB per page load.
+    Computed exactly as the timeline used to, products/analysis left out on purpose.
+    """
+    return {'end':payload['end'],'totals':models.summarize(payload['receipts'])['totals']}
+
+def _backfill_summaries(company):
+    """Cache the timeline aggregate for periods synced before it was stored.
+
+    A daily 'recent' run only rewrites recent months, so without this the store's
+    older periods would keep paying the full-payload cost forever. Reads each
+    missing period once, here — inside a job that already has a progress channel
+    and a generous time budget — instead of on a user's page load.
+    """
+    for period in db.periods_missing_summary(company):
+        row=db.dataset(company,'sales',period)
+        if not row or not isinstance(row['payload'],dict) or 'receipts' not in row['payload']:
+            continue
+        db.set_period_summary(company,period,period_summary(row['payload']))
+
 def month_range(start,end):
     y,m=map(int,start.split('-'))
     result=[]
@@ -84,7 +107,8 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
                     raise models.DataError(f'Reconciliação {p}: diferença de {check["difference"]/100:.2f}; {check["missing_documents"]} documentos sem correspondência. Base anterior preservada.')
                 with db.connection() as conn:
                     db.put_dataset(company,'sales',p,{'receipts':canonical,'analysis':analysis,
-                        'reconciliation':check,'raw_count':len(raw),'start':start,'end':end},conn,documents=len(raw))
+                        'reconciliation':check,'raw_count':len(raw),'start':start,'end':end},conn,documents=len(raw),
+                        summary=period_summary({'receipts':canonical,'end':end}))
                 db.update_job(job_id,completed=index+1,detail=f'{p} reconciliado e salvo')
             except (models.DataError,KeyError,ValueError,TypeError) as e:
                 message=str(e) if isinstance(e,models.DataError) else f'Contrato Mobne incompatível em {p}; consulte a cobertura da sincronização.'
@@ -113,6 +137,7 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
         # One row per product per day — the point-in-time history the previous
         # design lost by only ever keeping the latest stock/price dataset.
         snapshot_catalogs(company,today)
+        _backfill_summaries(company)
         if failed_periods:
             ok=len(periods)-len(failed_periods)
             db.update_job(job_id,state='completed_with_errors',

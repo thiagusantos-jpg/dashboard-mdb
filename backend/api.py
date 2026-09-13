@@ -297,12 +297,18 @@ def dashboard(company:int,period:str):
         timeline=[]
         # documents=0 means Mobne genuinely has no sales for the period (e.g. before
         # onboarding), not an unsynced gap; excluded so it never reads as a zero-revenue month.
-        for r in conn.execute("SELECT period,payload FROM datasets WHERE company=? AND resource='sales' AND documents>0 ORDER BY period",(company,)):
-            p=__import__('json').loads(r['payload'])
-            s=models.summarize(p['receipts'])['totals']
+        # Reads the cached per-period aggregate, never the payload: recomputing these
+        # four totals from every historical month's receipts moved 62 MB per page load.
+        for key,cached in db.period_summaries(company,conn):
+            if cached is None:
+                # Written before the summary was cached; pay the old cost for this row
+                # alone until a sync backfills it (sync.py::_backfill_summaries).
+                p=db.dataset(company,'sales',key,conn)['payload']
+                cached={'end':p['end'],'totals':models.summarize(p['receipts'])['totals']}
             # Seasonality/projection pages must not read an in-progress month as a closed one.
-            timeline.append({'period':r['period'],'end':p['end'],
-                'partial':p['end']<__import__('backend.sync',fromlist=['month_end']).month_end(r['period']).isoformat(),**s})
+            timeline.append({'period':key,'end':cached['end'],
+                'partial':cached['end']<__import__('backend.sync',fromlist=['month_end']).month_end(key).isoformat(),
+                **cached['totals']})
         stock=db.dataset(company,'stock',db=conn)
         prices=db.dataset(company,'prices',db=conn)
         # Every active product, sold or not — models.summarize() alone only returns

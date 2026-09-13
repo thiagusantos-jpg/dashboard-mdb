@@ -16,7 +16,7 @@ import sqlite3
 
 import pytest
 
-from backend import api, database as db
+from backend import api, database as db, models, sync
 
 
 COMPANY = 218
@@ -122,3 +122,143 @@ def test_an_empty_catalog_reports_zero_rather_than_being_treated_as_uncounted(is
     db.put_dataset(COMPANY, 'products', 'current', [])
 
     assert api.status(COMPANY)['catalogs']['products']['count'] == 0
+
+
+# --- /dashboard timeline ---------------------------------------------------
+
+
+def raw_receipt(id, day, revenue=100.0, cost=30.0):
+    return {'CupomFiscalId': id, 'CupomFiscalRefId': None, 'EmpresaId': COMPANY,
+            'DtaMovimento': f'{day}T10:00:00', 'VlrLiquido': revenue, 'Status': 'V', 'Especie': 'CF',
+            'CupomFiscalItem': [{'CupomItemId': 1, 'ProdutoId': 501, 'Status': 'V',
+                'Quantidade': 1, 'VlrLiquido': revenue, 'CustoVendaMedioLiquido': cost}]}
+
+
+def raw_analysis(doc_id, day, revenue=100.0, cost=30.0):
+    return {'DocumentoId': doc_id, 'ItemId': 1, 'Produto_ProdutoId': 501, 'Produto_Descricao': 'Produto teste',
+            'Produto_CatCategoriaId': None, 'Produto_CatCategoria': None, 'DtaMovimento': f'{day}T10:00:00',
+            'VlrDocumentoLiquido': revenue, 'QtdeProduto': 1, 'CustoMedioLiquido': cost,
+            'StatusDocto': 'V', 'StatusItem': 'V', 'EntradaSaida': 'S', 'Tipo': 'V', 'Especie': 'CF',
+            'Empresa_EmpresaId': COMPANY}
+
+
+class FakeClient:
+    def __init__(self, receipts, analysis):
+        self.receipts, self.analysis_rows = receipts, analysis
+
+    def fetch_all(self, resource, params=None, progress=None):
+        if resource == 'companies':
+            return [{'EmpresaId': COMPANY, 'DescricaoReduzida': 'Loja Teste', 'RazaoSocial': 'Loja Teste LTDA'}]
+        return self.receipts if resource == 'receipts' else []
+
+    def analysis(self, company, start, end):
+        return self.analysis_rows
+
+    def close(self):
+        pass
+
+
+def sync_month(period, revenue=100.0):
+    day = f'{period}-05'
+    job_id = sync.run(COMPANY, mode='month', period=period,
+                      client=FakeClient([raw_receipt(1, day, revenue=revenue)],
+                                        [raw_analysis(1, day, revenue=revenue)]))
+    job = next(r for r in db.jobs(COMPANY) if r['id'] == job_id)
+    assert job['state'] == 'completed', job['error']
+
+
+def summarize_calls(monkeypatch, fn):
+    """How many period payloads a call parses and re-aggregates.
+
+    The timeline's cost is one models.summarize() over a full receipts list per
+    historical period — counting statements would miss it entirely, since all of
+    them arrive through a single query returning N multi-MB rows.
+    """
+    calls = {'n': 0}
+    real = models.summarize
+
+    def counting(*args, **kwargs):
+        calls['n'] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(models, 'summarize', counting)
+    try:
+        fn()
+    finally:
+        monkeypatch.setattr(models, 'summarize', real)
+    return calls['n']
+
+
+def test_dashboard_cost_does_not_grow_with_the_stores_history(isolated_db, monkeypatch):
+    """The 62 MB-per-page-load regression: the timeline re-read and re-aggregated
+    every historical period's full payload to produce ~200 bytes of totals per
+    month, so opening the dashboard got more expensive with every month the store
+    had ever operated. The selected period and its two comparisons are a legitimate
+    constant cost; the history behind them must not be."""
+    for period in ('2026-01', '2026-02', '2026-03'):
+        sync_month(period)
+    short_history = summarize_calls(monkeypatch, lambda: api.dashboard(COMPANY, '2026-03'))
+
+    for period in ('2025-08', '2025-09', '2025-10', '2025-11', '2025-12'):
+        sync_month(period)
+    long_history = summarize_calls(monkeypatch, lambda: api.dashboard(COMPANY, '2026-03'))
+
+    assert long_history == short_history
+
+
+def test_dashboard_timeline_query_does_not_carry_payloads(isolated_db):
+    """The transfer side of the same regression: whatever the timeline reads per
+    period must not include the payload column."""
+    for period in ('2026-01', '2026-02', '2026-03'):
+        sync_month(period)
+
+    _, statements = executed_sql(lambda: api.dashboard(COMPANY, '2026-03'))
+
+    timeline_scans = [s for s in statements if "resource='sales'" in s and 'ORDER BY period' in s]
+    assert timeline_scans, 'expected the timeline to scan the sales periods'
+    assert payload_reads(timeline_scans) == []
+
+
+def test_dashboard_timeline_matches_the_payload_derived_computation(isolated_db):
+    """Equivalence guard: the stored summary must reproduce exactly what parsing the
+    raw payload produced, or this trades correctness for bandwidth."""
+    sync_month('2026-01', revenue=150.0)
+    sync_month('2026-02', revenue=250.0)
+
+    timeline = {row['period']: row for row in api.dashboard(COMPANY, '2026-02')['timeline']}
+
+    for period, expected_revenue in (('2026-01', 15000), ('2026-02', 25000)):
+        payload = db.dataset(COMPANY, 'sales', period)['payload']
+        expected = models.summarize(payload['receipts'])['totals']
+        assert timeline[period]['revenue'] == expected_revenue
+        for field, value in expected.items():
+            assert timeline[period][field] == value, f'{period}.{field}'
+        assert timeline[period]['end'] == payload['end']
+
+
+def test_dashboard_timeline_is_correct_for_periods_with_no_stored_summary(isolated_db):
+    """Rows written before the summary existed must still render, reading their
+    payload as before, until the next sync backfills them."""
+    sync_month('2026-01', revenue=150.0)
+    with db.connection() as conn:
+        conn.execute("UPDATE datasets SET summary=NULL WHERE resource='sales'")
+
+    timeline = api.dashboard(COMPANY, '2026-01')['timeline']
+
+    assert [row['revenue'] for row in timeline] == [15000]
+
+
+def test_sync_backfills_summaries_for_periods_that_lack_them(isolated_db):
+    """A daily 'recent' sync only rewrites recent months, so historical periods would
+    keep paying the full-payload cost forever without an explicit backfill."""
+    sync_month('2026-01')
+    sync_month('2026-02')
+    with db.connection() as conn:
+        conn.execute("UPDATE datasets SET summary=NULL WHERE resource='sales' AND period='2026-01'")
+
+    sync_month('2026-02')  # any sync run heals what is missing
+
+    with db.connection() as conn:
+        missing = conn.execute(
+            "SELECT COUNT(*) AS n FROM datasets WHERE resource='sales' AND summary IS NULL").fetchone()
+    assert missing['n'] == 0
