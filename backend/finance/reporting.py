@@ -53,14 +53,14 @@ def management_result(
     account_lines = []
     restricted = False
     on_date = period + "-01"
-    for account in list_accounts(company, include_archived=True):
+    from .accounts import resolve_parameters
+
+    all_accounts = list_accounts(company, include_archived=True)
+    budget_key = lambda account: "budget:" + (account["system_key"] or account["code"])  # noqa: E731
+    budgets = resolve_parameters(company, [budget_key(a) for a in all_accounts], on_date, store=store)
+    for account in all_accounts:
         actual = actual_by_id.get(account["id"])
-        budget = resolve_parameter(
-            company,
-            "budget:" + (account["system_key"] or account["code"]),
-            on_date,
-            store=store,
-        )
+        budget = budgets[budget_key(account)]
         actual_cents = int(actual["actual_cents"]) if actual else 0
         if not actual_cents and budget is None:
             continue

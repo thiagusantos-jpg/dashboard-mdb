@@ -425,3 +425,27 @@ function mountEchartGauge(el, o) {
   // (above) and must not be clobbered by this catch-all firing right after on the same hover.
   echartsTooltip(chart, (p) => p.componentType === 'series' ? (o.tip || '') : '');
 }
+
+/* Loaded on demand (task C7). echarts.min.js is 1.12 MB (368 KB gzip), about
+ * three quarters of all JavaScript, and login, Configurações and the whole
+ * Financeiro module never draw a chart. The CSP (script-src 'self') allows a
+ * same-origin script element. A failed download is not remembered, so the
+ * next chart page tries again. `var` keeps the state visible to unit tests. */
+var ECHARTS_SRC = 'assets/vendor/echarts/echarts.min.js?v=6.1.0';
+var echartsLoading = null;
+
+function ensureEcharts() {
+  if (typeof window !== 'undefined' && window.echarts) return Promise.resolve();
+  if (echartsLoading) return echartsLoading;
+  echartsLoading = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = ECHARTS_SRC;
+    script.onload = () => resolve();
+    script.onerror = () => {
+      echartsLoading = null;
+      reject(new Error('Não foi possível carregar os gráficos.'));
+    };
+    document.head.appendChild(script);
+  });
+  return echartsLoading;
+}

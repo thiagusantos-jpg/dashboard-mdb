@@ -584,7 +584,7 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 /* ============================================================
    BADGES
    ============================================================ */
-.badge-success { display: inline-block; background: #D5F5E3; color: var(--green-dark); padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+.badge-success { display: inline-block; background: #D5F5E3; color: #17613A; /* 6.4:1 on #D5F5E3 (C7 measure: --green-dark was 4.0:1) */ padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .badge-info { display: inline-block; background: #D6EAF8; color: #1B5E8C; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .badge-warning { display: inline-block; background: #FDEBD0; color: #7A4F00; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .badge-error { display: inline-block; background: #FADBD8; color: #943126; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }

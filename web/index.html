@@ -180,9 +180,8 @@
 <script src="assets/icons.js?v=20260912-ux8"></script>
 <script src="assets/charts.js?v=20260912-ux8"></script>
 <script src="assets/insights.js?v=20260913-c4"></script>
-<!-- Apache ECharts — vendored locally, Apache-2.0, see assets/vendor/echarts/README.md -->
-<script src="assets/vendor/echarts/echarts.min.js?v=6.1.0"></script>
-<script src="assets/echarts-charts.js?v=20260912-ux8"></script>
+<!-- Apache ECharts (vendored, Apache-2.0, see assets/vendor/echarts/README.md) loads on demand: ensureEcharts() below. -->
+<script src="assets/echarts-charts.js?v=20260913-c7"></script>
 <!-- Page-load coordinator (task A4): defines createPageState(), used by app.js's APP.pageState
      and by every render function below via begin()/isCurrent() — must load before all of them. -->
 <script src="assets/page-state.js?v=20260912-a4"></script>
@@ -197,6 +196,6 @@
 <script src="assets/product-detail.js?v=20260912-a4"></script>
 <script src="assets/actions.js?v=20260912-a4"></script>
 <script src="assets/profile.js?v=20260913-c3"></script>
-<script src="assets/app.js?v=20260913-c5"></script>
+<script src="assets/app.js?v=20260913-c7"></script>
 </body>
 </html>

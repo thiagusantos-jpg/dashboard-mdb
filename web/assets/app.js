@@ -765,6 +765,15 @@ async function renderPage() {
     APP.dashboard = payload;
     APP.dashboardCompany = company;
   }
+  // Every analytics page draws charts; the library arrives only now (C7).
+  if (typeof ensureEcharts === 'function') {
+    try {
+      await ensureEcharts();
+    } catch (e) {
+      if (!APP.pageState.isCurrent(token)) return;
+      return renderRetryState(e.message + ' Verifique a conexão e tente novamente.');
+    }
+  }
   if (!APP.pageState.isCurrent(token)) return;
   const renderers = {resumo: renderResumo, estoque: renderEstoque, precos: renderPrecos, mapa: renderMapa,
     diagnostico: renderDiagnostico, sazonalidade: renderSazonalidade, visao: renderVisao,

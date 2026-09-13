@@ -109,6 +109,15 @@ def _new_id() -> int:
 def _seed_defaults(company: int) -> None:
     timestamp = db.now()
     with db.connection() as conn:
+        # Measured in C7: re-running 53 idempotent upserts on every read was
+        # a third of management_result's statements. One count settles it;
+        # a missing default (fewer rows) still falls through to the upserts.
+        present = conn.execute(
+            "SELECT COUNT(*) AS n FROM finance_accounts WHERE company=? AND system_key IS NOT NULL",
+            (company,),
+        ).fetchone()["n"]
+        if present >= len(DEFAULT_ACCOUNTS):
+            return
         for account in DEFAULT_ACCOUNTS.values():
             conn.execute(
                 """
@@ -279,6 +288,47 @@ def set_parameter(
             ),
         ).fetchone()
     return dict(row)
+
+
+def resolve_parameters(
+    company: int,
+    keys,
+    on_date: str,
+    *,
+    store: Optional[int] = None,
+    category: Optional[int] = None,
+    product: Optional[int] = None,
+) -> dict:
+    """resolve_parameter for many keys in one query (C7: the per-account
+    lookup in management_result opened one connection per account). Same
+    rules: effective on `on_date`, scope precedence product > category >
+    store > general, then the latest effective_from. Missing keys map to None."""
+    keys = list(dict.fromkeys(keys))
+    resolved = {key: None for key in keys}
+    if not keys:
+        return resolved
+    marks = ",".join("?" for _ in keys)
+    with db.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT key,value_json,store,category,product,effective_from FROM management_parameters
+            WHERE company=? AND key IN ({marks}) AND effective_from<=?
+              AND (effective_to IS NULL OR effective_to>=?)
+              AND (store=0 OR store=?)
+              AND (category=0 OR category=?)
+              AND (product=0 OR product=?)
+            """,
+            (company, *keys, on_date, on_date, store or 0, category or 0, product or 0),
+        ).fetchall()
+    best = {}
+    for row in rows:
+        scope = 4 if row["product"] else 3 if row["category"] else 2 if row["store"] else 1
+        rank = (scope, row["effective_from"])
+        if row["key"] not in best or rank > best[row["key"]][0]:
+            best[row["key"]] = (rank, row["value_json"])
+    for key, (_rank, value) in best.items():
+        resolved[key] = json.loads(value)
+    return resolved
 
 
 def resolve_parameter(
