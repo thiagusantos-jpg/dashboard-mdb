@@ -326,6 +326,28 @@ def _backfill_catalog_counts(db):
                        (len(payload), row['company'], row['resource'], row['period']))
 
 
+def copy_dataset(company, resource, target_resource, db=None):
+    """Duplicate a catalog row under another resource name, server-side.
+
+    The sync keeps a '_previous' copy of stock/prices before replacing them. Doing
+    that by reading the payload out and writing the same bytes straight back moves
+    a couple of MB across the wire twice for a copy the database can do by itself.
+    A missing source row is a no-op, matching the caller's old `if previous` guard.
+    """
+    sql = '''INSERT INTO datasets(company,resource,period,payload,updated_at,documents,summary)
+    SELECT company,?,period,payload,?,documents,summary FROM datasets
+    WHERE company=? AND resource=? AND period='current'
+    ON CONFLICT(company,resource,period) DO UPDATE SET payload=excluded.payload,
+    updated_at=excluded.updated_at,version=datasets.version+1,documents=excluded.documents,
+    summary=excluded.summary'''
+    args = (target_resource, now(), company, resource)
+    if db is not None:
+        db.execute(sql, args)
+    else:
+        with connection() as own:
+            own.execute(sql, args)
+
+
 def dataset(company, resource, period='current', db=None):
     def read(conn):
         row = conn.execute('SELECT * FROM datasets WHERE company=? AND resource=? AND period=?',

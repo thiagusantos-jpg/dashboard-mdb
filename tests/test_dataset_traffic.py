@@ -262,3 +262,87 @@ def test_sync_backfills_summaries_for_periods_that_lack_them(isolated_db):
         missing = conn.execute(
             "SELECT COUNT(*) AS n FROM datasets WHERE resource='sales' AND summary IS NULL").fetchone()
     assert missing['n'] == 0
+
+
+# --- the sync's own payload round-trips (A4) -------------------------------
+
+
+class CatalogClient(FakeClient):
+    """Also returns catalog rows, so the catalog branch of sync.run() is exercised."""
+
+    def fetch_all(self, resource, params=None, progress=None):
+        if resource == 'companies':
+            return [{'EmpresaId': COMPANY, 'DescricaoReduzida': 'Loja Teste', 'RazaoSocial': 'Loja Teste LTDA'}]
+        if resource == 'receipts':
+            return self.receipts
+        if resource == 'categories':
+            return [{'CategoriaId': 1, 'Categoria': 'Mercearia'}]
+        if resource == 'products':
+            return [{'ProdutoId': 501, 'Descricao': 'Produto teste', 'CategoriaId': 1,
+                     'Status': 'A', 'NroBaseExportacao': 0}]
+        if resource == 'stock':
+            return [{'ProdutoId': 501, 'QtdeEstoque': 10, 'QtdeReservaPedidoVenda': 0,
+                     'CustoMedioLiquido': 5, 'CustoMedioUltimaEntradaLiquido': 5,
+                     'NroBaseExportacao': 0}]
+        if resource == 'prices':
+            return [{'ProdutoId': 501, 'QtdEmbalagem': 1, 'PrecoUnitario': 10,
+                     'DtaAlteracao': None, 'NroBaseExportacao': 0}]
+        return []
+
+
+def sync_with_catalogs(period, revenue=100.0):
+    day = f'{period}-05'
+    return sync.run(COMPANY, mode='month', period=period,
+                    client=CatalogClient([raw_receipt(1, day, revenue=revenue)],
+                                         [raw_analysis(1, day, revenue=revenue)]))
+
+
+def payload_reads_per_resource(statements, resources=('products', 'stock', 'prices')):
+    """How many times each catalog's payload crosses the wire during a sync.
+
+    One read each is legitimate and expected: snapshot_catalogs() writes a
+    stock/price/cost row per product per day and genuinely needs the contents.
+    Anything beyond that is a round-trip for data the caller already had or never
+    needed — what these tests exist to prevent.
+    """
+    return {r: sum(1 for s in payload_reads(statements) if f"resource='{r}'" in s)
+            for r in resources}
+
+
+def test_sync_does_not_read_catalog_payloads_just_to_check_their_age(isolated_db):
+    """sync.run() skips a catalog refreshed under 24h ago — but decided that by
+    loading the whole payload to look at one timestamp, the same waste /status had.
+    With the refresh skipped entirely, only snapshot_catalogs should read them."""
+    sync_with_catalogs('2026-01')
+
+    _, statements = executed_sql(lambda: sync_with_catalogs('2026-02'))  # catalogs still fresh
+
+    for resource, reads in payload_reads_per_resource(statements).items():
+        assert reads <= 1, f"{resource} payload read {reads}x; only snapshot_catalogs needs it"
+
+
+def test_rotating_a_catalog_to_previous_does_not_round_trip_its_payload(isolated_db):
+    """stock/prices keep a '_previous' copy. Reading the payload out and writing it
+    straight back moves it across the wire twice for a copy the database can do itself."""
+    sync_with_catalogs('2026-01')
+    with db.connection() as conn:  # age the catalogs so the next run refreshes them
+        conn.execute("UPDATE datasets SET updated_at='2020-01-01T00:00:00+00:00' "
+                     "WHERE period='current'")
+
+    _, statements = executed_sql(lambda: sync_with_catalogs('2026-02'))
+
+    for resource, reads in payload_reads_per_resource(statements, ('stock', 'prices')).items():
+        assert reads <= 1, f"{resource} payload read {reads}x; the rotation should stay server-side"
+
+
+def test_the_previous_copy_still_holds_the_superseded_catalog(isolated_db):
+    """Behaviour preserved: whatever cheaper mechanism does the copy, '_previous' must
+    still carry the values the refresh replaced."""
+    sync_with_catalogs('2026-01')
+    before = db.dataset(COMPANY, 'stock')['payload']
+    with db.connection() as conn:
+        conn.execute("UPDATE datasets SET updated_at='2020-01-01T00:00:00+00:00' WHERE period='current'")
+
+    sync_with_catalogs('2026-02')
+
+    assert db.dataset(COMPANY, 'stock_previous')['payload'] == before

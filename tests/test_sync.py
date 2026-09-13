@@ -125,3 +125,58 @@ def test_period_with_zero_raw_receipts_is_recorded_as_documents_zero(isolated_db
     periods = {p['period']: p['documents'] for p in db.periods(COMPANY)}
     assert periods['2026-08'] == 0
     assert periods['2026-09'] == 1
+
+
+# --- the summary backfill must not be hostage to Mobne -----------------------
+#
+# _backfill_summaries() only reads rows already in this database and fills one
+# derived column on them; it never calls Mobne. Leaving it in the success path
+# meant a vendor outage (Mobne returned 401s for days) also froze the dashboard's
+# timeline at the expensive full-payload fallback, for no reason.
+
+
+def test_backfill_still_runs_when_the_mobne_sync_fails(isolated_db):
+    """A vendor outage must not block work that only touches our own database."""
+    receipts = {'2026-09': [raw_receipt(1, '2026-09-05')]}
+    analysis = {'2026-09': [raw_analysis(1, '2026-09-05')]}
+    sync.run(COMPANY, mode='month', period='2026-09', client=FakeClient(receipts, analysis))
+    with db.connection() as conn:  # a period stored before summaries were cached
+        conn.execute("UPDATE datasets SET summary=NULL WHERE resource='sales'")
+
+    job_id = sync.run(COMPANY, mode='recent',
+                      client=FakeClient(receipts, analysis, fail_receipts_for={'2026-08', '2026-09'}))
+
+    job = next(r for r in db.jobs(COMPANY) if r['id'] == job_id)
+    assert job['state'] == 'failed'
+    assert 'Mobne' in job['error']  # the real cause is still what gets reported
+    assert db.periods_missing_summary(COMPANY) == []  # ...and the backfill ran anyway
+
+
+def test_a_failing_backfill_never_changes_what_the_job_reports(isolated_db, monkeypatch):
+    """The backfill is best-effort bookkeeping. If it breaks, the job's own outcome —
+    and, on failure, the real error message a user needs — must survive untouched."""
+    receipts = {'2026-08': [raw_receipt(1, '2026-08-05')], '2026-09': [raw_receipt(2, '2026-09-05')]}
+    analysis = {'2026-08': [raw_analysis(1, '2026-08-05')], '2026-09': [raw_analysis(2, '2026-09-05')]}
+
+    def exploding(_company):
+        raise RuntimeError('backfill quebrou')
+
+    monkeypatch.setattr(sync, '_backfill_summaries', exploding)
+    job_id = sync.run(COMPANY, mode='recent', client=FakeClient(receipts, analysis))
+
+    job = next(r for r in db.jobs(COMPANY) if r['id'] == job_id)
+    assert job['state'] == 'completed'
+    assert job['error'] is None
+    assert db.dataset(COMPANY, 'sales', '2026-09') is not None  # synced data intact
+
+
+def test_a_failing_backfill_does_not_mask_a_mobne_error(isolated_db, monkeypatch):
+    monkeypatch.setattr(sync, '_backfill_summaries', lambda _c: (_ for _ in ()).throw(RuntimeError('boom')))
+    client = FakeClient({}, {}, fail_receipts_for={'2026-08', '2026-09'})
+
+    job_id = sync.run(COMPANY, mode='recent', client=client)
+
+    job = next(r for r in db.jobs(COMPANY) if r['id'] == job_id)
+    assert job['state'] == 'failed'
+    assert 'Mobne' in job['error']
+    assert 'boom' not in (job['error'] or '')

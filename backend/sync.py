@@ -117,8 +117,11 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
         # Full daily refresh, with per-entity atomic replacement. Current observations never rewrite historical costs.
         categories=db.dataset(company,'categories')
         cats={r['id']:r['name'] for r in categories['payload']} if categories else {}
+        # Timestamps only: deciding "is this catalog younger than a day?" used to load
+        # each payload in full (~4.4 MB per run) to read one field off it.
+        freshness=db.catalog_meta(company,['categories','products','stock','prices'])
         for i,resource in enumerate(['categories','products','stock','prices']):
-            cached=db.dataset(company,resource)
+            cached=freshness.get(resource)
             age=(datetime.fromisoformat(db.now())-datetime.fromisoformat(cached['updated_at'])).total_seconds() if cached else float('inf')
             if age<86400:
                 db.update_job(job_id,completed=len(periods)+i+1,detail=f'{resource}: base atual preservada')
@@ -128,16 +131,15 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
             rows=client.fetch_all(resource,{} if resource=='categories' else {'Filter.EmpresaId':company},progress)
             payload=catalog_payload(resource,rows,cats)
             with db.connection() as conn:
-                previous=db.dataset(company,resource,db=conn)
-                if previous and resource in ('stock','prices'):
-                    db.put_dataset(company,resource+'_previous','current',previous['payload'],conn)
+                if resource in ('stock','prices'):
+                    # Server-side copy: the superseded payload never leaves the database.
+                    db.copy_dataset(company,resource,resource+'_previous',conn)
                 db.put_dataset(company,resource,'current',payload,conn)
             if resource=='categories': cats={r['id']:r['name'] for r in payload}
             db.update_job(job_id,completed=len(periods)+i+1)
         # One row per product per day — the point-in-time history the previous
         # design lost by only ever keeping the latest stock/price dataset.
         snapshot_catalogs(company,today)
-        _backfill_summaries(company)
         if failed_periods:
             ok=len(periods)-len(failed_periods)
             db.update_job(job_id,state='completed_with_errors',
@@ -153,6 +155,17 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
         raise
     finally:
         client.close()
+        # Deliberately outside the try above, so a Mobne outage doesn't also freeze
+        # work that never touches Mobne: this only reads rows already in our database
+        # and fills one derived column on them. Guarded, because an exception raised
+        # from a finally block would replace the job's own outcome — including the
+        # real error a user needs to see. Best-effort by design: whatever it misses,
+        # the next run picks up, and the dashboard recomputes from the payload
+        # meanwhile (see api.py::dashboard's timeline fallback).
+        try:
+            _backfill_summaries(company)
+        except Exception:
+            pass
     return job_id
 
 class Worker:
