@@ -24,6 +24,7 @@ from .routes.actions import router as actions_router
 from .routes.bank_imports import router as bank_imports_router
 from .routes.cashflow import router as cashflow_router
 from .routes.financial_reports import router as financial_reports_router
+from .routes.period_reviews import router as period_reviews_router
 from .routes.goals import router as goals_router
 from .routes.loans import router as loans_router
 from .routes.obligations import router as obligations_router
@@ -82,6 +83,7 @@ app.include_router(settings_router)
 app.include_router(finance_accounts_router)
 app.include_router(financial_entries_router)
 app.include_router(financial_reports_router)
+app.include_router(period_reviews_router)
 app.include_router(loans_router)
 app.include_router(obligations_router)
 app.include_router(cashflow_router)

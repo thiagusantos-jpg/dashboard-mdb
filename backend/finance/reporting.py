@@ -130,7 +130,11 @@ def management_result(
         reasons.append(
             "Parte das despesas é restrita ao seu perfil: totais de despesas e resultados não são exibidos."
         )
-    reasons.append("Despesas do mês ainda não revisadas.")
+    from .period_reviews import get_review
+
+    reviewed = get_review(company, period)["status"] == "reviewed"
+    if not reviewed:
+        reasons.append("Despesas do mês ainda não revisadas.")
     return {
         "company": company,
         "period": period,
@@ -147,7 +151,7 @@ def management_result(
         "accounts": account_lines,
         "data_status": {
             "sales_available": sales_available,
-            "expenses_reviewed": False,
+            "expenses_reviewed": reviewed,
             "restricted": restricted,
             "reason": " ".join(reasons),
         },

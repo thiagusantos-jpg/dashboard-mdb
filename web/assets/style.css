@@ -849,3 +849,11 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 /* Quick counterparty creation inside the expense drawer (task C5). */
 .quick-create { margin: 8px 0 12px; padding: 12px; border: 1px dashed var(--border); border-radius: 8px; }
 .row-actions .muted { align-self: center; }
+
+/* Monthly review checklist in Resultado gerencial (task C6). */
+.review-checks { list-style: none; margin: 12px 0; padding: 0; }
+.review-checks li { padding: 8px 12px; margin-bottom: 6px; border-left: 4px solid var(--border); background: var(--light-gray); border-radius: 4px; }
+.review-checks li.check-ok { border-left-color: var(--positive); }
+.review-checks li.check-pending { border-left-color: var(--amber); }
+.checkbox-line { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; font-size: 14px; }
+.checkbox-line input { width: 20px; height: 20px; margin-top: 1px; flex: none; }

@@ -35,6 +35,58 @@ function managementResultUrl(period) {
   return `/api/companies/${APP.company}/finance/management-result?period=${encodeURIComponent(period)}`;
 }
 
+function periodReviewUrl(period) {
+  return `/api/companies/${APP.company}/finance/period-reviews/${encodeURIComponent(period)}`;
+}
+
+/* Review = explicit acknowledgement tied to the revision on screen; reopening
+ * needs a reason. The server refuses a revision that changed meanwhile. */
+function buildReviewRequest(review, values) {
+  const reopening = review.status === 'reviewed';
+  const reason = String(values.reason || '').trim();
+  if (!reopening && !values.acknowledged) {
+    return {errors: {acknowledged: 'Confirme que conferiu as despesas e lançamentos do mês.'}};
+  }
+  if (reopening && !reason) return {errors: {reason: 'Informe o motivo para reabrir a apuração.'}};
+  return {
+    method: 'POST', path: periodReviewUrl(financeCompetence()),
+    body: {action: reopening ? 'reopen' : 'review', expected_revision: review.revision, reason: reopening ? reason : '', acknowledged: !reopening},
+  };
+}
+
+function reviewPanelHtml(review) {
+  const checks = (review.checks || []).map((check) => `
+    <li class="${check.ok ? 'check-ok' : 'check-pending'}">
+      <strong>${check.ok ? 'OK' : 'Atenção'}</strong> — ${esc(check.label)}${check.count != null ? `: ${check.count}` : ''}
+      ${check.detail ? `<div class="muted">${esc(check.detail)}</div>` : ''}
+    </li>`).join('');
+  const reviewed = review.status === 'reviewed';
+  const action = reviewed ? `
+      <div class="form-field">
+        <label class="field-label" for="period-review-reason">Motivo para reabrir</label>
+        <input id="period-review-reason" name="reason" class="login-input" maxlength="500">
+      </div>
+      <div class="form-error" data-form-error role="alert"></div>
+      <div class="btn-row"><button type="submit" class="btn-secondary">Reabrir apuração</button></div>` : `
+      <label class="checkbox-line"><input type="checkbox" name="acknowledged" id="period-review-ack">
+        Conferi as despesas e lançamentos deste mês. A lista acima ajuda, mas não garante que nada ficou de fora.</label>
+      <div class="form-error" data-form-error role="alert"></div>
+      <div class="btn-row"><button type="submit" class="btn-primary btn-wide">Marcar como revisado</button></div>`;
+  return `
+    <section class="settings-block" aria-labelledby="period-review-title">
+      <div class="settings-heading">
+        <div><h2 id="period-review-title">Revisão do mês</h2>
+          <p>Revisão gerencial, não fechamento contábil: lançamentos continuam liberados e qualquer alteração volta o mês para Em apuração.</p></div>
+        <span class="${reviewed ? 'badge-success' : 'badge-warning'}">${reviewed ? 'Revisado' : 'Em apuração'}</span>
+      </div>
+      ${review.changed_since_review ? '<div class="story-box">Os dados foram alterados depois da última revisão.</div>' : ''}
+      ${reviewed && review.reviewed_at ? `<p class="muted">Revisado em ${esc(typeof dt === 'function' ? dt(review.reviewed_at) : review.reviewed_at)}.</p>` : ''}
+      ${!reviewed && review.reason ? `<p class="muted">Reaberto: ${esc(review.reason)}</p>` : ''}
+      <ul class="review-checks">${checks}</ul>
+      <form id="period-review-form" novalidate>${action}</form>
+    </section>`;
+}
+
 // "Em apuração" until the monthly review exists (C6); the detail names what is missing.
 function managementStatus(result) {
   const status = (result && result.data_status) || {};
@@ -116,9 +168,13 @@ async function renderFinanceiro(token) {
   const title = `${icon('gauge', {class: 'title-icon'})}Resultado gerencial`;
   const subtitle = 'Resultado gerencial da competência: receita, custos, despesas e distribuições.';
   financeLoading(title, subtitle, 'Carregando resultado gerencial');
-  let result;
+  let result, review;
   try {
-    result = await api(managementResultUrl(financeCompetence()));
+    [result, review] = await Promise.all([
+      api(managementResultUrl(financeCompetence())),
+      // Review status is secondary: without permission or on failure the result still shows.
+      api(periodReviewUrl(financeCompetence())).catch(() => null),
+    ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;  // usuário já saiu desta rota
     return financeError(title, subtitle, e, () => renderFinanceiro());
@@ -150,6 +206,7 @@ async function renderFinanceiro(token) {
     <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(financeCompetence())}</span>
     <div class="story-box mt-16" role="status"><span class="badge-warning">${esc(managementStatus(result).label)}</span>
       ${esc(managementStatus(result).detail)}</div>
+    ${review ? reviewPanelHtml(review) : ''}
     <hr class="divider">
     <div class="kpi-grid kpi-grid-4">${kpis}</div>
     <h2 class="section-header">Contas — Realizado vs. Orçado</h2>
@@ -157,6 +214,10 @@ async function renderFinanceiro(token) {
       <thead><tr><th>Conta</th><th class="num">Realizado</th><th class="num">Orçado</th><th class="num">Variação</th><th>Origem</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5">Nenhum lançamento nesta competência.</td></tr>'}</tbody>
     </table></div>`;
+  const reviewForm = document.getElementById('period-review-form');
+  if (reviewForm && typeof bindForm === 'function') {
+    bindForm(reviewForm, (values) => buildReviewRequest(review, values), () => refreshKeepingScroll(() => renderFinanceiro()));
+  }
 }
 
 /* ---------------------------------------------------------------- Custos e Despesas */
