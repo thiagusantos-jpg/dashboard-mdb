@@ -27,6 +27,13 @@ from .loans import (
 
 _KINDS = ("entry", "loan_installment")
 
+# The `financial_entries.source` marker owned by the loan machinery. Aliased
+# from obligations.py (rather than re-spelled) so the "hide it from the
+# payable-obligation surface" filter there and the "refuse a direct payment
+# against it" guard here can never drift apart. See that module's
+# _LOAN_ENTRY_SOURCE for the full rationale.
+_LOAN_ENTRY_SOURCE = obligations._LOAN_ENTRY_SOURCE
+
 # Message required verbatim by the task brief for a legacy payment call
 # (POST /entries/{id}/settlements, POST /loans/installments/{id}/payments)
 # that carries no cash-account link — those endpoints' request bodies never
@@ -319,7 +326,7 @@ def _ensure_interest_settlement(
                 amount_cents=installment["interest_cents"],
                 competence=installment["due_date"][:7],
                 due_date=due,
-                source="loan",
+                source=_LOAN_ENTRY_SOURCE,
                 external_id=f"loan-installment:{installment['id']}",
                 description=f"Juros — {loan['lender']} parcela {installment['number']}",
                 created_by=actor_id,
@@ -327,9 +334,37 @@ def _ensure_interest_settlement(
         )
         entry_id = entry["id"]
 
-    event_id = settle_entry_on_connection(
-        conn, entry_id, interest_cents, paid_at=paid_at, created_by=actor_id
-    )
+    try:
+        event_id = settle_entry_on_connection(
+            conn, entry_id, interest_cents, paid_at=paid_at, created_by=actor_id
+        )
+    except EntryVersionConflict as exc:
+        # Unreachable today (no expected_version is passed above), but a
+        # version conflict must never surface as a raw ValueError either.
+        raise PaymentConflictError(str(exc)) from exc
+    except ValueError as exc:
+        # Defense in depth. settle_entry_on_connection raises a BARE
+        # ValueError ("O pagamento excede o saldo em aberto.") when the
+        # interest entry has no room left for this slice — which used to
+        # escape record_payment's `except PaymentError` entirely and surface
+        # as an unhandled HTTP 500, permanently wedging the installment (no
+        # further payment on it could ever succeed).
+        #
+        # Reaching this state requires the interest entry to have been
+        # settled outside this composition — the only way that was possible
+        # was paying the entry directly as a standalone obligation, which
+        # record_payment now refuses (`source='loan'` guard) and which
+        # obligations.py no longer even lists. A row wedged BEFORE this fix
+        # can still hit it, so map it to a clean 409 instead of a 500. Note
+        # the amount can never be 0 here (guarded above), so there is no
+        # "already covered, treat as no-op" case to take: silently skipping
+        # would under-record real interest.
+        raise PaymentConflictError(
+            "O lançamento de juros desta parcela já está quitado além do "
+            "valor informado. Estorne os pagamentos registrados diretamente "
+            "no lançamento de juros antes de pagar a parcela.",
+            fields=["interest_cents"],
+        ) from exc
     return entry_id, event_id
 
 
@@ -432,6 +467,27 @@ def record_payment(
                 ).fetchone()
                 if not entry:
                     raise PaymentNotFoundError("Lançamento não encontrado.")
+                # Re-review fix, part 2 (defense in depth). An entry the loan
+                # machinery owns (`source='loan'` — see obligations.py's
+                # _LOAN_ENTRY_SOURCE) is never an independently payable
+                # obligation: an installment's interest entry holds the
+                # installment's FULL interest total and is settled slice by
+                # slice as the installment itself is paid, so its remaining
+                # balance is the SAME money already counted inside the
+                # installment's own open_cents. Paying it directly moved real
+                # cash twice against one debt AND left the installment
+                # permanently unpayable (the next real payment's
+                # _ensure_interest_settlement could no longer settle its
+                # slice). obligations.py no longer lists or resolves such an
+                # entry, but its id is still discoverable via entry_history(),
+                # so the id-addressed POST must refuse it structurally.
+                if entry["source"] == _LOAN_ENTRY_SOURCE:
+                    raise PaymentValidationError(
+                        "Os juros de uma parcela de empréstimo são pagos pela "
+                        "própria parcela (kind='loan_installment'), não por "
+                        "este lançamento.",
+                        fields=["obligation_id"],
+                    )
                 if entry["status"] in {"cancelled", "reversed"}:
                     raise PaymentConflictError("Este lançamento não pode ser pago.")
                 if int(entry["version"]) != int(expected_version):

@@ -90,7 +90,19 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
     SQLite-only permissiveness — PostgreSQL's functional-dependency relaxation
     covers only columns of the table whose primary key is in the GROUP BY, so
     `a.nature` would make the whole forecast fail there. Mirrors the
-    convention backend/finance/reporting.py already follows."""
+    convention backend/finance/reporting.py already follows.
+
+    Re-review fix: entries the loan machinery owns (`e.source='loan'`) are
+    excluded, mirroring backend/finance/obligations.py::_entry_rows (see the
+    `_LOAN_ENTRY_SOURCE` note there). An installment's interest entry carries
+    the installment's FULL interest total and is paid down incrementally,
+    while `_open_installments_by_due_date_on_connection` below already
+    forecasts the installment's whole remaining balance — principal AND
+    interest. Counting both double-counted the unpaid interest in every
+    projected day's outflow (and could fire a spurious `negative_cash`
+    alert). The other two `source='loan'` writers (the disbursement proceeds
+    entry and the legacy interest entry) are created already settled, so this
+    filter changes nothing for them."""
     rows = conn.execute(
         """
         SELECT e.id,e.due_date,e.amount_cents,e.description,a.nature,
@@ -103,6 +115,7 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
         LEFT JOIN financial_events ev ON ev.entry_id=e.id
         WHERE e.company=? AND e.due_date<=?
           AND e.status IN ('open','overdue','partially_paid')
+          AND e.source<>'loan'
         GROUP BY e.id,e.due_date,e.amount_cents,e.description,a.nature
         """,
         (company, end.isoformat()),

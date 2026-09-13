@@ -30,6 +30,34 @@ _OPEN_ENTRY_STATUSES = ("open", "overdue", "partially_paid")
 # would surface here as a "payable", which it is not.
 _NON_PAYABLE_NATURES = ("revenue", "financing_inflow")
 
+# `financial_entries.source` marker owned exclusively by the loan machinery.
+# Grep confirms only three writers use it, and none of them is an
+# independently payable obligation:
+#
+# - backend/finance/payments.py::_ensure_interest_settlement — the interest
+#   entry of a loan installment. Its amount_cents is the installment's FULL
+#   interest total, settled incrementally as the installment is paid. The
+#   PARENT installment's own open_cents (total - paid_principal -
+#   paid_interest) ALREADY nets out paid interest, so this entry's remaining
+#   balance is a SUBSET of the very same money. Listing it here as a separate
+#   payable made a privileged viewer (finance.sensitive.read — `loan_interest`
+#   is a sensitive account) see the same debt twice, and — worse — let the
+#   phantom entry be paid directly, moving real cash a second time and then
+#   permanently wedging the installment on its next payment. The plan's B3
+#   brief is explicit: "juros gerados pelo contrato não aparecem como nova
+#   obrigação independente".
+# - backend/finance/loans.py::disburse — the loan_proceeds entry, already
+#   excluded by _NON_PAYABLE_NATURES (financing_inflow) and created settled.
+# - backend/finance/loans.py::pay_installment_legacy_unsafe — the legacy
+#   interest entry, created and settled in the same breath (never open).
+#
+# So filtering on this marker hides nothing legitimate. The rows themselves
+# still exist, are still settled, and are still fully visible to accounting
+# (reporting.py::management_result reads financial_entries directly) and to
+# the audit trail (entry_management.py::entry_history) — only the "this is an
+# independently payable obligation" surface drops them.
+_LOAN_ENTRY_SOURCE = "loan"
+
 # Fields an item's `allowed_actions` can carry that only make sense for a
 # caller with write access. The route layer (backend/routes/obligations.py)
 # strips these out for a read-only caller; this module always computes the
@@ -110,7 +138,13 @@ def _entry_allowed_actions(status: str, source: str, open_cents: int) -> list:
     # shipped) re-validates all of that independently.
     if source == "manual" and status in ("open", "partially_paid"):
         actions.append("edit_description")
-    if open_cents > 0:
+    # A loan-owned entry (see _LOAN_ENTRY_SOURCE) is never independently
+    # payable — its balance is already inside the parent installment's own
+    # open_cents, and payments.py::record_payment rejects a direct payment
+    # against it. The queries in this module no longer return such a row at
+    # all; this keeps the advertised action honest for any other caller of
+    # this pure helper (payments.py::_entry_obligation_item).
+    if open_cents > 0 and source != _LOAN_ENTRY_SOURCE:
         actions.append("pay")
     return actions
 
@@ -155,6 +189,7 @@ def _entry_rows(company: int) -> list:
             LEFT JOIN financial_events ev ON ev.entry_id=e.id
             WHERE e.company=? AND e.status IN ({placeholders})
               AND a.nature NOT IN ({nature_placeholders})
+              AND e.source<>?
             -- Final-review I1: every non-aggregated selected column is listed,
             -- the joined a.sensitive included. `GROUP BY e.id` alone is valid
             -- on SQLite only; PostgreSQL's functional-dependency relaxation
@@ -164,7 +199,7 @@ def _entry_rows(company: int) -> list:
                      e.amount_cents,e.status,e.source,
                      e.installment_number,e.installment_count,a.sensitive
             """,
-            (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES),
+            (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES, _LOAN_ENTRY_SOURCE),
         ).fetchall()
     items = []
     for row in rows:
@@ -340,6 +375,14 @@ def get_obligation(
                 LEFT JOIN financial_events ev ON ev.entry_id=e.id
                 WHERE e.id=? AND e.company=?
                   AND a.nature NOT IN ({nature_placeholders})
+                  -- Same exclusion as _entry_rows (see _LOAN_ENTRY_SOURCE):
+                  -- a loan-owned entry is not an independent obligation, so
+                  -- GET /obligations/entry/{id} on one reports not-found —
+                  -- expressed exactly like the nature-based exclusion above,
+                  -- i.e. the row simply doesn't come back and the caller
+                  -- returns None (-> HTTP 404). History remains available
+                  -- through GET /entries/{id}/history.
+                  AND e.source<>?
                 -- Final-review I1: see _entry_rows above — every
                 -- non-aggregated selected column must be listed for
                 -- PostgreSQL, joined columns included.
@@ -347,7 +390,7 @@ def get_obligation(
                          e.amount_cents,e.status,e.source,
                          e.installment_number,e.installment_count,a.sensitive
                 """,
-                (item_id, company, *_NON_PAYABLE_NATURES),
+                (item_id, company, *_NON_PAYABLE_NATURES, _LOAN_ENTRY_SOURCE),
             ).fetchone()
         if not row:
             return None

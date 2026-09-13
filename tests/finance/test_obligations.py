@@ -506,3 +506,108 @@ def test_fully_paid_installment_version_reflects_real_stored_version(obligations
     detail = get_obligation(COMPANY, "loan_installment", installment["id"], include_sensitive=True)
     assert detail["version"] == 3
     assert detail["version"] != 1
+
+
+# --- Loan interest must never be an INDEPENDENT obligation (re-review fix) --
+# payments.py::_ensure_interest_settlement creates one financial_entries row
+# per installment holding the installment's FULL interest total, settled
+# slice by slice as the installment is paid. That row's remaining balance is
+# a SUBSET of the parent installment's own open_cents (total_cents -
+# paid_principal - paid_interest already nets paid interest out), so listing
+# it here as its own payable showed the same money twice to anyone holding
+# finance.sensitive.read (`loan_interest` is a sensitive account). The plan's
+# B3 brief: "juros gerados pelo contrato não aparecem como nova obrigação
+# independente".
+
+
+def _interest_entry_id(installment_id: int) -> int:
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM financial_entries WHERE source='loan' AND external_id=?",
+            (f"loan-installment:{installment_id}",),
+        ).fetchone()
+    assert row is not None, "the interest entry must still be created"
+    return int(row["id"])
+
+
+def _partially_paid_interest_bearing_installment():
+    """The exact repro from the re-review: a 105,000-cent installment
+    (100,000 principal + 5,000 interest) with one 55,000-cent payment
+    (50,000 principal + 5,000 interest) → 50,000 still genuinely owed."""
+    bank = _bank_account()
+    loan = _future_two_installment_loan()
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="interest-1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    return installment
+
+
+def test_interest_entry_is_not_listed_as_a_separate_payable_obligation(obligations_db):
+    installment = _partially_paid_interest_bearing_installment()
+    interest_entry_id = _interest_entry_id(installment["id"])
+
+    listed = list_obligations(COMPANY, include_sensitive=True)
+
+    # The phantom interest entry is gone from the payable surface...
+    assert all(i["key"] != f"entry:{interest_entry_id}" for i in listed["items"])
+    assert all(i["kind"] != "entry" for i in listed["items"])
+
+    # ...while the installment itself still shows its true remaining balance.
+    item = next(i for i in listed["items"] if i["id"] == str(installment["id"]))
+    assert item["open_cents"] == 105_000 - 55_000
+
+    # And the aggregate is exactly the two installments' remaining balances —
+    # NOT 50,000 + 105,000 + a phantom 0..5,000 interest slice on top.
+    assert listed["open_cents"] == (105_000 - 55_000) + 105_000
+    assert listed["total"] == 2
+
+
+def test_interest_entry_still_hides_when_partially_settled_interest_remains(obligations_db):
+    """The pure double-count shape: the interest entry keeps an OPEN balance
+    of its own (only part of the installment's interest has been paid), which
+    is precisely the money the installment's own open_cents already counts."""
+    bank = _bank_account()
+    loan = loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=200_000, net_disbursement_cents=195_000,
+        installments=[
+            {"number": 1, "due_date": "2026-10-10", "principal_cents": 100_000, "interest_cents": 10_000},
+            {"number": 2, "due_date": "2026-11-10", "principal_cents": 100_000, "interest_cents": 10_000},
+        ],
+        start_date="2026-09-01",
+    )
+    installment = loans.loan_position(loan["id"])["installments"][0]
+    record_payment(
+        COMPANY, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="interest-half",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    interest_entry_id = _interest_entry_id(installment["id"])
+
+    # The entry really does still carry 5,000 unpaid of its own (10,000 total
+    # interest, 5,000 settled) — it is simply not a separate obligation.
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM financial_entries WHERE id=?", (interest_entry_id,)
+        ).fetchone()
+    assert row["status"] == "partially_paid"
+
+    listed = list_obligations(COMPANY, include_sensitive=True)
+    assert all(i["key"] != f"entry:{interest_entry_id}" for i in listed["items"])
+    # 110,000 - 55,000 still owed on installment 1, plus 110,000 on
+    # installment 2 — the 5,000 unpaid interest is inside the first number,
+    # counted once.
+    assert listed["open_cents"] == (110_000 - 55_000) + 110_000
+
+
+def test_get_obligation_on_an_interest_entry_reports_not_found(obligations_db):
+    installment = _partially_paid_interest_bearing_installment()
+    interest_entry_id = _interest_entry_id(installment["id"])
+
+    # Mirrors the nature-based revenue/financing_inflow exclusion: the row
+    # simply doesn't come back, so the route returns 404.
+    assert get_obligation(COMPANY, "entry", interest_entry_id, include_sensitive=True) is None
+    assert get_obligation(COMPANY, "entry", interest_entry_id) is None

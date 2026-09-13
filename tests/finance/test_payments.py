@@ -9,8 +9,11 @@ import pytest
 from backend import database as db
 from backend.finance import accounts, ledger, loans
 from backend.finance import payments
-from backend.finance.entries import EntryCommand, create_entry, get_entry
+from backend.finance.entries import EntryCommand, create_entry, get_entry, settle_entry
+from backend.finance.entry_management import entry_history
+from backend.finance.forecast import forecast
 from backend.finance.obligations import get_obligation
+from backend.finance.reporting import management_result
 from backend.finance.payments import (
     CASH_LINK_REQUIRED_MESSAGE,
     PaymentCashLinkRequiredError,
@@ -762,3 +765,232 @@ def test_concurrent_allocation_of_one_cash_event_leaves_a_single_payment(payment
     assert get_entry(loser_entry_id)["open_cents"] == 100_000
     assert get_entry(winner_entry_id)["open_cents"] == 60_000
     assert ledger.account_balance(bank["id"]) == -40_000
+
+
+# --- A loan installment's interest entry is never independently payable ----
+#
+# Re-review fix. `_ensure_interest_settlement` creates ONE financial_entries
+# row per installment carrying the installment's FULL interest total, settled
+# slice by slice. Its remaining balance is the same money the installment's
+# own open_cents already counts. Paying it directly moved real cash twice
+# against one debt and then permanently WEDGED the installment: the next real
+# payment's `_ensure_interest_settlement` could no longer settle its slice, so
+# `settle_entry_on_connection` raised a bare `ValueError` that escaped
+# `record_payment`'s `except PaymentError` handling entirely and surfaced as
+# an unhandled HTTP 500 — forever, on every subsequent attempt.
+
+
+def _interest_bearing_loan(interest=10_000):
+    return loans.create_loan(
+        COMPANY, lender="Banco Local", purpose="Capital de giro",
+        principal_cents=200_000, net_disbursement_cents=195_000,
+        installments=[
+            {"number": 1, "due_date": "2026-10-10", "principal_cents": 100_000, "interest_cents": interest},
+            {"number": 2, "due_date": "2026-11-10", "principal_cents": 100_000, "interest_cents": interest},
+        ],
+        start_date="2026-09-01",
+    )
+
+
+def _interest_entry_id(installment_id: int) -> int:
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM financial_entries WHERE source='loan' AND external_id=?",
+            (f"loan-installment:{installment_id}",),
+        ).fetchone()
+    assert row is not None, "the interest entry must still be created and settled"
+    return int(row["id"])
+
+
+def test_direct_payment_against_a_loan_interest_entry_is_rejected(payments_db):
+    bank = bank_account()
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    interest_entry_id = _interest_entry_id(installment["id"])
+    # The entry genuinely still has 5,000 of its own unpaid — it is simply
+    # not separately payable.
+    assert get_entry(interest_entry_id)["open_cents"] == 5_000
+
+    with pytest.raises(PaymentValidationError) as excinfo:
+        record_payment(
+            1, "entry", interest_entry_id, amount_cents=5_000,
+            paid_at=date(2026, 9, 11), expected_version=2, idempotency_key="direct-1",
+            cash_account_id=bank["id"],
+        )
+    assert "loan_installment" in str(excinfo.value)
+    assert excinfo.value.fields == ["obligation_id"]
+
+    # Nothing moved: no second cash outflow, no extra settlement.
+    assert ledger.account_balance(bank["id"]) == -55_000
+    assert get_entry(interest_entry_id)["open_cents"] == 5_000
+    with db.connection() as conn:
+        payments_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM obligation_payments WHERE company=1"
+        ).fetchone()["n"]
+    assert payments_count == 1
+
+
+def test_wedge_scenario_is_unreachable_and_installment_stays_payable(payments_db):
+    """The full original wedge: pay the phantom interest entry directly, then
+    pay the installment's real remaining balance. Step one is now refused, so
+    the installment never enters the unpayable state."""
+    bank = bank_account()
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    first = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    interest_entry_id = _interest_entry_id(installment["id"])
+
+    with pytest.raises(PaymentValidationError):
+        record_payment(
+            1, "entry", interest_entry_id, amount_cents=5_000,
+            paid_at=date(2026, 9, 11), expected_version=2, idempotency_key="wedge-1",
+            cash_account_id=bank["id"],
+        )
+
+    # The installment's true remaining balance is still payable, in full.
+    second = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 11), expected_version=first["obligation"]["version"],
+        idempotency_key="k2", cash_account_id=bank["id"],
+        principal_cents=50_000, interest_cents=5_000,
+    )
+    assert second["obligation"]["status"] == "paid"
+    assert second["obligation"]["open_cents"] == 0
+    assert ledger.account_balance(bank["id"]) == -110_000
+    # And the interest entry is now exactly settled, once, for its full total.
+    assert get_entry(interest_entry_id)["open_cents"] == 0
+    assert get_entry(interest_entry_id)["paid_cents"] == 10_000
+
+
+def test_over_settled_interest_entry_raises_a_payment_error_not_a_raw_500(payments_db):
+    """Safety net for data wedged BEFORE this fix (or by any future path that
+    settles the shared interest entry from outside the composition): the bare
+    `ValueError` from `settle_entry_on_connection` must never escape
+    `record_payment` — it is mapped to a PaymentConflictError (HTTP 409)."""
+    bank = bank_account()
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    first = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    interest_entry_id = _interest_entry_id(installment["id"])
+    # Simulate the pre-fix damage directly at the entries layer (the path
+    # record_payment now refuses): the shared interest entry is settled in
+    # full, leaving no room for the installment's own next interest slice.
+    settle_entry(interest_entry_id, 5_000, paid_at=date(2026, 9, 11))
+    assert get_entry(interest_entry_id)["open_cents"] == 0
+
+    with pytest.raises(PaymentConflictError) as excinfo:
+        record_payment(
+            1, "loan_installment", installment["id"], amount_cents=55_000,
+            paid_at=date(2026, 9, 12), expected_version=first["obligation"]["version"],
+            idempotency_key="k2", cash_account_id=bank["id"],
+            principal_cents=50_000, interest_cents=5_000,
+        )
+    assert "juros" in str(excinfo.value)
+    # The failed attempt rolled back cleanly: no extra cash movement, and the
+    # installment still sits at its real partially-paid balance.
+    assert ledger.account_balance(bank["id"]) == -55_000
+    detail = get_obligation(1, "loan_installment", installment["id"], include_sensitive=True)
+    assert detail["open_cents"] == 55_000
+    # A principal-only payment (no interest slice to compose) still works, so
+    # the installment is not wedged shut.
+    principal_only = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=50_000,
+        paid_at=date(2026, 9, 12), expected_version=first["obligation"]["version"],
+        idempotency_key="k3", cash_account_id=bank["id"],
+        principal_cents=50_000, interest_cents=0,
+    )
+    assert principal_only["obligation"]["open_cents"] == 5_000
+
+
+def test_interest_entry_history_still_records_creation_and_settlement(payments_db):
+    """Part 1 removes the interest entry from the payable-obligation surface
+    only — the audit trail must still show it end to end."""
+    bank = bank_account()
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    first = record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+    record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 11), expected_version=first["obligation"]["version"],
+        idempotency_key="k2", cash_account_id=bank["id"],
+        principal_cents=50_000, interest_cents=5_000,
+    )
+    interest_entry_id = _interest_entry_id(installment["id"])
+
+    history = entry_history(1, interest_entry_id)
+    actions = [item["action"] for item in history]
+    assert actions.count("created") == 1
+    assert actions.count("settled") == 2
+    settled_amounts = sorted(
+        item["amount_cents"] for item in history if item["action"] == "settled"
+    )
+    assert settled_amounts == [5_000, 5_000]
+
+
+def test_management_result_still_counts_the_loan_interest_as_an_expense(payments_db):
+    """reporting.py::management_result reads financial_entries directly (never
+    through obligations.py), so hiding the interest entry from the payable
+    surface must not change accounting totals."""
+    bank = bank_account()
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+
+    # The interest entry's competence is the installment's own due month
+    # (2026-10), per _ensure_interest_settlement's documented default.
+    result = management_result(1, "2026-10")
+    assert result["financial_expenses_cents"] == 10_000
+    interest_line = next(
+        line for line in result["accounts"] if line["system_key"] == "loan_interest"
+    )
+    assert interest_line["actual_cents"] == 10_000
+
+
+def test_forecast_does_not_double_count_the_installments_unpaid_interest(payments_db):
+    """The same double-count reached the cash forecast: the installment's
+    remaining balance already includes its unpaid interest, so the separate
+    interest entry must not be projected on top of it."""
+    bank = bank_account()
+    ledger.post_cash_event(1, bank["id"], 500_000, date(2026, 9, 1), "Saldo inicial")
+    loan = _interest_bearing_loan(interest=10_000)
+    installment = loans.loan_position(loan["id"])["installments"][0]
+
+    record_payment(
+        1, "loan_installment", installment["id"], amount_cents=55_000,
+        paid_at=date(2026, 9, 10), expected_version=1, idempotency_key="k1",
+        cash_account_id=bank["id"], principal_cents=50_000, interest_cents=5_000,
+    )
+
+    projection = forecast(
+        1, date(2026, 10, 1), date(2026, 10, 31), as_of=date(2026, 9, 20)
+    )
+    day = next(d for d in projection["days"] if d["date"] == "2026-10-10")
+    sources = [item["source"] for item in day["items"]]
+    assert "financial_entries" not in sources
+    assert sum(item["amount_cents"] for item in day["items"]) == -(110_000 - 55_000)
