@@ -19,7 +19,7 @@ const APP = {
   pickerYear: null,   // year shown in the period popover (browsing it does not change the period)
   status: null,       // last /status payload
   dashboard: null,    // last /dashboard payload
-  statusTimer: null,  // 60s background status/dashboard refresh
+  statusTimer: null,  // background status/dashboard refresh (see STATUS_POLL_MS)
   pollTimer: null,    // 4s polling while a sync job is queued/running
   estoque: {q: '', sort: 'revenue', dir: 'desc'},  // Produtos & Estoque search/sort (filter lives in the route)
   // Page-load coordinator (page-state.js, loaded before this file): tells a
@@ -147,7 +147,7 @@ function showRefreshAvailable() {
 }
 
 function stopTimers() {
-  if (APP.statusTimer) { clearInterval(APP.statusTimer); APP.statusTimer = null; }
+  stopStatusPolling();
   if (APP.pollTimer) { clearInterval(APP.pollTimer); APP.pollTimer = null; }
 }
 
@@ -376,8 +376,33 @@ async function onAuthenticated(session) {
   onRouteChange();  // applies #/página/período from the URL (reload, favoritos), else the defaults
   // The automatic worker (backend/sync.py Worker) can finish a sync with nobody watching
   // the "sync" page; without this, new months only show up after a manual reload.
-  APP.statusTimer = setInterval(backgroundRefresh, 60000);
+  startStatusPolling();
 }
+
+/* Status only changes when a sync publishes a new dataset — once a day on the
+ * cron, or on demand — so a tight poll buys nothing, and a dashboard forgotten in
+ * a background tab was polling all day for a reader who wasn't there, keeping the
+ * database endpoint awake (it autosuspends after 5 idle minutes) purely to answer
+ * nobody. Poll only while the tab is actually on screen, and catch up the instant
+ * it is again. A sync in progress is unaffected: its live progress runs on the
+ * separate 4s pollTimer in refreshStatus(). */
+const STATUS_POLL_MS = 300000;
+
+function startStatusPolling() {
+  stopStatusPolling();
+  if (document.hidden) return;
+  APP.statusTimer = setInterval(backgroundRefresh, STATUS_POLL_MS);
+}
+
+function stopStatusPolling() {
+  if (APP.statusTimer) { clearInterval(APP.statusTimer); APP.statusTimer = null; }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return stopStatusPolling();
+  startStatusPolling();
+  backgroundRefresh();  // returning to the tab must show current data, not a 5-minute-old view
+});
 
 /* The 60s tick: polling status is kept apart from rendering, so a status
  * request that fails (backend restarting, network blip) leaves whatever is on
