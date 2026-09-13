@@ -60,8 +60,27 @@ def _validated_migrations() -> Iterable[Tuple[int, Path]]:
         yield version, path
 
 
+def _strip_comments(sql: str) -> str:
+    """Drop whole-line `--` comments before the SQL reaches the driver.
+
+    backend/database.py's Postgres adapter rewrites this codebase's SQLite-style
+    `?` placeholders into psycopg's `%s` across the entire statement text, so a
+    question mark written in prose inside a migration comment becomes a
+    placeholder with no value behind it: psycopg then refuses the statement and
+    every later migration stops applying. Migrations carry a lot of rationale in
+    comments and never take parameters, so the safe fix is to keep the prose in
+    the file and out of the wire.
+
+    Only lines that are entirely a comment are removed — never a trailing `--`,
+    which could otherwise sit inside a string literal.
+    """
+    return "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    )
+
+
 def _statements(sql: str) -> Iterable[str]:
-    for fragment in sql.split(";"):
+    for fragment in _strip_comments(sql).split(";"):
         statement = fragment.strip()
         if statement:
             yield statement

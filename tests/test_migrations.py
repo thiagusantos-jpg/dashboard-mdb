@@ -57,3 +57,20 @@ def test_applies_registered_sql_migration_once(isolated_db, tmp_path, monkeypatc
     with db.connection() as conn:
         assert migrations.current_version(conn) == 3
         assert conn.execute("SELECT value FROM migration_probe").fetchone()["value"] == 42
+
+
+def test_no_registered_migration_reaches_the_driver_with_a_stray_placeholder():
+    """Postgres regression: backend/database.py's _PGConn.execute translates this
+    codebase's SQLite-style '?' placeholders into psycopg's '%s'. It rewrites the
+    whole statement, comments included, so a '?' written inside an SQL comment
+    becomes a placeholder the migration runner never supplies a value for —
+    psycopg raises "the query has 1 placeholders but 0 parameters were passed" and
+    every migration from that point on stops applying.
+
+    Invisible on SQLite (which receives the text verbatim), so only this check
+    stands between a prose question mark and a production database frozen at an
+    old schema version — exactly what happened to migrations 016-023.
+    """
+    for version, path in migrations._validated_migrations():
+        for statement in migrations._statements(path.read_text(encoding="utf-8")):
+            assert "?" not in statement, f"migration {version} ({path.name}) reaches the driver with a '?'"
