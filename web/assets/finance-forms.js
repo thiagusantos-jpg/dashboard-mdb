@@ -479,6 +479,14 @@ function buildArchiveRequest(resource, record, archived) {
   };
 }
 
+function buildCostBehaviorRequest(record, behavior) {
+  if (!['fixed', 'variable'].includes(behavior)) return {errors: {cost_behavior: 'Escolha custo fixo ou variável.'}};
+  return {
+    method: 'PATCH', path: `${financeBasePath()}/accounts/${record.id}`,
+    body: {expected_version: record.version, cost_behavior: behavior},
+  };
+}
+
 function buildRenameRequest(resource, record, values) {
   const name = String(values.name || '').trim();
   if (!name) return {errors: {name: 'Informe o nome.'}};

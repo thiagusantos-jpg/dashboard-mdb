@@ -730,6 +730,11 @@ async function renderCatalogSettings(token) {
     <tr>
       <td>${esc(c.name)}<div class="muted">${esc(c.code)}</div></td>
       <td>${esc(CATALOG_NATURE_LABELS[c.nature] || c.nature)}</td>
+      <td>${c.cost_behavior ? `<label class="visually-hidden" for="cost-behavior-${esc(c.id)}">Tipo de custo de ${esc(c.name)}</label>
+        <select id="cost-behavior-${esc(c.id)}" class="login-input compact-select" data-cost-behavior="${esc(c.id)}">
+          <option value="fixed"${c.cost_behavior === 'fixed' ? ' selected' : ''}>Fixo</option>
+          <option value="variable"${c.cost_behavior === 'variable' ? ' selected' : ''}>Variável</option>
+        </select>` : '<span class="muted">—</span>'}</td>
       <td>${c.archived ? '<span class="badge-muted">Arquivada</span>' : '<span class="badge-success">Ativa</span>'}</td>
       <td><div class="row-actions">
         <button type="button" class="btn-secondary" data-category-rename="${esc(c.id)}" aria-label="Renomear ${esc(c.name)}">Renomear</button>
@@ -755,9 +760,11 @@ async function renderCatalogSettings(token) {
     <section aria-labelledby="catalog-categories-title">
       <h2 id="catalog-categories-title">Categorias da despesa</h2>
       <p class="field-help">Arquivar tira a categoria de novos lançamentos; relatórios e lançamentos antigos a mantêm. Categorias padrão só podem ser renomeadas.</p>
+      <p class="field-help">Custo fixo não muda com o volume de vendas (aluguel, salários); variável acompanha as vendas (comissões, taxas de cartão). Essa escolha define o ponto de equilíbrio no Resultado gerencial.</p>
+      <div id="catalog-message" class="form-error" role="alert"></div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Categoria</th><th>Natureza</th><th>Status</th><th>Ações</th></tr></thead>
-        <tbody>${categoryRows || '<tr><td colspan="4">Nenhuma categoria.</td></tr>'}</tbody>
+        <thead><tr><th>Categoria</th><th>Natureza</th><th>Custo</th><th>Status</th><th>Ações</th></tr></thead>
+        <tbody>${categoryRows || '<tr><td colspan="5">Nenhuma categoria.</td></tr>'}</tbody>
       </table></div>
       <form id="catalog-category-form" class="settings-form" novalidate>
         <h3 class="drawer-subtitle">Nova categoria</h3>
@@ -802,6 +809,23 @@ async function renderCatalogSettings(token) {
   document.querySelectorAll('[data-category-archive]').forEach((button) => button.addEventListener('click', () => {
     const category = categoriesById[button.dataset.categoryArchive];
     openArchiveForm('category', category, !category.archived, {trigger: button, onSaved: refresh});
+  }));
+  document.querySelectorAll('[data-cost-behavior]').forEach((select) => select.addEventListener('change', async () => {
+    const category = categoriesById[select.dataset.costBehavior];
+    const request = buildCostBehaviorRequest(category, select.value);
+    const message = document.getElementById('catalog-message');
+    message.textContent = '';
+    select.disabled = true;
+    try {
+      const saved = await api(request.path, {method: request.method, body: JSON.stringify(request.body)});
+      category.version = saved.version;
+      category.cost_behavior = saved.cost_behavior;
+    } catch (e) {
+      select.value = category.cost_behavior;
+      message.textContent = `Não foi possível alterar ${category.name}: ${e.message}`;
+    } finally {
+      select.disabled = false;
+    }
   }));
   document.querySelectorAll('[data-counterparty-rename]').forEach((button) => button.addEventListener('click', () =>
     openRenameForm('counterparty', counterpartiesById[button.dataset.counterpartyRename], {trigger: button, onSaved: refresh})));

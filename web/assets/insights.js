@@ -627,6 +627,8 @@ function renderVisao(data) {
       `Hipóteses: margem bruta atual de ${pct1(mg)} e ${S.pairs || 0} mês(es) fechados comparáveis entre ${P.y} e ${S.R}.`, 'Planejar compras e metas comerciais.', basisTxt)}
     <hr class="divider">
 
+    <section id="visao-break-even" aria-labelledby="visao-break-even-title" hidden></section>
+
     ${section(`${icon('calendar')} Cobertura histórica da projeção`)}
     ${story(`${S.pairs || 0} mês(es) fechados comparáveis entre ${P.y} e ${S.R}. ${basisTxt} ${P.partial ? `${P.label} está em andamento: ritmo projetado de ${brl(pace)} para o mês inteiro.` : ''}`)}
     <hr class="divider">
@@ -655,4 +657,46 @@ function renderVisao(data) {
       'Ações priorizadas por impacto: margem → estoque → sazonalidade.', 'Revise com os sócios no início de cada mês.')}
   `;
   mountEchartCombo(document.getElementById('chart-visao-proj'), projOpts);
+  loadVisaoBreakEven(data.period, {pace, fat, P});
+}
+
+/* Velocímetro: the month's revenue pace against the break-even point of the
+ * same competence, read from the management result (cost center). Hidden for
+ * profiles without finance access; unavailable inputs show the reason. */
+async function loadVisaoBreakEven(period, ctx) {
+  const box = document.getElementById('visao-break-even');
+  if (!box || typeof managementResultUrl !== 'function') return;
+  let result;
+  try {
+    result = await api(managementResultUrl(period));
+  } catch (e) {
+    return;
+  }
+  if (!box.isConnected) return;
+  const be = result.break_even || {};
+  const {pace, fat, P} = ctx;
+  const title = `${section(`${icon('gauge')} Velocímetro — ${P.label} vs ponto de equilíbrio`)}`;
+  if (be.break_even_cents == null) {
+    box.innerHTML = `${title}${story(esc(be.reason || 'Ponto de equilíbrio indisponível.'))}<hr class="divider">`;
+    box.hidden = false;
+    return;
+  }
+  const point = be.break_even_cents, ideal = point * 1.5;
+  box.innerHTML = `${title}
+    <div class="chart-container chart-h-330" id="chart-visao-gauge"></div>
+    ${explain('Velocímetro', `Vermelho = abaixo do ponto de equilíbrio (${brl(point)}). Amarelo = acima do equilíbrio. Verde = acima da meta ideal (${brl(ideal)} = 1,5× equilíbrio).`,
+      `Ponto de equilíbrio = custos fixos lançados (${brl(be.fixed_costs_cents)}) ÷ margem de contribuição (${pctBR(be.contribution_margin_pct)}), da Central de custos.`,
+      'Mostra se o mês cobre os custos fixos com folga.',
+      P.partial ? `Realizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}. O ponteiro usa o ritmo diário projetado para o mês inteiro.` : undefined)}
+    <hr class="divider">`;
+  box.hidden = false;
+  mountEchartGauge(document.getElementById('chart-visao-gauge'), {
+    value: pace, max: ideal * 1.5, fmt: brl,
+    steps: [{to: point, color: '#FADBD8'}, {to: ideal, color: '#F9E79F'}, {to: ideal * 1.5, color: '#D5F5E3'}],
+    threshold: point, thresholdTip: `Ponto de equilíbrio: ${brl(point)}`,
+    tip: P.partial ? `Ritmo projetado: ${brl(pace)}\nRealizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}` : `Faturamento: ${brl(fat)}`,
+    ticks: [0, point, ideal, ideal * 1.5],
+    title: P.partial ? `Faturamento projetado ${P.label} (ritmo de ${P.endDay} dias)` : `Faturamento ${P.label}`,
+    delta: {value: pace - point, text: `${pace >= point ? '▲' : '▼'} ${brl(Math.abs(pace - point))} vs ponto de equilíbrio`},
+  });
 }

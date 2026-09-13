@@ -988,6 +988,14 @@ async function loadResumoManagementCard(period) {
     <div class="kpi-grid kpi-grid-3">
       ${kpiCard('Resultado gerencial', money(result.managerial_result_cents),
         result.managerial_result_cents == null ? 'kpi-unavailable' : '', '', 'Após custos e despesas da competência')}
+      ${(() => {
+        const be = result.break_even || {};
+        const available = be.break_even_cents != null;
+        const note = !available ? (be.reason || '')
+          : `Faturamento ${Math.abs(be.gap_pct).toFixed(1).replace('.', ',')}% ${be.gap_pct >= 0 ? 'acima' : 'abaixo'}`;
+        return kpiCard('Ponto de equilíbrio', available ? money(be.break_even_cents) : 'Indisponível',
+          available ? (be.gap_pct >= 0 ? 'kpi-positive' : 'kpi-negative') : 'kpi-unavailable', '', esc(note));
+      })()}
     </div>
     <a class="btn-link" href="${routeHash('financeiro', period)}">Abrir Resultado gerencial →</a>`;
   box.hidden = false;

@@ -140,10 +140,35 @@ def _seed_defaults(company: int) -> None:
             )
 
 
+COST_BEHAVIORS = ("fixed", "variable")
+EXPENSE_NATURES = ("operating_expense", "tax_expense", "financial_expense")
+
+# Default categories whose amount follows sales volume. Every other expense
+# category starts as fixed; the store can switch any of them in Configurações.
+VARIABLE_BY_DEFAULT = {
+    "taxes", "commissions", "acquiring_fees", "receivables_advance", "delivery",
+    "packaging", "expired_loss", "damage_loss", "inventory_loss",
+}
+
+
+def default_cost_behavior(system_key: Optional[str], nature: str) -> Optional[str]:
+    """None for anything that is not an operating, tax or financial expense."""
+    if nature not in EXPENSE_NATURES:
+        return None
+    if system_key in VARIABLE_BY_DEFAULT or nature == "tax_expense":
+        return "variable"
+    return "fixed"
+
+
 def _row(row) -> dict:
     result = dict(row)
     result["sensitive"] = bool(result["sensitive"])
     result["archived"] = bool(result["archived"])
+    explicit = result.get("cost_behavior")
+    result["cost_behavior"] = (
+        explicit if explicit in COST_BEHAVIORS and result["nature"] in EXPENSE_NATURES
+        else default_cost_behavior(result.get("system_key"), result["nature"])
+    )
     return result
 
 
@@ -401,10 +426,15 @@ def update_account(
     expected_version: int,
     name: Optional[str] = None,
     archived: Optional[bool] = None,
+    cost_behavior: Optional[str] = None,
 ) -> dict:
-    """Rename or (un)archive a category. Archiving hides it from new entries;
-    history and reports keep it (reporting lists archived accounts)."""
+    """Rename, (un)archive or reclassify a category as a fixed or variable cost.
+    Archiving hides it from new entries; history and reports keep it."""
     changes = {}
+    if cost_behavior is not None:
+        if cost_behavior not in COST_BEHAVIORS:
+            raise ValueError("Classificação de custo inválida: use fixo ou variável.")
+        changes["cost_behavior"] = cost_behavior
     if name is not None:
         changes["name"] = _clean_name(name, 160)
     if archived is not None:
@@ -417,9 +447,14 @@ def update_account(
             if current and current["system_key"]:
                 # Loans, card fees and receivables post to these by key; renaming is fine.
                 raise ValueError("Categorias padrão do sistema não podem ser arquivadas; renomeie se precisar.")
+        if cost_behavior is not None:
+            current = conn.execute(
+                "SELECT nature FROM finance_accounts WHERE id=? AND company=?", (account_id, company)
+            ).fetchone()
+            if current and current["nature"] not in EXPENSE_NATURES:
+                raise ValueError("Só categorias de despesa são classificadas como custo fixo ou variável.")
         row = _versioned_update(conn, "finance_accounts", account_id, company, expected_version, changes)
-    row["sensitive"] = bool(row["sensitive"])
-    return row
+    return _row(row)
 
 
 def update_counterparty(

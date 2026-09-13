@@ -857,3 +857,6 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .review-checks li.check-pending { border-left-color: var(--amber); }
 .checkbox-line { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; font-size: 14px; }
 .checkbox-line input { width: 20px; height: 20px; margin-top: 1px; flex: none; }
+
+/* Fixed/variable cost select in the categories table. */
+.compact-select { min-height: 36px; margin-bottom: 0; padding: 6px 8px; font-size: 13px; width: auto; }

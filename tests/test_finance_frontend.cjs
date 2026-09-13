@@ -40,14 +40,16 @@ function loadFinance() {
   return context;
 }
 
-test('no fixed-cost simulator, simulated result or break-even remains in the client', () => {
+test('no fixed-cost simulator or simulated result remains in the client', () => {
   const html = fs.readFileSync(path.join(root, 'web/index.html'), 'utf8');
   const app = fs.readFileSync(path.join(root, 'web/assets/app.js'), 'utf8');
   const insights = fs.readFileSync(path.join(root, 'web/assets/insights.js'), 'utf8');
 
+  // The break-even point came back fed by the cost center (test_break_even_frontend.cjs);
+  // the manual fixed cost and the simulated result stay gone.
   assert.doesNotMatch(html, /custo-fixo|Simulador/);
-  assert.doesNotMatch(app, /updateCustoFixo|custo-fixo|\/config['`]|fixed_cost_cents|simulated_net|break_even|Resultado simulado|Ponto de equilíbrio/);
-  assert.doesNotMatch(insights, /fixed_cost_cents|mountEchartGauge|Ponto de equilíbrio|custo fixo|lucro líquido/i);
+  assert.doesNotMatch(app, /updateCustoFixo|custo-fixo|\/config['`]|fixed_cost_cents|simulated_net|Resultado simulado/);
+  assert.doesNotMatch(insights, /fixed_cost_cents|lucro líquido/i);
 });
 
 test('the Resumo card and the Financeiro page read the same management result', () => {

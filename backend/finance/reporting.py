@@ -6,6 +6,42 @@ from .. import database as db, models
 from .accounts import list_accounts, resolve_parameter
 
 
+def _break_even(lines, revenue, cogs, sales_available, restricted, period) -> dict:
+    """Break-even point of the competence from the cost center (replaces the
+    legacy manually typed fixed cost): fixed costs ÷ contribution margin, where
+    contribution = revenue − COGS − variable costs. Every missing input makes
+    it unavailable with a reason instead of an estimate."""
+    empty = {
+        "fixed_costs_cents": None, "variable_costs_cents": None, "contribution_margin_cents": None,
+        "contribution_margin_pct": None, "break_even_cents": None, "gap_pct": None,
+    }
+    if restricted:
+        return {**empty, "reason": "Parte das despesas é restrita ao seu perfil: o ponto de equilíbrio não é exibido."}
+    fixed = sum(line["actual_cents"] for line in lines if line["cost_behavior"] == "fixed")
+    variable = sum(line["actual_cents"] for line in lines if line["cost_behavior"] == "variable")
+    result = {**empty, "fixed_costs_cents": fixed, "variable_costs_cents": variable}
+    if not sales_available:
+        return {**result, "reason": f"Vendas de {period} ainda não sincronizadas: o ponto de equilíbrio depende da margem do mês."}
+    if cogs is None:
+        return {**result, "reason": "Há itens vendidos sem custo conhecido: a margem do mês não pode ser calculada."}
+    if not revenue:
+        return {**result, "reason": "Sem faturamento no mês: não há margem para calcular o ponto de equilíbrio."}
+    contribution = revenue - cogs - variable
+    result["contribution_margin_cents"] = contribution
+    result["contribution_margin_pct"] = round(contribution * 100 / revenue, 1)
+    if fixed <= 0:
+        return {**result, "reason": "Nenhuma despesa fixa lançada nesta competência: lance os custos fixos em Custos e despesas para calcular."}
+    if contribution <= 0:
+        return {**result, "reason": "Margem de contribuição negativa: o faturamento não cobre o CMV e os custos variáveis."}
+    break_even = round(fixed * revenue / contribution)
+    return {
+        **result,
+        "break_even_cents": break_even,
+        "gap_pct": round((revenue - break_even) * 100 / break_even, 1),
+        "reason": "",
+    }
+
+
 def management_result(
     company: int,
     period: str,
@@ -80,6 +116,7 @@ def management_result(
                 "system_key": account["system_key"],
                 "name": account["name"],
                 "nature": account["nature"],
+                "cost_behavior": account["cost_behavior"],
                 "actual_cents": actual_cents,
                 "budget_cents": budget,
                 "variance_cents": actual_cents - budget if budget is not None else None,
@@ -115,6 +152,7 @@ def management_result(
         if operating_result is not None
         else None
     )
+    break_even = _break_even(account_lines, revenue, cogs, sales_available, restricted, period)
     if restricted:
         operating_expenses = owner_compensation = financial_expenses = None
         distributions = operating_result = managerial_result = None
@@ -149,6 +187,7 @@ def management_result(
         "managerial_result_cents": managerial_result,
         "profit_distribution_cents": distributions,
         "accounts": account_lines,
+        "break_even": break_even,
         "data_status": {
             "sales_available": sales_available,
             "expenses_reviewed": reviewed,

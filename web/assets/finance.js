@@ -101,6 +101,36 @@ function managementStatus(result) {
   };
 }
 
+function pctBR(value) {
+  return value == null ? '—' : `${Number(value).toFixed(1).replace('.', ',')}%`;
+}
+
+/* Break-even from the cost center: fixed costs ÷ contribution margin. When an
+ * input is missing the reason is shown instead of a number. */
+function breakEvenHtml(result) {
+  const be = (result && result.break_even) || {};
+  const available = be.break_even_cents != null;
+  const gap = be.gap_pct;
+  const gapText = gap == null ? '' : gap >= 0
+    ? `Faturamento ${pctBR(gap)} acima do ponto de equilíbrio.`
+    : `Faturamento ${pctBR(Math.abs(gap))} abaixo do ponto de equilíbrio.`;
+  return `
+    <section class="settings-block" aria-labelledby="break-even-title">
+      <div class="settings-heading">
+        <div><h2 id="break-even-title">Ponto de equilíbrio</h2>
+          <p>Custos fixos ÷ margem de contribuição (faturamento − CMV − custos variáveis). Fixo ou variável é definido por categoria em Configurações → Categorias e favorecidos.</p></div>
+      </div>
+      <div class="kpi-grid kpi-grid-4">
+        ${kpi('Ponto de equilíbrio', available ? money(be.break_even_cents) : 'Indisponível', available ? gapText : null, null,
+          available ? (gap >= 0 ? 'kpi-positive' : 'kpi-negative') : 'kpi-unavailable')}
+        ${kpi('Custos fixos', money(be.fixed_costs_cents))}
+        ${kpi('Custos variáveis', money(be.variable_costs_cents))}
+        ${kpi('Margem de contribuição', pctBR(be.contribution_margin_pct), be.contribution_margin_cents == null ? null : money(be.contribution_margin_cents))}
+      </div>
+      ${available ? '' : `<div class="story-box">${esc(be.reason || 'Dados insuficientes para calcular.')}</div>`}
+    </section>`;
+}
+
 function financePeriodLabel(period) {
   const [y, m] = (period || '').split('-').map(Number);
   return m ? `${MONTHS[m - 1]}/${y}` : '—';
@@ -209,6 +239,7 @@ async function renderFinanceiro(token) {
     ${review ? reviewPanelHtml(review) : ''}
     <hr class="divider">
     <div class="kpi-grid kpi-grid-4">${kpis}</div>
+    ${breakEvenHtml(result)}
     <h2 class="section-header">Contas — Realizado vs. Orçado</h2>
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Conta</th><th class="num">Realizado</th><th class="num">Orçado</th><th class="num">Variação</th><th>Origem</th></tr></thead>

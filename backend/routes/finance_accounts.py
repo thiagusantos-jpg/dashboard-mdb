@@ -86,6 +86,7 @@ class AccountPatch(BaseModel):
     expected_version: int = Field(ge=1)
     name: Optional[str] = Field(default=None, max_length=160)
     archived: Optional[bool] = None
+    cost_behavior: Optional[str] = None
 
 
 class CounterpartyPatch(BaseModel):
@@ -114,6 +115,7 @@ def _maintenance_errors(action):
 def patch_account(company: int, account_id: int, body: AccountPatch):
     return _maintenance_errors(lambda: accounts.update_account(
         company, account_id, expected_version=body.expected_version, name=body.name, archived=body.archived,
+        cost_behavior=body.cost_behavior,
     ))
 
 
