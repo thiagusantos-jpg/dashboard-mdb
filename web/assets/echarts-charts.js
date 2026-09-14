@@ -56,12 +56,25 @@ function brandTokens() {
   const v = (name, fallback) => (s.getPropertyValue(name) || fallback).trim() || fallback;
   return {
     dark: v('--dark', '#2D2D2D'), yellow: v('--yellow', '#FFC107'), amber: v('--amber', '#B7791F'),
-    blue: v('--blue', '#2E86C1'), muted: v('--text-muted', '#6B6B6B'),
+    blue: v('--chart-3', '#2D2D2D'), muted: v('--text-muted', '#6B6B6B'),  // "blue" kept as the name of the neutral graphite series
     // Only defined by the dark theme (style.css); the fallbacks are the light values.
     grid: v('--chart-grid', '#f0f0f0'), axis: v('--chart-axis', '#ddd'), surface: v('--chart-surface', '#fff'),
     weak: v('--chart-weak', '#E9A89F'),
+    good: v('--chart-good', '#1E8449'), bad: v('--chart-bad', '#C0392B'), ref: v('--chart-ref', '#A8A49A'),
+    heat: ['#FFF8E1', '#FFE082', '#FFC107', '#B7791F', '#5C3D0A'].map((fallback, i) => v(`--chart-heat-${i}`, fallback)),
   };
 }
+
+// Brand heat scale (style.css --chart-heat-0..4, cream → yellow → amber in light, the
+// reverse glow in dark) and a label ink that stays readable on whichever cell color.
+const hexRgb = (hex) => { const h = String(hex).replace('#', ''); return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0); };
+function brandHeat(stops, norm) {
+  const s = stops.map(hexRgb);
+  const x = Math.max(0, Math.min(1, norm)) * (s.length - 1);
+  const i = Math.min(s.length - 2, Math.floor(x)), f = x - i;
+  return s[i].map((a, k) => Math.round(a + (s[i + 1][k] - a) * f));
+}
+const inkOn = (rgb) => (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 150 ? '#1A1A1A' : '#FFFFFF');
 
 // Canvas has no per-point DOM, so a screen reader gets nothing from the chart itself —
 // this appends a visually-hidden (.sr-only, style.css) data table right after the chart
@@ -178,8 +191,8 @@ function mountEchartBar(el, points) {
     yAxis: {type: 'value', splitLine: {lineStyle: {color: t.grid}}, axisLine: {show: false},
       axisLabel: {color: t.muted, fontSize: 11, formatter: (v) => 'R$' + compactNum(v)}},
     series: [{type: 'bar', data: points.map((p) => p.value), barMaxWidth: 36,
-      itemStyle: {color: t.blue, borderRadius: [3, 3, 0, 0]},
-      emphasis: {itemStyle: {color: t.dark}}}],
+      itemStyle: {color: t.yellow, borderRadius: [3, 3, 0, 0]},
+      emphasis: {itemStyle: {color: t.amber}}}],
   });
   echartsTooltip(chart, (p) => `${monthYearLabel(points[p.dataIndex].label)}\n${points[p.dataIndex].display}`);
 }
@@ -200,7 +213,7 @@ function mountEchartBarH(el, points) {
     yAxis: {type: 'category', data: points.map((p) => p.label), inverse: true,
       axisLine: {show: false}, axisTick: {show: false}, axisLabel: {color: t.dark, fontSize: 12}},
     series: [{type: 'bar', data: points.map((p) => p.value), barMaxWidth: 22,
-      itemStyle: {color: t.blue, borderRadius: [0, 3, 3, 0]}, emphasis: {itemStyle: {color: t.dark}},
+      itemStyle: {color: t.yellow, borderRadius: [0, 3, 3, 0]}, emphasis: {itemStyle: {color: t.amber}},
       label: {show: true, position: 'right', color: t.muted, fontSize: 11, formatter: (p) => points[p.dataIndex].display}}],
   });
   echartsTooltip(chart, (p) => `${points[p.dataIndex].label}\n${points[p.dataIndex].display}`);
@@ -272,7 +285,7 @@ function mountEchartCombo(el, o) {
       // itemStyle.color here is only what the legend swatch reads (mirrors the SVG version's
       // same fallback) — each bar's real color still comes from its own data[i].itemStyle above.
       return {name: s.name, type: 'bar', data, yAxisIndex: s.axis === 'right' ? 1 : 0,
-        itemStyle: {color: s.color || (s.colors && s.colors[0]) || '#999', opacity: s.opacity == null ? 1 : s.opacity, borderRadius: [2, 2, 0, 0]},
+        itemStyle: {color: s.color || (s.colors && s.colors[0]) || t.ref, opacity: s.opacity == null ? 1 : s.opacity, borderRadius: [2, 2, 0, 0]},
         barGap: o.barMode === 'overlay' ? '-100%' : undefined,
         label: s.labels ? {show: true, position: 'top', color: t.muted, fontSize: 10,
           formatter: (p) => (s.labelFmt || s.fmt || String)(p.value)} : undefined};
@@ -294,8 +307,8 @@ function mountEchartCombo(el, o) {
     target.markLine = target.markLine || {silent: true, symbol: 'none', data: [],
       lineStyle: {}, label: {formatter: '', show: false}};
     target.markLine.data.push({yAxis: h.value});
-    target.markLine.lineStyle = {color: h.color || '#999', width: h.width || 1.5, type: dashArray(h.dash) || [5, 4]};
-    if (h.label) target.markLine.label = {show: true, formatter: h.label, position: 'end', color: h.color || '#888', fontSize: 10};
+    target.markLine.lineStyle = {color: h.color || t.ref, width: h.width || 1.5, type: dashArray(h.dash) || [5, 4]};
+    if (h.label) target.markLine.label = {show: true, formatter: h.label, position: 'end', color: h.color || t.muted, fontSize: 10};
   });
 
   const chart = echarts.init(el, null, {renderer: 'canvas'});
@@ -328,7 +341,7 @@ function mountEchartScatter(el, o) {
   const points = o.points || [];
   if (!points.length) { el.innerHTML = `<div class="chart-empty">${esc(o.empty || 'Sem dados.')}</div>`; return; }
   const t = brandTokens();
-  const groups = o.groups || [{name: '', color: t.blue}];
+  const groups = o.groups || [{name: '', color: t.amber}];
   const series = groups.map((g, gi) => ({
     name: g.name, type: 'scatter',
     data: points.filter((p) => p.g === gi).map((p) => ({value: [p.x, p.y], symbolSize: p.r * 2, tipText: p.tip})),
@@ -339,7 +352,7 @@ function mountEchartScatter(el, o) {
     series.push({name: '__annotations', type: 'scatter', silent: true, symbolSize: 0, tooltip: {show: false},
       data: o.annotations.map((a) => ({value: [a.x, a.y]})),
       label: {show: true, formatter: (p) => o.annotations[p.dataIndex].text,
-        color: (p) => o.annotations[p.dataIndex].color || '#888', fontWeight: 700, fontSize: 12}});
+        color: (p) => o.annotations[p.dataIndex].color || t.muted, fontWeight: 700, fontSize: 12}});
   }
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
@@ -350,12 +363,12 @@ function mountEchartScatter(el, o) {
     splitLine: {lineStyle: {color: t.grid}}, axisLine: {show: false},
     axisLabel: {color: t.muted, fontSize: 11, formatter: o.yFmt}}, scaleOpt(o.yScale));
   (o.vlines || []).forEach((v, i) => {
-    series[0].markLine = series[0].markLine || {silent: true, symbol: 'none', data: [], lineStyle: {color: '#999', type: [5, 4]}};
-    series[0].markLine.data.push({xAxis: v.x, label: v.label ? {show: true, formatter: v.label, color: '#888', fontSize: 10} : {show: false}});
+    series[0].markLine = series[0].markLine || {silent: true, symbol: 'none', data: [], lineStyle: {color: t.ref, type: [5, 4]}};
+    series[0].markLine.data.push({xAxis: v.x, label: v.label ? {show: true, formatter: v.label, color: t.muted, fontSize: 10} : {show: false}});
   });
   (o.hlines || []).forEach((h) => {
-    series[0].markLine = series[0].markLine || {silent: true, symbol: 'none', data: [], lineStyle: {color: '#999', type: [5, 4]}};
-    series[0].markLine.data.push({yAxis: h.y, label: h.label ? {show: true, formatter: h.label, color: '#888', fontSize: 10} : {show: false}});
+    series[0].markLine = series[0].markLine || {silent: true, symbol: 'none', data: [], lineStyle: {color: t.ref, type: [5, 4]}};
+    series[0].markLine.data.push({yAxis: h.y, label: h.label ? {show: true, formatter: h.label, color: t.muted, fontSize: 10} : {show: false}});
   });
   chart.setOption({
     animationDuration: CHART_ANIM_MS,
@@ -380,10 +393,10 @@ function mountEchartHeatmap(el, o) {
   const vals = cells.map((c) => c.value);
   const lo = Math.min(...vals), hi = Math.max(...vals), span = (hi - lo) || 1;
   const data = cells.map((c) => {
-    const norm = (c.value - lo) / span;
+    const rgb = brandHeat(t.heat, (c.value - lo) / span);
     return {value: [c.c, c.r, c.value], tipText: c.tip,
-      itemStyle: {color: heatColor(norm), borderColor: t.surface, borderWidth: 2},
-      label: {show: true, formatter: c.text, color: norm > 0.55 ? '#fff' : t.dark, fontSize: 11, fontWeight: 600}};
+      itemStyle: {color: `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, borderColor: t.surface, borderWidth: 2},
+      label: {show: true, formatter: c.text, color: inkOn(rgb), fontSize: 11, fontWeight: 600}};
   });
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
@@ -430,14 +443,14 @@ function mountEchartGauge(el, o) {
       const a = ang(v);
       const [x, y] = pt(a, R + thick / 2 + 12);
       graphics.push({type: 'text', x, y,
-        style: {text: o.fmt(v), fill: '#777', fontSize: 11, font: '11px sans-serif',
+        style: {text: o.fmt(v), fill: t.muted, fontSize: 11, font: '11px sans-serif',
           align: a > Math.PI * 0.6 ? 'right' : a < Math.PI * 0.4 ? 'left' : 'center', verticalAlign: 'middle'}});
     });
     if (o.threshold != null) {
       const a = ang(o.threshold);
       const [x0, y0] = pt(a, R - thick * 0.62), [x1, y1] = pt(a, R + thick * 0.62);
       graphics.push({type: 'line', shape: {x1: x0, y1: y0, x2: x1, y2: y1}, z: 10,
-        style: {stroke: '#E74C3C', lineWidth: 4}, cursor: 'default',
+        style: {stroke: t.bad, lineWidth: 4}, cursor: 'default',
         onmouseover: () => { if (tip && o.thresholdTip) { tip.textContent = o.thresholdTip; tip.classList.remove('hidden'); } },
         onmouseout: () => tip && tip.classList.add('hidden')});
     }
@@ -453,7 +466,7 @@ function mountEchartGauge(el, o) {
         title: {show: !!o.title, offsetCenter: [0, 18 - cy], color: t.dark, fontSize: 14, fontWeight: 600},
         detail: {show: true, offsetCenter: [0, -6], formatter: () => `{main|${o.fmt(o.value)}}${o.delta ? `\n{delta|${o.delta.text}}` : ''}`,
           rich: {main: {fontSize: 30, fontWeight: 700, color: t.dark, lineHeight: 36},
-            delta: {fontSize: 14, fontWeight: 600, lineHeight: 20, color: o.delta && o.delta.value >= 0 ? '#1E8449' : '#C0392B'}}},
+            delta: {fontSize: 14, fontWeight: 600, lineHeight: 20, color: o.delta && o.delta.value >= 0 ? t.good : t.bad}}},
         data: [{value: o.value, name: o.title || ''}],
       }],
     }, {replaceMerge: ['graphic']});

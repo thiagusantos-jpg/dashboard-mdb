@@ -37,7 +37,8 @@ function bubbleRadius(values, rmin, rmax) {
   return (v) => (rmin || 3) + ((rmax || 16) - (rmin || 3)) * Math.sqrt(Math.max(0, v || 0) / max);
 }
 
-const HEAT_STOPS = [[255, 255, 204], [254, 217, 118], [253, 141, 60], [227, 26, 28], [128, 0, 38]];
+// Brand heat scale (light): cream → yellow → amber → deep brown, same stops as style.css --chart-heat-*.
+const HEAT_STOPS = [[255, 248, 225], [255, 224, 130], [255, 193, 7], [183, 121, 31], [92, 61, 10]];
 function heatColor(t) {
   t = Math.max(0, Math.min(1, t)) * (HEAT_STOPS.length - 1);
   const i = Math.min(HEAT_STOPS.length - 2, Math.floor(t)), f = t - i;

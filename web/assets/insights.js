@@ -11,18 +11,38 @@ const DIAS_SEMANA = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'
 const DIAS_CURTOS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
 // Brand yellow is 1.6:1 on white — fine as a fill, invisible as a line or a bar edge.
 // amber (3.6:1) is used for yellow lines and as the outline of yellow bars (WCAG 1.4.11).
-const COR = {yellow: '#FFC107', amber: '#B7791F', green: '#27AE60', greenDark: '#1E8449', red: '#E74C3C',
-  blue: '#2E86C1', orange: '#F39C12', gray: '#AAAAAA', lightGray: '#BDBDBD'};
+// Chart colors are the brand tokens in style.css (--chart-*, light and dark), read when a
+// chart is drawn — so every page shares one palette and a theme switch repaints correctly.
+// Yellow/amber carry the data, graphite a second series, warm gray the references;
+// green and red are kept for good and bad only.
+const chartVar = (name, fallback) => {
+  if (typeof getComputedStyle !== 'function' || typeof document === 'undefined' || !document.documentElement) return fallback;
+  return (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim() || fallback;
+};
+const COR = {
+  get yellow() { return chartVar('--chart-1', '#FFC107'); },
+  get amber() { return chartVar('--chart-2', '#B7791F'); },
+  get green() { return chartVar('--chart-good', '#1E8449'); },
+  get greenDark() { return chartVar('--chart-good', '#1E8449'); },
+  get red() { return chartVar('--chart-bad', '#C0392B'); },
+  get blue() { return chartVar('--chart-3', '#2D2D2D'); },  // neutral graphite series (was a blue outside the brand)
+  get orange() { return chartVar('--chart-warn', '#D9820B'); },
+  get gray() { return chartVar('--chart-ref', '#A8A49A'); },
+  get lightGray() { return chartVar('--chart-ref-light', '#CFCBC2'); },
+  get goodSoft() { return chartVar('--chart-good-soft', '#D5F5E3'); },
+  get warnSoft() { return chartVar('--chart-warn-soft', '#FFF1C2'); },
+  get badSoft() { return chartVar('--chart-bad-soft', '#FADBD8'); },
+};
 const EROSAO_LIMIAR = 3;       // pontos de margem, mesmo corte da versão anterior
 // Same thresholds as backend/models.py summarize(): giro ≥ 60% dos dias, margem ≥ 35%.
 const GIRO_CORTE = 0.6, MARGEM_CORTE = 35;
 // label has no emoji: it also feeds ECharts canvas legends/tooltips, where a glyph's
 // look depends on the OS's emoji font — icon carries the matching Lucide icon for DOM use.
 const CLASSES = [
-  {key: 'Estrela', label: 'Estrela', icon: 'star', color: COR.green},
-  {key: 'Gerador de caixa', label: 'Gerador de Caixa', icon: 'dollar-sign', color: COR.yellow},
-  {key: 'Oportunidade', label: 'Oportunidade', icon: 'search', color: COR.blue},
-  {key: 'Baixo giro', label: 'Peso Morto', icon: 'triangle-alert', color: COR.red},
+  {key: 'Estrela', label: 'Estrela', icon: 'star', get color() { return COR.green; }},
+  {key: 'Gerador de caixa', label: 'Gerador de Caixa', icon: 'dollar-sign', get color() { return COR.yellow; }},
+  {key: 'Oportunidade', label: 'Oportunidade', icon: 'search', get color() { return COR.blue; }},
+  {key: 'Baixo giro', label: 'Baixo giro', icon: 'triangle-alert', get color() { return COR.red; }},
 ];
 
 /* ---------------------------------------------------------------- format */
@@ -143,6 +163,219 @@ function nextMonthProjection(data, S) {
 
 /* ================================================================ PÁGINA: INTELIGÊNCIA DE PREÇOS */
 
+// The price that keeps today's margin once the last purchase cost is the cost: cost ÷ (1 − margin).
+function priceToKeepMargin(lastCost, marginPct) {
+  if (!(lastCost > 0) || marginPct == null || !isFinite(marginPct) || marginPct >= 100) return null;
+  return Math.ceil(lastCost / (1 - marginPct / 100));
+}
+
+// Healthy above 55%, attention 40–55%, critical below 40% — written out, not color only.
+function categoryMarginBand(margin) {
+  if (margin == null) return {cls: 'mid', word: 'sem custo'};
+  if (margin > 55) return {cls: 'good', word: 'saudável'};
+  if (margin > 40) return {cls: 'mid', word: 'atenção'};
+  return {cls: 'low', word: 'crítica'};
+}
+
+function categoryMarginList(cats) {
+  if (!cats.length) return '<div class="chart-empty">Sem categorias com venda no período.</div>';
+  return `<ol class="cat-list">${cats.map((c) => {
+    const band = categoryMarginBand(c.margin);
+    return `<li>
+      <div class="cat-row"><span class="cat-name">${esc(c.name)}</span>
+        <span class="top-margin cat-margin ${band.cls}">${c.margin == null ? '—' : pct1(c.margin)} · ${band.word}</span></div>
+      <progress class="cat-bar" max="100" value="${Math.max(0, Math.min(100, c.margin || 0))}" aria-hidden="true"></progress>
+      <div class="cat-meta">Faturamento ${brl(c.revenue)}</div>
+    </li>`;
+  }).join('')}</ol>`;
+}
+
+/* ---------------------------------------------------------------- Preços: revisão por produto */
+
+// What the page's buttons, filter and side panel need after the table is drawn.
+let PRECOS_STATE = null;
+
+// Ends a suggested price the way shelf prices end — under R$ 10 on ,x9, from R$ 10 on
+// ,49 or ,99 — and never below the exact price that keeps today's margin.
+function psychologicalPrice(cents) {
+  if (!(cents > 0)) return null;
+  if (cents < 1000) return Math.ceil((cents + 1) / 10) * 10 - 1;
+  const reais = Math.floor(cents / 100);
+  for (const ending of [49, 99]) {
+    if (reais * 100 + ending >= cents) return reais * 100 + ending;
+  }
+  return (reais + 1) * 100 + 49;
+}
+
+const shortDateBR = (iso) => (iso ? `${String(iso).slice(8, 10)}/${String(iso).slice(5, 7)}` : '');
+
+// Cost per daily snapshot (newest first from the API), drawn oldest to newest.
+function costSparkline(history) {
+  const points = (history || []).filter((h) => h.cost_cents > 0).slice(0, 60).reverse();
+  if (points.length < 2) {
+    return '<p class="field-help">Ainda não há histórico suficiente: o custo passa a ser registrado a cada sincronização diária.</p>';
+  }
+  const vals = points.map((h) => h.cost_cents);
+  const min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1;
+  const W = 280, H = 56, pad = 5;
+  const xy = vals.map((v, i) => [pad + i * (W - 2 * pad) / (vals.length - 1), H - pad - (v - min) / span * (H - 2 * pad)]);
+  const first = points[0], latest = points[points.length - 1], end = xy[xy.length - 1];
+  const change = first.cost_cents ? (latest.cost_cents / first.cost_cents - 1) * 100 : null;
+  return `<svg class="cost-spark" viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Custo de ${money(first.cost_cents)} em ${shortDateBR(first.observed_at)} para ${money(latest.cost_cents)} em ${shortDateBR(latest.observed_at)}">
+      <polyline class="cost-spark-line" points="${xy.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ')}"></polyline>
+      <circle class="cost-spark-end" cx="${end[0].toFixed(1)}" cy="${end[1].toFixed(1)}" r="3.5"></circle>
+    </svg>
+    <p class="field-help">De ${money(first.cost_cents)} (${shortDateBR(first.observed_at)}) para <strong>${money(latest.cost_cents)}</strong>
+      (${shortDateBR(latest.observed_at)})${change == null ? '' : ` · ${change >= 0 ? '+' : ''}${pct1(change)}`}.
+      Mínimo ${money(min)}, máximo ${money(max)} em ${num(points.length)} registros.</p>`;
+}
+
+function onPrecosCategory(category) {
+  const s = PRECOS_STATE;
+  const el = document.getElementById('chart-precos-scatter');
+  if (!s || !el) return;
+  if (typeof echarts !== 'undefined') {
+    const chart = echarts.getInstanceByDom(el);
+    if (chart) chart.dispose();
+  }
+  el.innerHTML = '';
+  mountEchartScatter(el, s.scatterFor(category ? s.cap.filter((p) => s.categoryOf(p) === category) : s.cap));
+}
+
+const signedMoney = (cents) => `${cents >= 0 ? '+' : '−'}${money(Math.abs(cents))}`;
+
+async function runPriceSimulation(dialog, r) {
+  const status = dialog.querySelector('#price-sim-status');
+  const out = dialog.querySelector('#price-sim-result');
+  const price = parseDecimalBR(dialog.querySelector('#price-sim-price').value);
+  const qty = parseDecimalBR(dialog.querySelector('#price-sim-qty').value);
+  status.textContent = '';
+  if (!(price > 0)) { status.textContent = 'Informe o novo preço, por exemplo 3,49.'; return; }
+  if (!(qty > 0)) { status.textContent = 'Informe a quantidade esperada, maior que zero.'; return; }
+  out.innerHTML = '<p class="field-help">Simulando…</p>';
+  const simulate = (priceCents) => api(`/api/companies/${APP.company}/pricing/simulate`, {method: 'POST', body: JSON.stringify({
+    period: PRECOS_STATE.data.period, product_id: Number(r.id), new_price_cents: priceCents, expected_quantity: qty, cost_cents: r.last_cost})});
+  try {
+    const [now, next] = await Promise.all([simulate(r.current_price), simulate(Math.round(price * 100))]);
+    if (!dialog.isConnected) return;
+    const row = (label, a, b) => `<tr><td>${label}</td><td class="num">${a}</td><td class="num"><strong>${b}</strong></td></tr>`;
+    out.innerHTML = `<div class="data-table-container"><table class="data-table price-sim-table">
+        <thead><tr><th><span class="visually-hidden">Indicador</span></th><th class="num">Preço atual</th><th class="num">Novo preço</th></tr></thead>
+        <tbody>
+          ${row('Preço', money(now.simulated_price_cents), money(next.simulated_price_cents))}
+          ${row('Faturamento', money(now.simulated_revenue_cents), money(next.simulated_revenue_cents))}
+          ${row('Lucro bruto', money(now.simulated_profit_cents), money(next.simulated_profit_cents))}
+          ${row('Margem', pct1(now.simulated_margin_pct), pct1(next.simulated_margin_pct))}
+        </tbody></table></div>
+      <p class="field-help">Com o custo da última compra (${money(r.last_cost)}) e ${formatDecimalBR(qty, qty % 1 ? 2 : 0)} unidades.
+        Diferença de lucro: <strong>${signedMoney(next.simulated_profit_cents - now.simulated_profit_cents)}</strong>.</p>`;
+  } catch (e) {
+    out.innerHTML = '';
+    status.textContent = 'Não foi possível simular: ' + e.message;
+  }
+}
+
+async function onPriceReview(event) {
+  const s = PRECOS_STATE;
+  const r = s && s.subiu.find((x) => String(x.id) === event.currentTarget.dataset.priceReview);
+  if (!r) return;
+  const keep = priceToKeepMargin(r.last_cost, r.md);
+  const suggested = psychologicalPrice(keep);
+  const sold = Number((s.prodById.get(r.id) || {}).quantity) || 0;
+  const soldText = formatDecimalBR(sold, sold % 1 ? 2 : 0);
+  const drawer = openDrawer({title: 'Simular novo preço', trigger: event.currentTarget, body: `
+    <p class="price-review-name">${esc(r.name)}</p>
+    <dl class="summary-list">
+      <div><dt>Preço atual</dt><dd>${money(r.current_price)}</dd></div>
+      <div><dt>Margem hoje</dt><dd>${pct1(r.md)}</dd></div>
+      <div><dt>Custo médio</dt><dd>${money(r.current_cost)}</dd></div>
+      <div><dt>Custo da última compra</dt><dd>${money(r.last_cost)}</dd></div>
+    </dl>
+    <h3 class="drawer-subtitle">Custo registrado</h3>
+    <div id="price-history"><p class="field-help">Carregando histórico…</p></div>
+    <h3 class="drawer-subtitle">Simulação</h3>
+    <form id="price-sim-form" class="drawer-form" novalidate>
+      <div class="form-grid">
+        <div class="form-field"><label class="field-label" for="price-sim-price">Novo preço (R$)</label>
+          <input id="price-sim-price" class="login-input" type="text" inputmode="decimal" autocomplete="off"
+            value="${suggested == null ? '' : formatDecimalBR(suggested / 100, 2)}" aria-describedby="price-sim-price-help">
+          <p id="price-sim-price-help" class="field-help">${suggested == null ? 'Digite o preço que deseja testar.'
+            : `Sugerido ${money(suggested)}; o exato para manter ${pct1(r.md)} é ${money(keep)}.`}</p></div>
+        <div class="form-field"><label class="field-label" for="price-sim-qty">Quantidade esperada</label>
+          <input id="price-sim-qty" class="login-input" type="text" inputmode="decimal" autocomplete="off" value="${soldText}" aria-describedby="price-sim-qty-help">
+          <p id="price-sim-qty-help" class="field-help">Vendida em ${esc(s.periodLabel)}: ${soldText}.</p></div>
+      </div>
+      <button type="submit" class="btn-primary btn-wide">Simular</button>
+      <p id="price-sim-status" class="form-error" role="alert"></p>
+    </form>
+    <div id="price-sim-result" aria-live="polite"></div>
+    <div class="drawer-actions"><div class="row-actions" data-price-key="preco:${esc(r.id)}">
+      <span class="action-count" data-action-count hidden></span>
+      <button type="button" class="btn-secondary" data-price-action="${esc(r.id)}">Criar ação de reajuste</button>
+    </div></div>`});
+  const dialog = drawer.dialog;
+  dialog.querySelector('[data-price-action]').addEventListener('click', onPriceAction);
+  dialog.querySelector('#price-sim-form').addEventListener('submit', (ev) => { ev.preventDefault(); runPriceSimulation(dialog, r); });
+  loadPriceActions(dialog);
+  const box = dialog.querySelector('#price-history');
+  try {
+    const detail = await api(`/api/companies/${APP.company}/products/${encodeURIComponent(r.id)}?period=${encodeURIComponent(s.data.period)}`);
+    if (box.isConnected) box.innerHTML = costSparkline(detail.history);
+  } catch (e) {
+    if (box.isConnected) box.innerHTML = `<p class="field-help">Não foi possível carregar o histórico: ${esc(e.message)}</p>`;
+  }
+}
+
+// Each product's price review counts as its own alert type, so the same product is
+// never turned into a second open action by accident.
+async function loadPriceActions(scope) {
+  const wraps = (scope || document).querySelectorAll('[data-price-key]');
+  if (!wraps.length) return;
+  let list;
+  try {
+    list = await api(`/api/companies/${APP.company}/actions`);
+  } catch (e) {
+    return;
+  }
+  wraps.forEach((wrap) => {
+    if (!wrap.isConnected) return;
+    const count = alertActionCount(list, wrap.dataset.priceKey);
+    const slot = wrap.querySelector('[data-action-count]');
+    const btn = wrap.querySelector('[data-price-action]');
+    if (slot) {
+      slot.innerHTML = count ? `<a class="action-state has" href="${routeHash('acoes', APP.period)}">${count} ${count === 1 ? 'ação aberta' : 'ações abertas'} →</a>` : '';
+      slot.hidden = !count;
+    }
+    if (btn && !btn.disabled && count) btn.textContent = 'Criar outra ação';
+  });
+}
+
+async function onPriceAction(event) {
+  const btn = event.currentTarget;
+  const s = PRECOS_STATE;
+  const r = s && s.subiu.find((x) => String(x.id) === btn.dataset.priceAction);
+  if (!r) return;
+  const suggested = psychologicalPrice(priceToKeepMargin(r.last_cost, r.md));
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Criando…';
+  try {
+    await api(`/api/companies/${APP.company}/actions`, {method: 'POST', body: JSON.stringify({
+      alert_key: `preco:${r.id}`, alert_version: String(r.last_cost),
+      title: `Reajustar preço: ${r.name}${suggested == null ? '' : ` para ${money(suggested)}`} (custo foi de ${money(r.current_cost)} para ${money(r.last_cost)})`.slice(0, 240),
+      priority: r.erosao > 10 ? 'high' : 'medium'})});
+    btn.textContent = 'Ação criada ✓';
+    loadPriceActions();
+    const dialog = btn.closest('dialog');
+    if (dialog) loadPriceActions(dialog);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = label;
+    btn.insertAdjacentHTML('afterend', `<span class="form-error" role="alert">Não foi possível criar a ação: ${esc(e.message)}</span>`);
+  }
+}
+
 function renderPrecos(data) {
   const P = periodInfo(data), t = data.totals;
   const curvaA = (data.inventory || []).filter((p) => p.abc === 'A');
@@ -150,81 +383,116 @@ function renderPrecos(data) {
   const subiu = eros.filter((r) => r.erosao > EROSAO_LIMIAR).sort((a, b) => b.erosao - a.erosao);
   const caiu = eros.filter((r) => r.erosao < -EROSAO_LIMIAR).sort((a, b) => a.erosao - b.erosao);
   const low = curvaA.filter((p) => p.margin != null && p.margin < MARGEM_CORTE);
-  const oport = sumBy(low, (p) => p.revenue) * 0.05;
+  // Extra gross profit if each low-margin Curva A product reached MARGEM_CORTE at the same sales.
+  const lowGap = sumBy(low, (p) => p.revenue * (MARGEM_CORTE - p.margin) / 100);
   const mdm = t.margin;
 
+  const prodById = new Map((data.products || []).map((p) => [p.id, p]));
+  const categoryOf = (p) => p.category || (prodById.get(p.id) || {}).category || 'Sem categoria';
   const cap = curvaA.filter((p) => p.revenue > 5000 && p.margin != null);
-  const rOf = bubbleRadius(cap.map((p) => p.profit), 4, 18);
-  const avgRev = cap.length ? sumBy(cap, (p) => p.revenue) / cap.length : 0;
-  const maxRev = Math.max(0, ...cap.map((p) => p.revenue));
-  const scatterOpts = {
-    points: cap.map((p) => ({x: p.revenue, y: p.margin, r: rOf(p.profit), g: CLASSES.indexOf(classInfo(p.classification)),
-      tip: `${p.name}\nReceita: ${money(p.revenue)}\nMargem: ${pct1(p.margin)}\nLucro: ${money(p.profit)}\n${classInfo(p.classification).label}`})),
-    groups: CLASSES.map((c) => ({name: c.label, color: c.color})),
-    xScale: niceScale(0, maxRev * 1.05, 6),
-    xTitle: 'Faturamento no período (R$)', yTitle: 'Margem (%)', xFmt: brlShort, yFmt: (v) => v + '%',
-    vlines: [{x: avgRev, label: `Receita média: ${brlShort(avgRev)}`}],
-    hlines: mdm == null ? [] : [{y: mdm, label: `Margem média: ${pct1(mdm)}`}],
-    empty: 'Nenhum produto Curva A com custo conhecido no período.',
+  const capCategories = [...new Set(cap.map(categoryOf))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  // Built per list so the category filter redraws the same chart for a subset.
+  const scatterFor = (list) => {
+    const rOf = bubbleRadius(list.map((p) => p.profit), 4, 18);
+    const avgRev = list.length ? sumBy(list, (p) => p.revenue) / list.length : 0;
+    const maxRev = Math.max(0, ...list.map((p) => p.revenue));
+    return {
+      points: list.map((p) => ({x: p.revenue, y: p.margin, r: rOf(p.profit), g: CLASSES.indexOf(classInfo(p.classification)),
+        tip: `${p.name}\nFaturamento: ${money(p.revenue)}\nMargem: ${pct1(p.margin)}\nLucro: ${money(p.profit)}\n${classInfo(p.classification).label}`})),
+      groups: CLASSES.map((c) => ({name: c.label, color: c.color})),
+      xScale: niceScale(0, maxRev * 1.05, 6),
+      xTitle: 'Faturamento no período (R$)', yTitle: 'Margem (%)', xFmt: brlShort, yFmt: (v) => v + '%',
+      vlines: list.length ? [{x: avgRev, label: `Faturamento médio: ${brlShort(avgRev)}`}] : [],
+      hlines: mdm == null ? [] : [{y: mdm, label: `Margem da loja: ${pct1(mdm)}`}],
+      empty: list === cap ? 'Nenhum produto da curva A com custo conhecido no período.' : 'Nenhum produto da curva A nesta categoria.',
+    };
   };
+  PRECOS_STATE = {data, cap, categoryOf, scatterFor, subiu, prodById, periodLabel: P.label};
 
-  const cats = (data.categories || []).filter((c) => c.revenue > 0)
-    .sort((a, b) => (b.margin == null ? -1e9 : b.margin) - (a.margin == null ? -1e9 : a.margin));
-  const catRows = cats.map((c) => [c.margin == null ? dot('gray', 'sem dado') : c.margin > 55 ? dot('green', 'margem saudável') : c.margin > 40 ? dot('yellow', 'margem de atenção') : dot('red', 'margem crítica'),
-    esc(c.name), brl(c.revenue), pct1(c.margin)]);
+  // The twelve categories that sell the most: a thin margin matters where the money is.
+  const cats = (data.categories || []).filter((c) => c.revenue > 0).sort((a, b) => b.revenue - a.revenue).slice(0, 12);
 
-  const erosTable = (rows) => table(['Produto', 'Faturamento', 'Margem %', 'Preço atual', 'Custo médio', 'Custo últ. entrada',
-    'Markdown Atual', 'Markdown Últ. Entrada', 'Erosão (pts)'],
-  rows.map((r) => [esc(r.name), money(r.revenue), pct1(r.margin), money(r.current_price), money(r.current_cost),
-    money(r.last_cost), pct1(r.md), pct1(r.mdu), `${r.erosao >= 0 ? '+' : ''}${dec2(r.erosao)} pts`]));
+  const productLink = (r) => `<a href="#/produto/${esc(data.period)}?id=${esc(r.id)}">${esc(r.name)}</a>`;
+  const reviewTable = (rows, rising) => table(
+    ['Produto', 'Preço atual', 'Custo: médio → última compra', 'Margem: hoje → com custo novo']
+      .concat(rising ? ['Preço sugerido para manter a margem', '<span class="visually-hidden">Ações</span>'] : []),
+    rows.map((r) => {
+      const cells = [productLink(r), money(r.current_price),
+        `${money(r.current_cost)} → <strong>${money(r.last_cost)}</strong>`,
+        `${pct1(r.md)} → <strong class="${rising ? 'kpi-negative' : 'kpi-positive'}">${pct1(r.mdu)}</strong>`];
+      if (rising) {
+        const keep = priceToKeepMargin(r.last_cost, r.md);
+        const suggested = psychologicalPrice(keep);
+        cells.push(suggested == null ? '—'
+          : `<strong title="O exato para manter ${pct1(r.md)} é ${money(keep)}">${money(suggested)}</strong> <span class="muted">(+${money(suggested - r.current_price)})</span>`);
+        cells.push(`<div class="row-actions price-row-actions" data-price-key="preco:${esc(r.id)}">
+          <button type="button" class="btn-secondary" data-price-review="${esc(r.id)}">Simular</button>
+          <span class="action-count" data-action-count hidden></span>
+          <button type="button" class="btn-secondary" data-price-action="${esc(r.id)}">Criar ação</button></div>`);
+      }
+      return cells;
+    }));
 
   document.getElementById('content').innerHTML = `
     ${insightHeader('dollar-sign', 'Preços e margens', 'Onde estou deixando dinheiro na mesa?', P)}
     ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-3">
-      ${kpi('Markdown Médio Ponderado', pct1(mdm), mdm == null ? 'Custo incompleto no período'
-        : `De cada R$ 1 vendido, R$ ${dec2(mdm / 100)} é margem`)}
-      ${kpi('Produtos com Custo Subindo', num(subiu.length), 'Curva A com erosão detectada', 'kpi-negative')}
-      ${kpi('Oportunidade Estimada', `${brl(oport)}/mês`, `${low.length} produtos Curva A com margem < ${MARGEM_CORTE}%`, 'kpi-neutral')}
+      ${kpi('Margem bruta', pct1(mdm), mdm == null ? 'Há itens vendidos sem custo no período'
+        : `De cada R$ 100 vendidos, R$ ${dec2(mdm)} ficam depois do custo do produto`)}
+      ${kpi('Custo subiu', num(subiu.length), subiu.length
+        ? `produto${subiu.length === 1 ? '' : 's'} da curva A para revisar o preço` : 'Nenhum produto da curva A', subiu.length ? 'kpi-negative' : '')}
+      ${kpi(`Margem abaixo de ${MARGEM_CORTE}%`, num(low.length), low.length
+        ? `Até ${brl(lowGap)} a mais de lucro no período se chegassem a ${MARGEM_CORTE}%` : 'Nenhum produto da curva A', low.length ? 'kpi-neutral' : '')}
     </div>
-    ${explain('KPIs de Preços', 'Markdown = margem bruta (lucro ÷ venda). Erosão = custo da última entrada acima do custo médio, sem reajuste de preço.',
-      'Markdown alto = saudável. Custo subindo = alerta de margem futura.', 'Proteger a margem é proteger o lucro.',
-      `${subiu.length} produtos Curva A precisam de revisão de preço. A oportunidade estimada é 5% da receita dos produtos Curva A com margem abaixo de ${MARGEM_CORTE}%.`)}
-    ${story(`Margem média: ${pct1(mdm)}. ${subiu.length} produtos Curva A com custo subindo — reajustar para evitar erosão.`)}
-    <hr class="divider">
+    ${story(`${mdm == null ? 'Margem indisponível: há itens vendidos sem custo.' : `Margem bruta de ${pct1(mdm)}.`} ${subiu.length
+      ? `${subiu.length} produto${subiu.length === 1 ? ' da curva A ficou mais caro' : 's da curva A ficaram mais caros'} na última compra: veja abaixo o preço que mantém a margem.`
+      : 'Nenhum produto da curva A ficou mais caro na última compra.'}`)}
+    ${explain('esta página',
+      'Margem bruta é quanto sobra de cada venda depois do custo do produto. Curva A são os produtos que somam a maior parte do faturamento.',
+      'Comece por "Revisar preço": são produtos importantes que ficaram mais caros na última compra. O preço sugerido mantém a margem que eles têm hoje.',
+      'Um aumento de custo sem reajuste de preço reduz o lucro de cada venda, sem aparecer no faturamento.',
+      `Os ${num(low.length)} produtos da curva A com margem abaixo de ${MARGEM_CORTE}% dariam até ${brl(lowGap)} a mais de lucro no período se chegassem a ${MARGEM_CORTE}%, vendendo o mesmo.`)}
+
+    ${section(`${icon('triangle-alert')} Revisar preço — curva A`)}
+    <p class="section-note">Produtos cuja última compra mudou a margem em mais de ${EROSAO_LIMIAR} pontos, ao preço atual.
+      Preços e custos do Mobne em ${dt(data.stock_updated_at)}.</p>
+    <div class="tabs" role="group" aria-label="Direção do custo">
+      <button type="button" class="tab-btn active" data-tab="tab-subiu">Custo subiu (${subiu.length})</button>
+      <button type="button" class="tab-btn" data-tab="tab-caiu">Custo caiu (${caiu.length})</button>
+    </div>
+    <div id="tab-subiu" class="tab-content active">${subiu.length
+      ? reviewTable(subiu, true)
+      : '<div class="badge-success">Nenhum produto da curva A ficou mais caro na última compra.</div>'}</div>
+    <div id="tab-caiu" class="tab-content">${caiu.length
+      ? reviewTable(caiu, false) + '<p class="section-note">Mantendo o preço atual, a margem destes produtos sobe quando o estoque novo entrar.</p>'
+      : '<div class="badge-info">Nenhum produto da curva A ficou mais barato na última compra.</div>'}</div>
 
     <div class="row">
       <div class="col-60">
-        ${section(`Duelo de Produtos (${P.label})`)}
+        ${section(`Faturamento × margem — curva A (${P.label})`)}
+        ${capCategories.length > 1 ? `<div class="chart-filter">
+          <label class="field-label" for="precos-category">Categoria</label>
+          <select id="precos-category" class="login-input">
+            <option value="">Todas (${num(cap.length)} produtos)</option>
+            ${capCategories.map((c) => `<option value="${esc(c)}">${esc(c)} (${num(cap.filter((p) => categoryOf(p) === c).length)})</option>`).join('')}
+          </select></div>` : ''}
         <div class="chart-container chart-h-460" id="chart-precos-scatter"></div>
-        ${explain('Scatter Plot de Preços', 'Cada bolha = produto Curva A. X = faturamento. Y = margem. Tamanho = lucro. Clique na legenda para filtrar.',
-          'Superior direito = melhor. Inferior direito = vende mas não lucra. Passe o mouse para ver detalhes.', 'Identifica onde reajustar preço.')}
+        <p class="section-note">Cada bolha é um produto; quanto maior, mais lucro. À direita e no alto: vende muito com boa margem.
+          À direita e embaixo: vende muito e ganha pouco. Clique na legenda para filtrar.</p>
       </div>
       <div class="col-40">
-        ${section(`Ranking Margem por Categoria (${P.label})`)}
-        ${table(['Status', 'Categoria', 'Fat.', 'Markdown'], catRows)}
-        ${explain('Ranking por Categoria', `${cats.length} categorias ordenadas por margem. ${dot('green')} > 55% · ${dot('yellow')} 40–55% · ${dot('red')} < 40%.`,
-          `Categorias ${dot('red')} com alto faturamento são as mais urgentes.`, 'Renegociar fornecedores ou reajustar preços.')}
+        ${section(`Margem por categoria (${P.label})`)}
+        <div class="cat-card">${categoryMarginList(cats)}</div>
+        <p class="section-note">As 12 categorias que mais faturam. Saudável acima de 55%, atenção de 40% a 55%, crítica abaixo de 40%.</p>
       </div>
     </div>
-
-    ${section(`${icon('triangle-alert')} Alerta de Erosão — Curva A (${P.label})`)}
-    <p class="section-note">Produtos em que o custo da última entrada difere do custo médio em mais de ${EROSAO_LIMIAR} pontos de margem,
-      ao preço atual. Custos e preços: retrato atual do Mobne (${dt(data.stock_updated_at)}).</p>
-    <div class="tabs">
-      <button type="button" class="tab-btn active" data-tab="tab-subiu">${dot('red')} Custo Subiu (${subiu.length})</button>
-      <button type="button" class="tab-btn" data-tab="tab-caiu">${dot('green')} Custo Caiu (${caiu.length})</button>
-    </div>
-    <div id="tab-subiu" class="tab-content active">${subiu.length
-      ? erosTable(subiu) + story(`${subiu.length} produtos com custo subindo. Reajustar preço para proteger margem futura.`)
-      : '<div class="badge-success">Nenhum produto com custo subindo!</div>'}</div>
-    <div id="tab-caiu" class="tab-content">${caiu.length
-      ? erosTable(caiu) + story(`${caiu.length} produtos com custo caindo. Mantenha o preço para aumentar a margem!`)
-      : '<div class="badge-info">Nenhum produto com custo caindo.</div>'}</div>
-    ${explain('Erosão de Margem', 'Compara o markdown calculado com o custo médio vs com o custo da última entrada.',
-      'Positivo = custo subiu (ruim). Negativo = custo caiu (bom).', 'Alerta antecipado do que VAI acontecer com a margem.')}
   `;
-  mountEchartScatter(document.getElementById('chart-precos-scatter'), scatterOpts);
+  mountEchartScatter(document.getElementById('chart-precos-scatter'), scatterFor(cap));
+  const categorySelect = document.getElementById('precos-category');
+  if (categorySelect) categorySelect.addEventListener('change', () => onPrecosCategory(categorySelect.value));
+  document.querySelectorAll('[data-price-review]').forEach((b) => b.addEventListener('click', onPriceReview));
+  document.querySelectorAll('[data-price-action]').forEach((b) => b.addEventListener('click', onPriceAction));
+  loadPriceActions();
 }
 
 /* ================================================================ PÁGINA: MAPA DE PRODUTOS */
@@ -260,51 +528,57 @@ function renderMapa(data) {
       {x: 0.83, y: ys.max - span * 0.05, text: 'ESTRELAS', color: COR.green},
       {x: 0.83, y: ys.min + span * 0.05, text: 'GERADORES', color: COR.orange},
       {x: 0.27, y: ys.max - span * 0.05, text: 'OPORTUNIDADES', color: COR.blue},
-      {x: 0.27, y: ys.min + span * 0.05, text: 'PESO MORTO', color: COR.red},
+      {x: 0.27, y: ys.min + span * 0.05, text: 'BAIXO GIRO', color: COR.red},
     ],
     empty: 'Nenhum produto com custo conhecido no período.',
   };
 
-  const rowsOf = (arr) => arr.map((p) => [esc(p.name), p.days_sold, pct1(p.margin), money(p.revenue), money(p.profit)]);
-  const heads = ['Produto', 'Dias', 'Margem %', 'Receita', 'Lucro'];
+  const rowsOf = (arr) => arr.map((p) => [`<a href="#/produto/${esc(data.period)}?id=${esc(p.id)}">${esc(p.name)}</a>`,
+    num(p.days_sold), pct1(p.margin), money(p.revenue), money(p.profit)]);
+  const heads = ['Produto', 'Dias com venda', 'Margem', 'Faturamento', 'Lucro'];
   const byProfit = (arr) => arr.slice().sort((a, b) => (b.profit || 0) - (a.profit || 0));
   const byRevenue = (arr) => arr.slice().sort((a, b) => b.revenue - a.revenue);
+  // One block per group: what to do first, then its ten most relevant products.
+  const group = (cls, list, todo, order) => `
+    <section class="class-group" aria-label="${esc(cls.label)}">
+      <h3 class="class-title">${icon(cls.icon)} ${esc(cls.label)} <span class="class-count">${num(list.length)}</span></h3>
+      <p class="class-todo">${todo}</p>
+      ${table(heads, rowsOf(list.slice(0, 10)))}
+      <p class="section-note">${list.length > 10 ? `Mostrando 10 de ${num(list.length)}, ` : ''}${order}.</p>
+    </section>`;
+  const [cEst, cGer, cOpo, cBaixo] = CLASSES;
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('map', 'Mapa de produtos', 'Quais produtos são estrelas e quais são peso morto?', P)}
+    ${insightHeader('map', 'Mapa de produtos', 'Quais produtos proteger, ajustar, divulgar ou rever?', P)}
     ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-4">
-      ${kpi(`${icon('star')} Estrelas`, num(est.length), `${brl(lucro(est))} lucro`)}
-      ${kpi(`${icon('dollar-sign')} Geradores`, num(ger.length), `${brl(lucro(ger))} lucro`)}
-      ${kpi(`${icon('search')} Oportunidades`, num(opo.length), `${brl(lucro(opo))} lucro`)}
-      ${kpi(`${icon('triangle-alert')} Peso Morto`, num(pm.length), `${brl(lucro(pm))} lucro`)}
+      ${kpi(`${icon('star')} Estrelas`, num(est.length), `Vendem sempre, com boa margem · ${brl(lucro(est))} de lucro`)}
+      ${kpi(`${icon('dollar-sign')} Geradores de caixa`, num(ger.length), `Vendem sempre, com margem baixa · ${brl(lucro(ger))} de lucro`)}
+      ${kpi(`${icon('search')} Oportunidades`, num(opo.length), `Boa margem, vendem pouco · ${brl(lucro(opo))} de lucro`)}
+      ${kpi(`${icon('triangle-alert')} Baixo giro`, num(pm.length), `Vendem pouco e ganham pouco · ${brl(lucro(pm))} de lucro`)}
     </div>
-    ${explain('Matriz 2×2', `Giro × Margem. ${icon('star')} giro alto e margem alta · ${icon('dollar-sign')} giro alto e margem baixa · ${icon('search')} giro baixo e margem alta · ${icon('triangle-alert')} giro baixo e margem baixa. Cortes: giro ≥ ${GIRO_CORTE * 100}% dos dias com venda e margem ≥ ${MARGEM_CORTE}%.`,
-      `${icon('star')} Proteger · ${icon('dollar-sign')} Renegociar custo · ${icon('search')} Dar visibilidade · ${icon('triangle-alert')} Avaliar remoção.`, 'Permite priorizar decisões sobre cada grupo.',
-      `Apenas ${n80} de ${num(prods.length)} produtos geram 80% do lucro.`)}
-    ${story(`Apenas ${n80} produtos (de ${num(prods.length)}) geram 80% do lucro. As ${est.length} Estrelas são intocáveis.`)}
-    <hr class="divider">
+    ${story(`Apenas ${num(n80)} de ${num(prods.length)} produtos geram 80% do lucro. Antes de qualquer outra decisão, não deixe faltar as ${num(est.length)} estrelas.`)}
+    ${explain('esta página',
+      `Cada produto entra em um grupo pelo giro (em quantos dias do período vendeu) e pela margem. Os cortes são vender em ${GIRO_CORTE * 100}% dos dias ou mais e ter margem de ${MARGEM_CORTE}% ou mais.`,
+      'Estrelas: proteger o estoque. Geradores de caixa: renegociar custo ou ajustar preço. Oportunidades: dar visibilidade na loja. Baixo giro: avaliar se vale manter.',
+      'O mix certo libera espaço na prateleira e dinheiro parado em estoque para o que realmente dá lucro.')}
 
-    ${section(`Matriz de Rentabilidade (${P.label})`)}
-    <div class="chart-container chart-h-520" id="chart-mapa-matrix"></div>
-    ${explain('Scatter Plot Giro vs Margem', 'Cada bolha = produto. X = giro. Y = margem. Tamanho = faturamento.',
-      `Superior direito = ${icon('star')}. Inferior direito = ${icon('dollar-sign')}. Passe o mouse para ver detalhes; clique na legenda para filtrar grupos.`,
-      'Ferramenta principal para decisões de mix.')}
-
+    ${section('O que fazer com cada grupo')}
     <div class="row">
       <div class="col-50">
-        ${section(`${icon('star')} Estrelas`)}
-        ${table(heads, rowsOf(byProfit(est)))}
-        ${section(`${icon('search')} Oportunidades (Top 15)`)}
-        ${table(heads, rowsOf(byProfit(opo).slice(0, 15)))}
+        ${group(cEst, byProfit(est), 'Proteger: nunca deixar faltar na prateleira.', 'ordenados por lucro')}
+        ${group(cOpo, byProfit(opo), 'Dar visibilidade: ponta de gôndola, degustação ou combo.', 'ordenados por lucro')}
       </div>
       <div class="col-50">
-        ${section(`${icon('dollar-sign')} Geradores de Caixa`)}
-        ${table(heads, rowsOf(byRevenue(ger)))}
-        ${section(`${icon('triangle-alert')} Peso Morto (Top 15)`)}
-        ${table(heads, rowsOf(byRevenue(pm).slice(0, 15)))}
+        ${group(cGer, byRevenue(ger), 'Renegociar custo ou ajustar preço: vendem muito e ganham pouco.', 'ordenados por faturamento')}
+        ${group(cBaixo, byRevenue(pm), 'Avaliar retirada ou liquidação para liberar espaço e capital.', 'ordenados por faturamento')}
       </div>
     </div>
+
+    ${section(`Giro × margem (${P.label})`)}
+    <div class="chart-container chart-h-520" id="chart-mapa-matrix"></div>
+    <p class="section-note">Cada bolha é um produto; quanto maior, mais faturamento. Mais à direita, vende em mais dias; mais no alto, margem maior.
+      Clique na legenda para filtrar os grupos.</p>
   `;
   mountEchartScatter(document.getElementById('chart-mapa-matrix'), matrixOpts);
 }
@@ -316,13 +590,13 @@ function renderDiagnostico(data) {
   const fat = t.revenue, cup = t.receipts, tk = t.ticket;
   const prevLabel = cmp ? monthLabel(Number(cmp.period.slice(0, 4)), P.m) : null;
   let vc = null, vt = null;
-  let diag = kpi('Diagnóstico', '—', 'Sem dados do mesmo mês do ano anterior');
+  let diag = kpi('O que mais pesou', '—', 'Sem vendas do mesmo mês do ano anterior');
   if (cmp && cmp.totals.receipts) {
     const c0 = cmp.totals.receipts, t0 = cmp.totals.ticket;
     vc = growth(cup, c0); vt = growth(tk, t0);
     const ic = (cup - c0) * t0, it = (tk - t0) * cup;
-    const [who, effect] = Math.abs(ic) >= Math.abs(it) ? ['Fluxo', ic] : ['Ticket', it];
-    diag = kpi('Diagnóstico', `${who} ${effect >= 0 ? '▲' : '▼'}`, `Cupons: ${brlSigned(ic)} | Ticket: ${brlSigned(it)}`,
+    const [who, effect] = Math.abs(ic) >= Math.abs(it) ? ['Número de clientes', ic] : ['Gasto por cliente', it];
+    diag = kpi('O que mais pesou', `${effect >= 0 ? '▲' : '▼'} ${who}`, `Clientes: ${brlSigned(ic)} · Gasto por cliente: ${brlSigned(it)}`,
       '', effect >= 0 ? 'kpi-positive' : 'kpi-negative');
   }
   const vsTxt = prevLabel ? ` vs ${prevLabel}` : '';
@@ -365,47 +639,44 @@ function renderDiagnostico(data) {
   const dowChartOpts = {
     labels: byDow.map((d) => d.nome),
     series: [{name: 'Faturamento médio', type: 'bar', values: byDow.map((d) => d.media), fmt: money, labels: true, labelFmt: brl,
-      colors: byDow.map((d) => d.nome === 'Domingo' ? COR.red : COR.yellow),
-      strokes: byDow.map((d) => d.nome === 'Domingo' ? null : COR.amber), tips: byDow.map((d) => `${d.dias} dia(s) com venda`)}],
+      // The weakest weekday of this period in red, whichever it is — not always Sunday.
+      colors: byDow.map((d) => worst && d.nome === worst.nome ? COR.red : COR.yellow),
+      strokes: byDow.map((d) => worst && d.nome === worst.nome ? null : COR.amber), tips: byDow.map((d) => `${d.dias} dia(s) com venda`)}],
     yFmt: brlShort, yTitle: 'Fat. médio (R$)',
   };
 
   document.getElementById('content').innerHTML = `
-    ${insightHeader('search', 'Desempenho de vendas', 'Menos clientes, menos gasto, ou mix mudou?', P)}
+    ${insightHeader('search', 'Desempenho de vendas', 'Vieram menos clientes, cada um gastou menos, ou o mix mudou?', P)}
     <div class="kpi-grid kpi-grid-4">
-      ${kpi('FATURAMENTO =', brl(fat), 'Cupons × Ticket Médio')}
-      ${kpi('Nº Cupons', num(cup), vc == null ? 'Sem comparação' : `${deltaArrow(vc)} ${signedPct(vc)}${vsTxt}`, deltaClass(vc))}
-      ${kpi('× Ticket Médio', money(tk), vt == null ? 'Sem comparação' : `${deltaArrow(vt)} ${signedPct(vt)}${vsTxt}`, deltaClass(vt))}
+      ${kpi('Faturamento', brl(fat), 'Cupons × ticket médio')}
+      ${kpi('Cupons', num(cup), vc == null ? 'Sem comparação' : `${deltaArrow(vc)} ${signedPct(vc)}${vsTxt}`, deltaClass(vc))}
+      ${kpi('Ticket médio', money(tk), vt == null ? 'Sem comparação' : `${deltaArrow(vt)} ${signedPct(vt)}${vsTxt}`, deltaClass(vt))}
       ${diag}
     </div>
-    ${explain('Decomposição do Faturamento', 'FAT = Cupons × Ticket. Se caiu, ou veio menos gente ou cada cliente gastou menos.',
-      "'Fluxo' = efeito do número de clientes. 'Ticket' = efeito do gasto por cliente. A seta indica se ajudou (▲) ou atrapalhou (▼).",
-      'Fluxo → marketing/fachada. Ticket → cross-selling/mix.',
+    ${story(vc == null ? `Faturamento de ${brl(fat)}: ${num(cup)} cupons com ticket médio de ${money(tk)}. Não há vendas do mesmo mês do ano anterior para comparar.`
+      : `Faturamento de ${brl(fat)}: ${num(cup)} cupons (${signedPct(vc)}) com ticket médio de ${money(tk)} (${signedPct(vt)})${vsTxt}.`)}
+    ${explain('esta página', 'Faturamento é o número de cupons (clientes atendidos) vezes o ticket médio (quanto cada um gastou).',
+      '"O que mais pesou" mostra qual dos dois explica a maior parte da variação: ▲ ajudou, ▼ atrapalhou.',
+      'Menos clientes pede atração (fachada, divulgação); gasto menor por cliente pede mix e venda casada.',
       cmp ? `A comparação usa os mesmos ${P.partial ? P.endDay : P.daysInMonth} primeiros dias de ${prevLabel}.` : undefined)}
-    ${story(vc == null ? `Faturamento = ${num(cup)} cupons × ${money(tk)}. Não há vendas sincronizadas do mesmo mês do ano anterior para comparar.`
-      : `Faturamento = ${num(cup)} cupons × ${money(tk)}. Fluxo variou ${signedPct(vc)} e ticket variou ${signedPct(vt)}${vsTxt}.`)}
-    <hr class="divider">
 
     <div class="row">
       <div class="col-50">
-        ${section(`Contribuição por Categoria (${P.label})`)}
+        ${section(`Categorias que mais faturam (${P.label})`)}
         <div class="chart-container chart-h-380" id="chart-diag-contrib"></div>
-        ${explain('Contribuição por Categoria', 'Top 12 categorias por faturamento. Verde = lucro positivo, vermelho = prejuízo.',
-          'Barras mais altas = mais faturamento. Passe o mouse para ver lucro e margem.', 'Identifica os motores do faturamento.')}
+        <p class="section-note">As 12 maiores. Verde: deram lucro; vermelho: prejuízo; cinza: sem custo. Passe o mouse para ver lucro e margem.</p>
       </div>
       <div class="col-50">
-        ${section(`Heatmap por Dia (${P.label})`)}
+        ${section(`Faturamento por dia do mês (${P.label})`)}
         <div class="chart-container chart-h-380" id="chart-diag-heat"></div>
-        ${explain('Heatmap Semanal', `Faturamento de cada dia de ${P.nome}/${P.y}, por semana do mês.`,
-          'Cores quentes = dias fortes. Frias = fracos. Cinza = sem venda.', 'Identifica padrões semanais e dias atípicos.')}
+        <p class="section-note">Cada quadrado é um dia, organizado por semana. Quanto mais intensa a cor, maior a venda.</p>
       </div>
     </div>
 
-    ${section(`Faturamento Médio por Dia da Semana (${P.label})`)}
+    ${section(`Média por dia da semana (${P.label})`)}
     <div class="chart-container chart-h-290" id="chart-diag-dow"></div>
-    ${explain('Faturamento por Dia da Semana', `Média diária em ${P.nome}/${P.y}. Domingo em vermelho.`,
-      'Barras altas = dias fortes. Use para planejar estoque e escala.', 'Promoções nos dias fracos, reforço nos fortes.')}
-    ${best ? story(`${best.nome} é o dia mais forte (${brl(best.media)} em média), ${worst.nome} o mais fraco (${brl(worst.media)}). Promoções para ${worst.nome}, reforço de estoque para ${best.nome}.`) : ''}
+    ${best ? `<p class="section-note">${best.nome} é o dia mais forte (${brl(best.media)} em média) e ${worst.nome}, em vermelho, o mais fraco (${brl(worst.media)}):
+      reforce o estoque para ${best.nome.toLowerCase()} e concentre promoções em ${worst.nome.toLowerCase()}.</p>` : ''}
   `;
   mountEchartCombo(document.getElementById('chart-diag-contrib'), contribOpts);
   mountEchartHeatmap(document.getElementById('chart-diag-heat'), heatOpts);
@@ -460,7 +731,7 @@ function renderSazonalidade(data) {
       partialIdx >= 0 ? {name: `${MONTHS[partialIdx]}/${P.yy} (parcial)`, type: 'line', values: S.cur.map((t) => (t && t.partial ? t.revenue : null)),
         color: COR.orange, marker: 'diamond', markerSize: 7, fmt: money, tips: S.cur.map((t) => (t && t.partial ? `Dados até ${t.end.slice(8)}/${t.end.slice(5, 7)}` : ''))} : null,
     ],
-    hlines: S.refAvg ? [{value: S.refAvg, label: `Média ${R}: ${brlShort(S.refAvg)}`, color: '#CCCCCC', dash: '2 4'}] : [],
+    hlines: S.refAvg ? [{value: S.refAvg, label: `Média ${R}: ${brlShort(S.refAvg)}`, color: COR.gray, dash: '2 4'}] : [],
     yFmt: brlShort, yTitle: 'Faturamento (R$)',
   };
   const idxOpts = {
@@ -468,7 +739,7 @@ function renderSazonalidade(data) {
     series: [{name: 'Índice', type: 'bar', values: S.index, fmt: dec2, labels: true,
       colors: S.index.map((v) => (v != null && v > 1 ? COR.green : COR.red)),
       tips: S.ref.map((t) => (t ? `Faturamento: ${money(t.revenue)}` : ''))}],
-    hlines: [{value: 1, color: '#999', dash: '1 0', width: 2}],
+    hlines: [{value: 1, color: COR.gray, dash: '1 0', width: 2}],
     yFmt: dec2, yTitle: 'Índice (1,00 = média)', empty: `Sem vendas de ${R} para calcular o índice.`,
   };
 
@@ -492,7 +763,7 @@ function renderSazonalidade(data) {
   const trend = rol.length >= 2 ? growth(rol[rol.length - 1].value, rol[0].value) : null;
   const rollOpts = {
     labels: rol.map((r) => r.label),
-    series: [{name: 'Faturamento 12 meses', type: 'line', values: rol.map((r) => r.value), color: COR.blue, fill: true, width: 3, fmt: money}],
+    series: [{name: 'Faturamento 12 meses', type: 'line', values: rol.map((r) => r.value), color: COR.amber, fill: true, width: 3, fmt: money}],
     yFmt: brlShort, yTitle: 'Fat. acumulado 12m (R$)',
     empty: 'São necessários 12 meses completos de vendas sincronizadas para a média móvel.',
   };
@@ -569,7 +840,7 @@ function renderVisao(data) {
       {name: `${P.y} (real)`, type: 'bar', values: closedReal, color: COR.yellow, stroke: COR.amber, fmt: money, labels: true, labelFmt: brlShort},
       {name: `${P.y} (projeção)`, type: 'bar', values: projVals, color: COR.yellow, opacity: 0.35, stroke: COR.amber, fmt: money, labels: true, labelFmt: brlShort},
       partialVals.some((v) => v != null) ? {name: `${P.y} (em andamento)`, type: 'bar', values: partialVals, color: COR.orange, opacity: 0.85, fmt: money} : null,
-      {name: `${S.R} (referência)`, type: 'line', values: S.ref.map((c) => (c ? c.revenue : null)), color: '#BBBBBB', dash: '4 4', width: 2, fmt: money},
+      {name: `${S.R} (referência)`, type: 'line', values: S.ref.map((c) => (c ? c.revenue : null)), color: COR.gray, dash: '4 4', width: 2, fmt: money},
     ],
     yFmt: brlShort, yTitle: 'Faturamento (R$)',
   };
@@ -597,7 +868,7 @@ function renderVisao(data) {
   if (vc != null) watchList.push(`${icon('users')} <strong>Fluxo de clientes</strong>: variou ${signedPct(vc)} vs o mesmo período do ano anterior`);
   if (data.margin_goal_pct != null) watchList.push(`${icon('bar-chart-3')} <strong>Margem bruta</strong>: manter acima da meta de ${dec2(data.margin_goal_pct)}% (atual: ${pct1(mg)})`);
   watchList.push(`${icon('tag')} <strong>Erosão</strong>: ${eros.length} produtos precisam de reajuste`);
-  if (pesoMorto.length > 50) watchList.push(`${icon('trash-2')} <strong>Peso Morto</strong>: ${num(pesoMorto.length)} produtos a avaliar`);
+  if (pesoMorto.length > 50) watchList.push(`${icon('trash-2')} <strong>Baixo giro</strong>: ${num(pesoMorto.length)} produtos vendem pouco e ganham pouco — avaliar se vale manter`);
 
   const basisTxt = nx.basis === 'sazonal'
     ? `Projeção sazonal: ${nx.curto}/${String(S.R).slice(2)} × fator ${dec2(S.factor)}.`
@@ -692,7 +963,7 @@ async function loadVisaoBreakEven(period, ctx) {
   box.hidden = false;
   mountEchartGauge(document.getElementById('chart-visao-gauge'), {
     value: pace, max: ideal * 1.5, fmt: brl,
-    steps: [{to: point, color: '#FADBD8'}, {to: ideal, color: '#F9E79F'}, {to: ideal * 1.5, color: '#D5F5E3'}],
+    steps: [{to: point, color: COR.badSoft}, {to: ideal, color: COR.warnSoft}, {to: ideal * 1.5, color: COR.goodSoft}],
     threshold: point, thresholdTip: `Ponto de equilíbrio: ${brl(point)}`,
     tip: P.partial ? `Ritmo projetado: ${brl(pace)}\nRealizado até ${String(P.endDay).padStart(2, '0')}/${String(P.m).padStart(2, '0')}: ${brl(fat)}` : `Faturamento: ${brl(fat)}`,
     ticks: [0, point, ideal, ideal * 1.5],
