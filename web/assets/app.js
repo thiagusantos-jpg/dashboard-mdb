@@ -23,6 +23,7 @@ const APP = {
   status: null,       // last /status payload
   dashboard: null,    // last /dashboard payload
   statusTimer: null,  // background status/dashboard refresh (see STATUS_POLL_MS)
+  syncPending: null,  // sync mode just clicked, until the status poll sees its job row
   pollTimer: null,    // 4s polling while a sync job is queued/running
   estoque: {q: '', sort: 'revenue', dir: 'desc'},  // Produtos & Estoque search/sort (filter lives in the route)
   // Page-load coordinator (page-state.js, loaded before this file): tells a
@@ -1188,10 +1189,13 @@ async function followSyncProgress() {
   } catch (e) {
     return;
   }
+  // Once the poll has seen the job row (running or already finished), the card shows the real run.
+  if ((APP.status.jobs || []).length) APP.syncPending = null;
   if (typeof refreshSyncPanel === 'function') refreshSyncPanel();
 }
 
 // The panel lives in Configurações → Integrações (settings.js syncPanelHtml).
+// Progress is the panel's status card; this line only reports what the card can't.
 async function triggerSync(mode, button) {
   const status = document.getElementById('sync-action-status');
   const say = (text, ok) => {
@@ -1201,28 +1205,28 @@ async function triggerSync(mode, button) {
   };
   if (button) button.disabled = true;
   say('', true);
+  APP.syncPending = mode;
+  if (typeof refreshSyncPanel === 'function') refreshSyncPanel();  // instant feedback, before the server answers
   const request = api(`/api/companies/${APP.company}/sync`,
     {method: 'POST', body: JSON.stringify({mode}), timeout: SYNC_REQUEST_TIMEOUT_MS});
   // The job row exists within a second: follow it instead of waiting for the run to end.
-  const follow = setTimeout(() => {
-    say('Sincronização em andamento: acompanhe o progresso abaixo.', true);
-    followSyncProgress();
-  }, SYNC_FOLLOW_DELAY_MS);
+  const follow = setTimeout(followSyncProgress, SYNC_FOLLOW_DELAY_MS);
   try {
+    // On Vercel this resolves only when the run is over; locally, as soon as it is queued.
     const result = await request;
     clearTimeout(follow);
-    say(result && result.already_running
-      ? 'Já existe uma sincronização em andamento: acompanhe o progresso abaixo.'
-      : 'Sincronização iniciada.', true);
+    if (result && result.already_running) say('Já havia uma sincronização em andamento: o progresso dela aparece abaixo.', true);
     await followSyncProgress();
   } catch (e) {
     clearTimeout(follow);
     if (e.timedOut) {
       // Only the browser stopped waiting; the run and its job row carry on server-side.
-      say('A sincronização continua no servidor: acompanhe o progresso abaixo.', true);
+      say('A sincronização continua no servidor: o progresso segue abaixo.', true);
       await followSyncProgress();
     } else {
+      APP.syncPending = null;
       say('Não foi possível iniciar a sincronização: ' + e.message, false);
+      if (typeof refreshSyncPanel === 'function') refreshSyncPanel();
     }
     if (button) button.disabled = false;
   }

@@ -504,7 +504,7 @@ async function renderIntegrationsSettings(token) {
 
   document.getElementById('content').innerHTML = settingsShell('integracoes', `
     <div id="sync-action-status" class="form-success" role="status" aria-live="polite"></div>
-    <section id="sync-panel" aria-labelledby="sync-title">${syncPanelHtml(APP.status)}</section>
+    <section id="sync-panel" aria-labelledby="sync-title">${syncPanelHtml(APP.status, APP.syncPending)}</section>
     <section class="settings-block" aria-labelledby="stone-title">
     <div class="settings-heading">
       <div><h2 id="stone-title">Stone Open Finance</h2><p>Conecta uma conta de pagamento Stone para sincronizar saldo e extrato automaticamente.</p></div>
@@ -639,10 +639,94 @@ function jobBadge(state) {
 
 const SYNC_MODE_LABELS = {recent: 'Recente', history: 'Histórico completo', reconcile: 'Reconciliação completa', month: 'Mês específico'};
 
-/* The daily task is one button; the diagnosis (catalogs, periods, every run)
- * stays one click away under "Opções avançadas". Progress shows the job's own
- * counters as reported — never capped on screen to hide a miscount. */
-function syncPanelHtml(s) {
+/* A run is: validate the company, one step per sales month, then 4 catalogs
+ * (backend/sync.py sets total = months + 4). The stage is derived from those
+ * counters; the "X de Y etapas" text still shows them exactly as reported. */
+const SYNC_CATALOG_STEPS = 4;
+const SYNC_STAGES = ['Validação', 'Vendas por mês', 'Catálogos', 'Concluído'];
+
+function syncStage(job) {
+  if (!job.total) return 0;
+  const months = job.total - SYNC_CATALOG_STEPS;
+  return job.completed < months ? 1 : job.completed < job.total ? 2 : 3;
+}
+
+// Share of the run done, counting how far the current step's page download got
+// ("Cupons 2026-09: página 3/10 · …"), so the bar moves between whole steps.
+function syncFraction(job) {
+  if (!job.total) return 0;
+  const page = /página (\d+)\/(\d+)/.exec(job.detail || '');
+  const within = page && Number(page[2]) ? Math.min(Number(page[1]) / Number(page[2]), 1) : 0;
+  return Math.max(0, Math.min((job.completed + within) / job.total, 1));
+}
+
+function syncAgo(iso, nowMs) {
+  if (!iso) return '—';
+  const s = Math.max(0, Math.round(((nowMs || Date.now()) - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
+}
+
+function syncStepsHtml(job) {
+  const stage = syncStage(job);
+  return `<ol class="sync-steps">${SYNC_STAGES.map((label, i) => {
+    const state = i < stage ? 'done' : i === stage ? 'current' : 'todo';
+    return `<li class="sync-step is-${state}"${state === 'current' ? ' aria-current="step"' : ''}><span class="sync-step-dot" aria-hidden="true"></span>${label}</li>`;
+  }).join('')}</ol>`;
+}
+
+function syncRunningCard(job) {
+  const pending = !job.id;
+  const fraction = syncFraction(job);
+  const percent = Math.round(fraction * 100);
+  const bar = job.total
+    ? `<div class="sync-bar" role="progressbar" aria-label="Progresso da sincronização" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`
+    : '<div class="sync-bar is-indeterminate" role="progressbar" aria-label="Progresso da sincronização"><span></span></div>';
+  return `
+    <div class="sync-card is-running">
+      <div class="sync-card-head">
+        <span class="sync-spinner" aria-hidden="true"></span>
+        <div class="sync-card-title">
+          <strong>${pending ? 'Iniciando sincronização…' : job.state === 'queued' ? 'Na fila para sincronizar' : 'Sincronizando'} · ${esc(SYNC_MODE_LABELS[job.mode] || job.mode)}</strong>
+          ${pending ? '<span class="muted">Conectando ao servidor</span>'
+            : `<span class="muted">Em andamento há <span data-sync-since="${esc(job.created_at)}">${syncAgo(job.created_at)}</span> · última novidade há <span data-sync-since="${esc(job.updated_at)}">${syncAgo(job.updated_at)}</span></span>`}
+        </div>
+        ${job.total ? `<span class="sync-percent">${percent}%</span>` : ''}
+      </div>
+      ${syncStepsHtml(job)}
+      ${bar}
+      <div class="sync-card-foot">
+        <span class="sync-detail" role="status" aria-live="polite">${esc(job.detail || 'Aguardando o início…')}</span>
+        ${job.total ? `<span class="muted">${job.completed} de ${job.total} etapas</span>` : ''}
+      </div>
+    </div>`;
+}
+
+function syncLastCard(job) {
+  if (!job) return '<div class="sync-card is-idle"><div class="sync-card-head"><div class="sync-card-title"><strong>Nenhuma sincronização ainda</strong><span class="muted">Clique em Sincronizar agora para trazer vendas, produtos e estoque.</span></div></div></div>';
+  const tone = {completed: 'ok', completed_with_errors: 'warn', failed: 'error'}[job.state] || 'idle';
+  const title = {completed: 'Última sincronização concluída', completed_with_errors: 'Última sincronização concluída com falhas',
+    failed: 'Última sincronização falhou'}[job.state] || 'Última sincronização';
+  return `
+    <div class="sync-card is-${tone}">
+      <div class="sync-card-head">
+        <span class="sync-state-dot" aria-hidden="true"></span>
+        <div class="sync-card-title">
+          <strong>${title}</strong>
+          <span class="muted">${dt(job.updated_at)} · há <span data-sync-since="${esc(job.updated_at)}">${syncAgo(job.updated_at)}</span> · ${esc(SYNC_MODE_LABELS[job.mode] || job.mode)}</span>
+        </div>
+      </div>
+      ${job.detail ? `<div class="sync-detail">${esc(job.detail)}</div>` : ''}
+      ${job.error ? `<div class="sync-error">${esc(job.error)}</div>` : ''}
+    </div>`;
+}
+
+/* The daily task is one button beside the title; the status card says where a
+ * run is right now; the diagnosis (catalogs, periods, every run) stays one click
+ * away under "Opções avançadas". `pending` is the mode just clicked, shown
+ * before the server has created the job row. */
+function syncPanelHtml(s, pending) {
   s = s || {};
   const jobs = s.jobs || [];
   const active = jobs.find((j) => j.state === 'queued' || j.state === 'running');
@@ -654,30 +738,33 @@ function syncPanelHtml(s) {
     const c = catalogs[key];
     return `<tr><td>${catalogLabels[key]}</td><td class="num">${c ? num(c.count) : '—'}</td><td>${c ? dt(c.updated_at) : 'Não sincronizado'}</td></tr>`;
   }).join('');
-  const progress = active ? `
-    <div class="sync-progress" role="status">
-      <div><strong>${SYNC_MODE_LABELS[active.mode] || esc(active.mode)}</strong> ${jobBadge(active.state)}</div>
-      ${active.total ? `<progress max="${active.total}" value="${active.completed}" aria-label="Progresso da sincronização"></progress>
-        <div class="muted">${active.completed} de ${active.total} etapas</div>` : ''}
-      <div class="job-detail">${esc(active.detail || 'Aguardando o início…')}</div>
-    </div>` : '';
-  const lastRun = last ? `
-    <p>Última execução: ${jobBadge(last.state)} ${dt(last.updated_at)}${last.detail ? ` — ${esc(last.detail)}` : ''}</p>
-    ${last.error ? `<div class="job-error">${esc(last.error)}</div>` : ''}` : '<p>Nenhuma execução ainda.</p>';
-  const disabled = active ? ' disabled' : '';
+  const busy = active || (pending ? {mode: pending, state: 'queued', total: 0, completed: 0, detail: ''} : null);
+  const disabled = busy ? ' disabled' : '';
   return `
-    <div class="settings-heading">
+    <div class="settings-heading sync-heading">
       <div><h2 id="sync-title">Mobne — vendas, produtos e estoque</h2>
-        <p>${esc(s.source || 'Mobne')} · atualização automática a cada ${s.interval_minutes || '—'} min${latest ? ` · último período salvo: ${esc(latest.period)} em ${dt(latest.updated_at)}` : ''}</p></div>
+        <p>Fonte: ${esc(s.source || 'Mobne')}</p></div>
+      <button type="button" class="btn-primary btn-wide" data-sync="recent"${disabled}>${busy ? 'Sincronizando…' : 'Sincronizar agora'}</button>
     </div>
-    ${progress}
-    ${lastRun}
-    <div class="btn-row"><button type="button" class="btn-primary btn-wide" data-sync="recent"${disabled}>Sincronizar agora</button></div>
-    <details class="form-details">
+    ${busy ? syncRunningCard(busy) : syncLastCard(last)}
+    <dl class="sync-facts">
+      <div><dt>Atualização automática</dt><dd>a cada ${s.interval_minutes || '—'} min</dd></div>
+      <div><dt>Último período salvo</dt><dd>${latest ? `${esc(latest.period)} <span class="muted">em ${dt(latest.updated_at)}</span>` : '—'}</dd></div>
+      ${busy && last ? `<div><dt>Execução anterior</dt><dd>${jobBadge(last.state)} <span class="muted">${dt(last.updated_at)}</span></dd></div>` : ''}
+    </dl>
+    <details class="form-details sync-advanced">
       <summary>Opções avançadas e diagnóstico</summary>
-      <div class="btn-row">
-        <button type="button" class="btn-secondary" data-sync="reconcile"${disabled}>Reconciliar todo o histórico</button>
-        <button type="button" class="btn-secondary" data-sync="history"${disabled}>Carregar histórico completo</button>
+      <div class="sync-options">
+        <div class="sync-option">
+          <div><strong>Carregar histórico completo</strong>
+            <span class="muted">Busca só os meses desde 2025-01 que ainda não foram salvos, mais o mês atual.</span></div>
+          <button type="button" class="btn-secondary" data-sync="history"${disabled}>Carregar histórico</button>
+        </div>
+        <div class="sync-option">
+          <div><strong>Reconciliar todo o histórico</strong>
+            <span class="muted">Baixa de novo todos os meses desde 2025-01 e confere com a análise Mobne. Pode levar vários minutos.</span></div>
+          <button type="button" class="btn-secondary" data-sync="reconcile"${disabled}>Reconciliar</button>
+        </div>
       </div>
       <h3 class="drawer-subtitle">Catálogos</h3>
       <div class="table-wrap"><table class="data-table"><thead><tr><th>Base</th><th class="num">Itens</th><th>Atualizado</th></tr></thead>
@@ -706,8 +793,26 @@ function refreshSyncPanel() {
   if (!panel) return;
   const details = panel.querySelector('details');
   const wasOpen = !!(details && details.open);
-  panel.innerHTML = syncPanelHtml(APP.status);
+  panel.innerHTML = syncPanelHtml(APP.status, APP.syncPending);
   if (wasOpen) panel.querySelector('details').open = true;
+  startSyncClock();
+}
+
+// Status polls every 4s; the "há X s" clocks tick every second in between, so a
+// running sync visibly stays alive. Stops by itself once the panel is gone.
+let syncClockTimer = null;
+function startSyncClock() {
+  if (syncClockTimer) return;
+  syncClockTimer = setInterval(() => {
+    const clocks = document.querySelectorAll('[data-sync-since]');
+    if (!document.getElementById('sync-panel')) {
+      clearInterval(syncClockTimer);
+      syncClockTimer = null;
+      return;
+    }
+    const nowMs = Date.now();
+    clocks.forEach((el) => { el.textContent = syncAgo(el.dataset.syncSince, nowMs); });
+  }, 1000);
 }
 
 /* ---------------------------------------------------------------- Categorias e favorecidos */
