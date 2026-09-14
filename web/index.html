@@ -92,12 +92,16 @@
         </div>
 
         <div class="sidebar-footer">
-            <span id="sidebar-user"></span><br>
-            <button type="button" class="btn-secondary footer-btn w-full mt-8" data-profile-open="profile">Minha conta</button>
-            <button type="button" class="btn-link footer-link" data-profile-open="password">Alterar senha</button>
             <a class="nav-item footer-nav" href="#/configuracoes/empresa" data-page="configuracoes"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 5H3" /><path d="M12 19H3" /><path d="M14 3v4" /><path d="M16 17v4" /><path d="M21 12h-9" /><path d="M21 19h-5" /><path d="M21 5h-7" /><path d="M8 10v4" /><path d="M8 12H3" /></svg> Configurações</a>
-            <button type="button" class="btn-secondary footer-btn w-full mt-8" data-logout>Sair</button>
-            <div class="mt-8">Mercado duBairro &copy; 2026</div>
+            <!-- One account row: the whole card opens Minha conta (which also changes the password); Sair is a separate icon button. -->
+            <div class="account-row">
+                <button type="button" class="account-btn" data-profile-open="profile">
+                    <span class="account-avatar" aria-hidden="true"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="5" /><path d="M20 21a8 8 0 0 0-16 0" /></svg></span>
+                    <span class="account-text"><span class="account-title">Minha conta</span><span id="sidebar-user" class="account-email"></span></span>
+                </button>
+                <button type="button" class="account-logout" data-logout aria-label="Sair" title="Sair"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /></svg></button>
+            </div>
+            <div class="footer-copy">Mercado duBairro &copy; 2026</div>
         </div>
     </nav>
     <div class="nav-backdrop" data-nav-close hidden></div>

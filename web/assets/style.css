@@ -197,9 +197,13 @@ body {
 .sidebar hr { border: none; border-top: 1px solid var(--sidebar-line); margin: 12px 0; }
 
 .nav-item {
-    display: block;
+    /* Flex keeps a wrapped label ("Sazonalidade e tendências") aligned beside its icon instead of under it. */
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    line-height: 1.3;
     width: 100%;
-    padding: 10px 14px;
+    padding: 10px 12px;
     background: transparent;
     border: none;
     color: var(--sidebar-text);
@@ -256,7 +260,8 @@ body {
 /* Inline Lucide icons (web/assets/icons.js) replacing the old emoji glyphs —
    currentColor lets them follow the surrounding text color automatically. */
 .icon { display: inline-block; vertical-align: -3px; flex-shrink: 0; }
-.nav-item .icon, .btn-icon .icon { vertical-align: -4px; margin-right: 6px; }
+.nav-item .icon { margin: 0; }
+.btn-icon .icon { vertical-align: -4px; margin-right: 6px; }
 
 /* Status dot used for ABC/severity indicators instead of colored emoji circles. */
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
@@ -760,8 +765,6 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .password-field .login-input { flex: 1; }
 .password-field .btn-secondary { min-height: 44px; }
 .login-input[aria-invalid="true"] { border-color: var(--negative); }
-.footer-link { margin: 6px auto 0; color: var(--sidebar-text); font-size: 12px; }
-.footer-link:hover { color: var(--yellow); }
 @media (max-width: 600px) {
     .app-dialog { width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh; margin: 0; border-radius: 0; }
 }
@@ -830,7 +833,29 @@ th[aria-sort="descending"] .th-sort::after { content: ' ▼'; opacity: 1; }
 .module-link:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
 .module-link[aria-current="true"] { background: var(--yellow); color: var(--dark); }
 .module-nav[hidden] { display: none; }
-.sidebar-footer .footer-nav { margin: 8px 0 0; font-size: 13px; text-align: center; }
+.sidebar-footer { border-top: 1px solid var(--sidebar-line); text-align: left; }
+.sidebar-footer .footer-nav { margin: 0 0 8px; }
+.account-row { display: flex; align-items: stretch; gap: 4px; padding: 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.06); }
+.account-btn {
+    flex: 1; min-width: 0; min-height: 48px; display: flex; align-items: center; gap: 10px;
+    padding: 6px 8px; border: none; border-radius: 8px; background: transparent; color: var(--sidebar-text);
+    text-align: left; cursor: pointer; transition: background-color 0.2s, color 0.2s;
+}
+.account-btn:hover, .account-logout:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.account-avatar {
+    flex: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: var(--yellow); color: var(--dark);
+}
+.account-avatar .icon { vertical-align: 0; }
+.account-text { min-width: 0; display: flex; flex-direction: column; }
+.account-title { font-size: 13px; font-weight: 600; }
+.account-email { font-size: 11px; color: var(--sidebar-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-logout {
+    flex: none; width: 44px; display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: 8px; background: transparent; color: var(--sidebar-muted); cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+.footer-copy { margin-top: 10px; text-align: center; }
 .topbar-module { font-size: 12px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); margin-right: 8px; }
 .period-control[hidden] { display: none; }
 .status-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
