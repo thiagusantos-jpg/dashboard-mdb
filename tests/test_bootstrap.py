@@ -34,6 +34,7 @@ def client(tmp_path, monkeypatch):
 def test_bootstrap_completes_with_empty_registry(client, monkeypatch, serverless):
     monkeypatch.setattr(settings, 'IS_SERVERLESS', serverless)
     assert client.get('/api/session').json()['companies'] == []
+    assert 'name' in client.get('/api/session').json()
     response = client.post('/api/companies/218/sync', json={'mode': 'recent'})
     assert response.status_code == 202
     job_id = response.json()['job_id']

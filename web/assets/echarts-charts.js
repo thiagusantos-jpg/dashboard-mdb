@@ -57,6 +57,8 @@ function brandTokens() {
   return {
     dark: v('--dark', '#2D2D2D'), yellow: v('--yellow', '#FFC107'), amber: v('--amber', '#B7791F'),
     blue: v('--blue', '#2E86C1'), muted: v('--text-muted', '#6B6B6B'),
+    // Only defined by the dark theme (style.css); the fallbacks are the light values.
+    grid: v('--chart-grid', '#f0f0f0'), axis: v('--chart-axis', '#ddd'), surface: v('--chart-surface', '#fff'),
   };
 }
 
@@ -87,7 +89,7 @@ function echartsTooltip(chart, formatter) {
 }
 
 const baseAxis = (t, formatter) => ({
-  axisLine: {lineStyle: {color: '#ddd'}},
+  axisLine: {lineStyle: {color: t.axis}},
   axisTick: {show: false},
   axisLabel: {color: t.muted, fontSize: 11, fontFamily: 'inherit', formatter},
 });
@@ -112,11 +114,11 @@ function mountEchartLine(el, points) {
     grid: {left: 8, right: 16, top: 16, bottom: 28, containLabel: true},
     tooltip: {show: false},
     xAxis: Object.assign({type: 'category', data: points.map((p) => p.label), boundaryGap: false}, baseAxis(t, dayMonthLabel)),
-    yAxis: Object.assign({type: 'value', splitLine: {lineStyle: {color: '#f0f0f0'}},
+    yAxis: Object.assign({type: 'value', splitLine: {lineStyle: {color: t.grid}},
       axisLabel: {color: t.muted, fontSize: 11, formatter: (v) => 'R$' + compactNum(v)}}, {axisLine: {show: false}}),
     series: [{
       type: 'line', data: points.map((p) => p.value), symbol: 'circle', symbolSize: 6,
-      lineStyle: {color: t.amber, width: 2.5}, itemStyle: {color: t.dark, borderColor: '#fff', borderWidth: 1},
+      lineStyle: {color: t.amber, width: 2.5}, itemStyle: {color: t.dark, borderColor: t.surface, borderWidth: 1},
       areaStyle: {color: t.yellow, opacity: 0.12},
     }],
   });
@@ -134,7 +136,7 @@ function mountEchartBar(el, points) {
     grid: {left: 8, right: 16, top: 16, bottom: 28, containLabel: true},
     tooltip: {show: false},
     xAxis: Object.assign({type: 'category', data: points.map((p) => p.label)}, baseAxis(t, monthYearLabel)),
-    yAxis: {type: 'value', splitLine: {lineStyle: {color: '#f0f0f0'}}, axisLine: {show: false},
+    yAxis: {type: 'value', splitLine: {lineStyle: {color: t.grid}}, axisLine: {show: false},
       axisLabel: {color: t.muted, fontSize: 11, formatter: (v) => 'R$' + compactNum(v)}},
     series: [{type: 'bar', data: points.map((p) => p.value), barMaxWidth: 36,
       itemStyle: {color: t.blue, borderRadius: [3, 3, 0, 0]},
@@ -260,7 +262,7 @@ function mountEchartCombo(el, o) {
   const chart = echarts.init(el, null, {renderer: 'canvas'});
   ECHARTS_INSTANCES.push(chart);
   const yAxis = [{type: 'value', name: o.yTitle, nameTextStyle: {color: t.muted, fontSize: 11},
-    min: o.yMin, splitLine: {lineStyle: {color: '#f0f0f0'}}, axisLine: {show: false},
+    min: o.yMin, splitLine: {lineStyle: {color: t.grid}}, axisLine: {show: false},
     axisLabel: {color: t.muted, fontSize: 11, formatter: o.yFmt || compactNum}}];
   if (hasY2) yAxis.push({type: 'value', name: o.y2Title, nameTextStyle: {color: t.muted, fontSize: 11},
     splitLine: {show: false}, axisLine: {show: false}, axisLabel: {color: t.muted, fontSize: 11, formatter: o.y2Fmt || compactNum}});
@@ -291,7 +293,7 @@ function mountEchartScatter(el, o) {
   const series = groups.map((g, gi) => ({
     name: g.name, type: 'scatter',
     data: points.filter((p) => p.g === gi).map((p) => ({value: [p.x, p.y], symbolSize: p.r * 2, tipText: p.tip})),
-    itemStyle: {color: g.color, opacity: 0.62, borderColor: '#fff', borderWidth: 0.8},
+    itemStyle: {color: g.color, opacity: 0.62, borderColor: t.surface, borderWidth: 0.8},
     emphasis: {itemStyle: {opacity: 0.9}},
   }));
   if (o.annotations && o.annotations.length) {
@@ -304,9 +306,9 @@ function mountEchartScatter(el, o) {
   ECHARTS_INSTANCES.push(chart);
   const scaleOpt = (s) => s ? {min: s.min, max: s.max} : {};
   const xAxis = Object.assign({type: 'value', name: o.xTitle, nameLocation: 'middle', nameGap: 28,
-    nameTextStyle: {color: t.muted, fontSize: 11}, splitLine: {lineStyle: {color: '#f0f0f0'}}}, baseAxis(t, o.xFmt), scaleOpt(o.xScale));
+    nameTextStyle: {color: t.muted, fontSize: 11}, splitLine: {lineStyle: {color: t.grid}}}, baseAxis(t, o.xFmt), scaleOpt(o.xScale));
   const yAxis = Object.assign({type: 'value', name: o.yTitle, nameTextStyle: {color: t.muted, fontSize: 11},
-    splitLine: {lineStyle: {color: '#f0f0f0'}}, axisLine: {show: false},
+    splitLine: {lineStyle: {color: t.grid}}, axisLine: {show: false},
     axisLabel: {color: t.muted, fontSize: 11, formatter: o.yFmt}}, scaleOpt(o.yScale));
   (o.vlines || []).forEach((v, i) => {
     series[0].markLine = series[0].markLine || {silent: true, symbol: 'none', data: [], lineStyle: {color: '#999', type: [5, 4]}};
@@ -341,7 +343,7 @@ function mountEchartHeatmap(el, o) {
   const data = cells.map((c) => {
     const norm = (c.value - lo) / span;
     return {value: [c.c, c.r, c.value], tipText: c.tip,
-      itemStyle: {color: heatColor(norm), borderColor: '#fff', borderWidth: 2},
+      itemStyle: {color: heatColor(norm), borderColor: t.surface, borderWidth: 2},
       label: {show: true, formatter: c.text, color: norm > 0.55 ? '#fff' : t.dark, fontSize: 11, fontWeight: 600}};
   });
   const chart = echarts.init(el, null, {renderer: 'canvas'});
@@ -405,7 +407,7 @@ function mountEchartGauge(el, o) {
       series: [{
         type: 'gauge', startAngle: 180, endAngle: 0, min: 0, max,
         center: [cx, cy], radius: R,
-        axisLine: {lineStyle: {width: thick, color: zoneColors.length ? zoneColors : [[1, '#eee']]}},
+        axisLine: {lineStyle: {width: thick, color: zoneColors.length ? zoneColors : [[1, t.grid]]}},
         progress: {show: true, width: thick * 0.42, itemStyle: {color: o.color || t.amber}},
         pointer: {show: false}, anchor: {show: false},
         axisTick: {show: false}, splitLine: {show: false}, axisLabel: {show: false},

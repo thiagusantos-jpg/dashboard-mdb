@@ -374,6 +374,8 @@ async function onAuthenticated(session) {
   APP.pageState.reset();
   APP.csrf = session.csrf;
   APP.companies = session.companies || [];
+  APP.userName = session.name || '';
+  APP.welcomeMessage = chooseWelcomeMessage(new Date());  // a new one on every login or reload
   document.getElementById('sidebar-user').textContent = session.user || '';
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
@@ -919,15 +921,30 @@ function kpiCard(title, value, valueCls, deltasHtml, subtitle) {
 // (ESTOQUE_FILTERS below uses the same predicates as backend/api.py dashboard() alerts).
 const ALERT_FILTERS = {estoque: 'ruptura', preco: 'abaixo-custo', custo: 'sem-custo'};
 
+// Backend messages read "N produto(s) …: NOME A, NOME B…". The count is what a partner
+// scans; the names are only a sample, so they sit on one muted, truncated line.
+function splitAlertMessage(message) {
+  const text = String(message || '');
+  const at = text.indexOf(': ');
+  if (at < 0) return {head: text, detail: ''};
+  return {head: text.slice(0, at), detail: 'Ex.: ' + text.slice(at + 2).replace(/\.$/, '')};
+}
+
 function alertsBlock(alerts) {
   if (!alerts || !alerts.length) return '';
-  return `<div class="alert-list">${alerts.map((a) => {
-    const f = ALERT_FILTERS[a.type];
-    const link = f ? `<a class="alert-action" href="${routeHash('estoque', APP.period, new URLSearchParams({filtro: f}))}">Ver produtos →</a>` : '';
-    return `<div class="alert-card severity-${esc(a.severity)}"><span>${icon('triangle-alert')} ${esc(a.message)}</span>
-      ${link}
-      <button type="button" class="btn-secondary" data-create-action="${esc(a.type)}" data-action-title="${esc(a.message)}">Criar ação</button></div>`;
-  }).join('')}</div>`;
+  return `<section class="attention" aria-labelledby="attention-title">
+    <h2 id="attention-title" class="attention-title">${icon('triangle-alert')} Pontos de atenção <span class="attention-count">${alerts.length}</span></h2>
+    <ul class="attention-list">${alerts.map((a) => {
+      const f = ALERT_FILTERS[a.type];
+      const {head, detail} = splitAlertMessage(a.message);
+      const link = f ? `<a class="alert-action" href="${routeHash('estoque', APP.period, new URLSearchParams({filtro: f}))}">Ver produtos →</a>` : '';
+      return `<li class="attention-item severity-${esc(a.severity)}">
+        <div class="attention-text"><strong>${esc(head)}</strong>${detail ? `<span class="attention-detail" title="${esc(detail)}">${esc(detail)}</span>` : ''}</div>
+        <div class="attention-actions">${link}
+          <button type="button" class="btn-secondary" data-create-action="${esc(a.type)}" data-action-title="${esc(a.message)}">Criar ação</button></div>
+      </li>`;
+    }).join('')}</ul>
+  </section>`;
 }
 
 async function onCreateActionFromAlert(event) {
@@ -1006,9 +1023,103 @@ async function loadResumoManagementCard(period) {
   box.hidden = false;
 }
 
+/* ---------------------------------------------------------------- Boas-vindas */
+
+const WELCOME_MESSAGES = [
+  'Cada venda de hoje é um vizinho escolhendo o seu mercado.',
+  'Pequenos ajustes de preço e estoque somam grandes resultados no fim do mês.',
+  'Os números mostram o caminho; as decisões de hoje fazem o resultado de amanhã.',
+  'Quem acompanha de perto corrige cedo. Bom ter você por aqui.',
+  'Produto na prateleira é cliente que volta amanhã.',
+  'Constância vence pressa: melhore um ponto por semana.',
+  'Margem saudável é o que mantém as portas do bairro abertas.',
+  'Conhecer o cliente do bairro é a vantagem que nenhum atacarejo copia.',
+];
+
+// Extra lines that only make sense on some days, mixed into the rotation.
+function contextualWelcomeMessages(date) {
+  const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  const extra = [];
+  if (date.getDate() <= 3) extra.push('Mês novo, meta nova: um bom começo facilita o fechamento.');
+  if (lastDay - date.getDate() <= 4) extra.push('Reta final do mês: é hora de conferir estoque e preços dos campeões de venda.');
+  if (date.getDay() === 1) extra.push('Semana começando: vale olhar os pontos de atenção antes do movimento apertar.');
+  if (date.getDay() === 5 || date.getDay() === 6) extra.push('Fim de semana é pico de movimento: garanta os itens da curva A na prateleira.');
+  return extra;
+}
+
+function welcomeGreeting(hour) {
+  if (hour >= 5 && hour < 12) return 'Bom dia';
+  if (hour >= 12 && hour < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
+
+function firstName(name) {
+  return String(name || '').trim().split(/\s+/)[0] || '';
+}
+
+// Never repeats the previous login's message when there is another to choose.
+function pickWelcomeIndex(last, count, random) {
+  if (count < 2) return 0;
+  if (last == null || last < 0 || last >= count) return Math.floor(random() * count);
+  const i = Math.floor(random() * (count - 1));
+  return i >= last ? i + 1 : i;
+}
+
+const WELCOME_STORAGE_KEY = 'mdb.welcome.last';
+function chooseWelcomeMessage(date) {
+  const pool = WELCOME_MESSAGES.concat(contextualWelcomeMessages(date));
+  let last = null;
+  try {
+    const stored = localStorage.getItem(WELCOME_STORAGE_KEY);
+    last = stored == null ? null : parseInt(stored, 10);
+  } catch (e) { /* private window: any message will do */ }
+  const index = pickWelcomeIndex(Number.isNaN(last) ? null : last, pool.length, Math.random);
+  try { localStorage.setItem(WELCOME_STORAGE_KEY, String(index)); } catch (e) { /* not persisted, still shown */ }
+  return pool[index];
+}
+
+function welcomeBlock(data) {
+  const now = new Date();
+  const name = firstName(APP.userName);
+  const [y, m] = data.period.split('-');
+  const label = `${MONTHS[parseInt(m, 10) - 1]}/${y}`;
+  const partial = data.partial_month ? ` · parcial até ${esc(String(data.as_of).slice(8, 10))}/${esc(String(data.as_of).slice(5, 7))}` : '';
+  const r = data.reconciliation;
+  const recon = r.exact_match
+    ? `<span class="meta-pill ok" title="Reconciliado exatamente com a Análise Mobne: ${esc(money(r.receipt_revenue))} conferido.">${icon('circle-check')} Conferido com o Mobne</span>`
+    : `<span class="meta-pill warn">${icon('triangle-alert')} Diferença de ${money(r.difference)}</span>`;
+  const today = new Intl.DateTimeFormat('pt-BR', {weekday: 'long', day: 'numeric', month: 'long'}).format(now);
+  return `<section class="welcome" aria-labelledby="welcome-title">
+    <div class="welcome-text">
+      <p class="welcome-eyebrow">Resumo executivo · ${esc(today)}</p>
+      <h1 id="welcome-title" class="welcome-title">${esc(welcomeGreeting(now.getHours()))}${name ? ', ' + esc(name) : ''}</h1>
+      <p class="welcome-message">${esc(APP.welcomeMessage || WELCOME_MESSAGES[0])}</p>
+    </div>
+    <div class="welcome-meta">
+      <span class="meta-pill">${label}${partial}</span>
+      ${recon}
+      <span class="meta-pill muted">Atualizado ${dt(data.updated_at)}</span>
+    </div>
+  </section>
+  <p class="welcome-pulse">${icon('lightbulb')} ${esc(resumoNarrative(data))}</p>
+  ${r.exact_match ? '' : reconciliationBanner(r)}
+  ${dataQualityBanner(data.totals)}`;
+}
+
+function categoryBars(categories) {
+  const top = (categories || []).slice().sort((a, b) => b.revenue - a.revenue).slice(0, 8);
+  if (!top.length) return '<div class="chart-empty">Sem categorias neste período.</div>';
+  const max = top[0].revenue || 1;
+  return `<ol class="cat-list">${top.map((c) => `<li>
+      <div class="cat-row"><span class="cat-name">${esc(c.name)}</span><span class="cat-value">${money(c.revenue)}</span></div>
+      <progress class="cat-bar" max="${max}" value="${Math.max(0, c.revenue)}" aria-label="${esc(c.name)}: ${esc(money(c.revenue))}"></progress>
+      <div class="cat-meta">Margem ${pct(c.margin)}</div>
+    </li>`).join('')}</ol>`;
+}
+
 function renderResumo(data) {
   const t = data.totals, cmp = data.comparison, mom = data.comparison_mom;
-  const deltas = (change) => [deltaChip('M/M', mom && mom[change]), deltaChip('A/A', cmp && cmp[change])].join('');
+  const deltas = (change) => [deltaChip('Mês ant.', mom && mom[change]), deltaChip('Ano ant.', cmp && cmp[change])].join('');
   const cancelBase = t.receipts + t.cancelled;
   const cancelRate = cancelBase ? (t.cancelled / cancelBase) * 100 : null;
 
@@ -1019,44 +1130,45 @@ function renderResumo(data) {
   const topPoints = topProfit.slice().reverse()
     .map((p) => ({label: p.name, value: p.profit / 100, display: money(p.profit)}));
 
+  // Four answers a partner looks for first: how much came in, what was left, how
+  // big a purchase is and how many there were. Margin and cancellations ride along
+  // as each card's second line instead of competing as cards of their own.
   document.getElementById('content').innerHTML = `
-    ${headerBlock(data)}
-    ${alertsBlock(data.alerts)}
-    <div class="story-box">${icon('lightbulb')} ${esc(resumoNarrative(data))}</div>
+    ${welcomeBlock(data)}
 
     <div class="kpi-grid kpi-grid-4">
-      ${kpiCard('Faturamento', money(t.revenue), '', deltas('revenue_change'), `${num(t.receipts)} documentos · ${num(t.cancelled)} cancelados`)}
-      ${kpiCard('Margem bruta', pct(t.margin), t.margin == null ? 'kpi-unavailable' : '', '',
-        t.unknown > 0 ? num(t.unknown) + ' itens sem custo — margem indisponível' : `Lucro bruto: ${money(t.profit)}`)}
-      ${kpiCard('Ticket médio', money(t.ticket), '', deltas('ticket_change'), '')}
-      ${kpiCard('Nº de cupons', num(t.receipts), '', deltas('receipts_change'), '')}
+      ${kpiCard('Faturamento', money(t.revenue), '', deltas('revenue_change'), `${num(t.receipts)} cupons no período`)}
       ${kpiCard('Lucro bruto', money(t.profit), t.profit == null ? 'kpi-unavailable' : (t.profit >= 0 ? 'kpi-positive' : 'kpi-negative'),
-        deltas('profit_change'), t.unknown > 0 ? num(t.unknown) + ' itens sem custo — não estimados' : 'Todos os itens com custo')}
-      ${kpiCard('Taxa de cancelamento', pct(cancelRate), '', '', `${num(t.cancelled)} de ${num(cancelBase)} documentos`)}
+        deltas('profit_change'), t.margin == null ? `${num(t.unknown)} itens sem custo — margem indisponível` : `Margem bruta de ${pct(t.margin)}`)}
+      ${kpiCard('Ticket médio', money(t.ticket), '', deltas('ticket_change'), 'Valor médio por cupom')}
+      ${kpiCard('Cupons', num(t.receipts), '', deltas('receipts_change'),
+        cancelRate == null ? '' : `${pct(cancelRate)} cancelados (${num(t.cancelled)})`)}
     </div>
+
+    ${alertsBlock(data.alerts)}
     <section class="management-summary" id="resumo-management" aria-labelledby="resumo-management-title" hidden></section>
 
     <div class="row">
       <div class="col-60">
-        <div class="section-header">Receita diária</div>
+        <h2 class="section-header">Receita diária</h2>
         <div class="chart-container chart-box" id="echart-daily"></div>
       </div>
       <div class="col-40">
-        <div class="section-header">Categorias</div>
-        <div class="data-table-container table-scroll-sm">
-          <table class="data-table"><thead><tr><th>Categoria</th><th>Receita</th><th>Margem</th></tr></thead>
-          <tbody>${(data.categories || []).map((c) => `<tr><td>${esc(c.name)}</td><td>${money(c.revenue)}</td><td>${pct(c.margin)}</td></tr>`).join('')}</tbody></table>
+        <h2 class="section-header">Categorias que mais vendem</h2>
+        <div class="cat-card">
+          ${categoryBars(data.categories)}
+          <button type="button" class="btn-link" data-nav="mapa">Ver todas no Mapa de produtos →</button>
         </div>
       </div>
     </div>
 
-    <div class="section-header">Top 10 produtos por lucro</div>
+    <h2 class="section-header">Top 10 produtos por lucro</h2>
     <div class="chart-container chart-h-330" id="echart-top10"></div>
     ${topProfit.length ? `<div class="story-box">${icon('lightbulb')} Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
       ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.
       <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de produtos →</button></div>` : ''}
 
-    <div class="section-header">Histórico mensal</div>
+    <h2 class="section-header">Histórico mensal</h2>
     <div class="chart-container chart-box" id="echart-timeline"></div>
   `;
   loadResumoManagementCard(data.period);

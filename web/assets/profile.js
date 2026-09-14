@@ -128,6 +128,7 @@ async function submitProfile(ev) {
     profileEl('profile-email').value = result.email;
     profileEl('profile-email-password').value = '';
     syncEmailPasswordField();
+    APP.userName = result.name;  // the Resumo greeting uses the name just saved
     const sidebarUser = profileEl('sidebar-user');
     if (sidebarUser) sidebarUser.textContent = result.email;
     success.textContent = result.csrf

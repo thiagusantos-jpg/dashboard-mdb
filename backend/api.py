@@ -172,7 +172,11 @@ def reset_password(body: PasswordReset,request:Request):
 @app.get('/api/session')
 def session(request:Request,auth=Depends(security.authenticate)):
     raw=request.cookies.get(security.COOKIE,'')
-    return {'csrf':security.csrf(raw),'companies':permissions.companies_for(auth),'user':auth.email}
+    # The name greets the partner on the Resumo; the e-mail stays the account identifier.
+    with db.connection() as conn:
+        row=conn.execute('SELECT name FROM users WHERE id=?',(auth.user_id,)).fetchone()
+    return {'csrf':security.csrf(raw),'companies':permissions.companies_for(auth),'user':auth.email,
+        'name':(row['name'] if row else '') or ''}
 
 @app.post('/api/logout')
 def logout(response:Response,auth=Depends(security.authenticate)):
