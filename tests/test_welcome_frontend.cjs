@@ -178,3 +178,18 @@ test('the Resumo lists the top 10 with margin and loads action counts on its ale
   assert.match(app, /data-action-count/);
   assert.match(app, /loadAlertActions\(\);/);
 });
+
+test('typed Brazilian numbers keep dots as thousands and commas as decimals', () => {
+  const app = loadApp(memoryStorage());
+  assert.equal(app.parseDecimalBR('80.000,00'), 80000);
+  assert.equal(app.parseDecimalBR('80.000'), 80000);
+  assert.equal(app.parseDecimalBR('80000'), 80000);
+  assert.equal(app.parseDecimalBR('R$ 1.234.567,89'), 1234567.89);
+  assert.equal(app.parseDecimalBR('12,5'), 12.5);
+  assert.equal(app.parseDecimalBR('12,5%'), 12.5);
+  assert.equal(app.parseDecimalBR('80.5'), 80.5);
+  assert.ok(Number.isNaN(app.parseDecimalBR('')));
+  assert.ok(Number.isNaN(app.parseDecimalBR('oitenta mil')));
+  assert.ok(Number.isNaN(app.parseDecimalBR('1,2,3')));
+  assert.equal(app.formatDecimalBR(80000, 2), '80.000,00');
+});

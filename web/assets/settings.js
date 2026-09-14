@@ -569,10 +569,52 @@ async function onRevokeStoneConnection(event) {
   }
 }
 
+// Today in the store's own calendar: toISOString() is UTC, which after 21h in Brazil is
+// already tomorrow and would start a new goal one day late.
+function localIsoDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+const GOAL_LABELS = {revenue: 'Faturamento mensal', margin: 'Margem real após custo fixo'};
+const goalValueText = (key, value) => (key === 'revenue' ? money(value) : `${formatDecimalBR(value, 1)}%`);
+const isoToBrDate = (iso) => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : '');
+
+// What the typed text will be saved as, shown while typing — a misread value is
+// visible before it reaches the Resumo, not after.
+const GOAL_FIELDS = {
+  revenue: {input: 'goal-revenue', help: 'goal-revenue-help', hint: 'Use ponto para milhar e vírgula para centavos, ex.: 80.000,00.',
+    check: (v) => v > 0, preview: (v) => `Será salvo como ${money(Math.round(v * 100))}.`,
+    invalid: 'Valor não reconhecido. Digite, por exemplo, 80.000,00.'},
+  margin: {input: 'goal-margin', help: 'goal-margin-help', hint: 'Em porcentagem, ex.: 12,5.',
+    check: (v) => v > 0 && v <= 100, preview: (v) => `Será salvo como ${formatDecimalBR(v, 1)}%.`,
+    invalid: 'Informe uma porcentagem entre 0 e 100, ex.: 12,5.'},
+};
+
+function updateGoalPreview(key) {
+  const f = GOAL_FIELDS[key];
+  const input = document.getElementById(f.input);
+  const help = document.getElementById(f.help);
+  if (!input || !help) return true;
+  const text = input.value.trim();
+  if (!text) {
+    input.removeAttribute('aria-invalid');
+    help.textContent = f.hint;
+    return true;
+  }
+  const value = parseDecimalBR(text);
+  const ok = !Number.isNaN(value) && f.check(value);
+  if (ok) input.removeAttribute('aria-invalid'); else input.setAttribute('aria-invalid', 'true');
+  help.textContent = ok ? f.preview(value) : f.invalid;
+  return ok;
+}
+
 async function renderGoalsSettings(token) {
   token = token || beginPage();
-  const progress = await api(`/api/companies/${APP.company}/goals/progress`);
+  const base = `/api/companies/${APP.company}`;
+  const [progress, goals] = await Promise.all([api(`${base}/goals/progress`), api(`${base}/goals`)]);
   if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
+  const entries = ['revenue', 'margin'].flatMap((key) => ((goals && goals[key]) || []).map((g) => Object.assign({kind: key}, g)));
+  const reached = progress && progress.target_cents > 0 && progress.achieved_cents >= progress.target_cents;
   document.getElementById('content').innerHTML = settingsShell('metas', `
     <div class="settings-heading">
       <div><h2>Metas de faturamento e margem</h2><p>Usadas no Resumo executivo e em Projeções de vendas.</p></div>
@@ -581,16 +623,31 @@ async function renderGoalsSettings(token) {
       <div class="kpi-grid kpi-grid-3">
         ${kpi('Meta do mês', money(progress.target_cents))}
         ${kpi('Realizado', money(progress.achieved_cents))}
-        ${kpi('Necessário/dia útil restante', progress.required_per_day == null ? '—' : money(progress.required_per_day))}
+        ${kpi('Necessário/dia útil restante', reached ? 'Meta batida' : progress.required_per_day == null ? '—' : money(progress.required_per_day))}
       </div>` : '<div class="story-box">Nenhuma meta de faturamento configurada para o período atual.</div>'}
-    <form id="goals-form" class="settings-form">
+    <h3 class="goals-subtitle">Metas cadastradas</h3>
+    ${entries.length ? `<div class="data-table-container"><table class="data-table goals-table">
+      <thead><tr><th>Meta</th><th class="num">Valor</th><th>Válida a partir de</th><th><span class="visually-hidden">Ações</span></th></tr></thead>
+      <tbody>${entries.map((g) => `<tr>
+        <td>${esc(GOAL_LABELS[g.kind])}</td>
+        <td class="num">${goalValueText(g.kind, g.value)}</td>
+        <td>${isoToBrDate(g.effective_from)}</td>
+        <td><div class="row-actions">
+          <button type="button" class="btn-secondary" data-goal-edit="${g.kind}" data-goal-value="${esc(String(g.value))}" data-goal-from="${esc(g.effective_from)}">Editar</button>
+          <button type="button" class="btn-secondary" data-goal-delete="${g.kind}" data-goal-from="${esc(g.effective_from)}">Remover</button>
+        </div></td></tr>`).join('')}</tbody>
+    </table></div>` : '<p class="field-help">Nenhuma meta cadastrada ainda.</p>'}
+    <form id="goals-form" class="settings-form" novalidate>
       <div class="form-grid">
         <div><label class="field-label" for="goal-revenue">Meta de faturamento mensal (R$)</label>
-          <input id="goal-revenue" class="login-input" type="number" min="0" step="0.01"></div>
+          <input id="goal-revenue" class="login-input" type="text" inputmode="decimal" autocomplete="off" placeholder="Ex.: 80.000,00" aria-describedby="goal-revenue-help">
+          <p id="goal-revenue-help" class="field-help goal-help" aria-live="polite">${GOAL_FIELDS.revenue.hint}</p></div>
         <div><label class="field-label" for="goal-margin">Meta de margem real após custo fixo (%)</label>
-          <input id="goal-margin" class="login-input" type="number" min="0" max="100" step="0.1"></div>
+          <input id="goal-margin" class="login-input" type="text" inputmode="decimal" autocomplete="off" placeholder="Ex.: 12,5" aria-describedby="goal-margin-help">
+          <p id="goal-margin-help" class="field-help goal-help" aria-live="polite">${GOAL_FIELDS.margin.hint}</p></div>
         <div><label class="field-label" for="goal-effective-from">Válida a partir de</label>
-          <input id="goal-effective-from" class="login-input" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+          <input id="goal-effective-from" class="login-input" type="date" value="${localIsoDate(new Date())}">
+          <p class="field-help goal-help">Salvar com a mesma data de uma meta cadastrada substitui essa meta.</p></div>
       </div>
       <div class="settings-actions">
         <button class="btn-primary" type="submit">Salvar metas</button>
@@ -598,6 +655,41 @@ async function renderGoalsSettings(token) {
       </div>
     </form>`);
   watchForm(document.getElementById('goals-form')).addEventListener('submit', onSaveGoals);
+  Object.keys(GOAL_FIELDS).forEach((key) => {
+    document.getElementById(GOAL_FIELDS[key].input).addEventListener('input', () => updateGoalPreview(key));
+  });
+  document.querySelectorAll('[data-goal-edit]').forEach((btn) => btn.addEventListener('click', onEditGoal));
+  document.querySelectorAll('[data-goal-delete]').forEach((btn) => btn.addEventListener('click', onDeleteGoal));
+}
+
+function onEditGoal(event) {
+  const btn = event.currentTarget;
+  const key = btn.dataset.goalEdit;
+  const value = Number(btn.dataset.goalValue);
+  const input = document.getElementById(GOAL_FIELDS[key].input);
+  input.value = key === 'revenue' ? formatDecimalBR(value / 100, 2) : formatDecimalBR(value, 1);
+  document.getElementById('goal-effective-from').value = btn.dataset.goalFrom;
+  updateGoalPreview(key);
+  document.getElementById('goals-status').textContent =
+    `Editando ${GOAL_LABELS[key].toLowerCase()} de ${isoToBrDate(btn.dataset.goalFrom)}: altere o valor e salve.`;
+  input.focus();
+  input.select();
+}
+
+async function onDeleteGoal(event) {
+  const btn = event.currentTarget;
+  const key = btn.dataset.goalDelete;
+  const from = btn.dataset.goalFrom;
+  const status = document.getElementById('goals-status');
+  if (!confirm(`Remover a meta de ${GOAL_LABELS[key].toLowerCase()} válida a partir de ${isoToBrDate(from)}?`)) return;
+  btn.disabled = true;
+  try {
+    await api(`/api/companies/${APP.company}/goals/${encodeURIComponent(key)}/${encodeURIComponent(from)}`, {method: 'DELETE'});
+    renderGoalsSettings();
+  } catch (e) {
+    btn.disabled = false;
+    if (status) status.textContent = 'Não foi possível remover a meta: ' + e.message;
+  }
 }
 
 async function onSaveGoals(event) {
@@ -605,19 +697,34 @@ async function onSaveGoals(event) {
   const status = document.getElementById('goals-status');
   status.textContent = 'Salvando…';
   const effectiveFrom = document.getElementById('goal-effective-from').value;
-  const revenue = document.getElementById('goal-revenue').value;
-  const margin = document.getElementById('goal-margin').value;
+  const revenueText = document.getElementById('goal-revenue').value.trim();
+  const marginText = document.getElementById('goal-margin').value.trim();
+  // Checked before any request: a value that can't be read is never saved as something else.
+  const revenueOk = updateGoalPreview('revenue'), marginOk = updateGoalPreview('margin');
+  if (!revenueOk || !marginOk) {
+    status.textContent = 'Corrija o valor destacado antes de salvar.';
+    document.getElementById(!revenueOk ? 'goal-revenue' : 'goal-margin').focus();
+    return;
+  }
+  if (!revenueText && !marginText) {
+    status.textContent = 'Informe a meta de faturamento, a de margem ou as duas.';
+    return;
+  }
+  if (!effectiveFrom) {
+    status.textContent = 'Informe a data a partir da qual a meta vale.';
+    return;
+  }
   try {
-    if (revenue) {
+    if (revenueText) {
       await api(`/api/companies/${APP.company}/goals`, {
         method: 'PUT',
-        body: JSON.stringify({key: 'revenue', value: Math.round(parseFloat(revenue.replace(',', '.')) * 100), effective_from: effectiveFrom}),
+        body: JSON.stringify({key: 'revenue', value: Math.round(parseDecimalBR(revenueText) * 100), effective_from: effectiveFrom}),
       });
     }
-    if (margin) {
+    if (marginText) {
       await api(`/api/companies/${APP.company}/goals`, {
         method: 'PUT',
-        body: JSON.stringify({key: 'margin', value: parseFloat(margin.replace(',', '.')), effective_from: effectiveFrom}),
+        body: JSON.stringify({key: 'margin', value: parseDecimalBR(marginText), effective_from: effectiveFrom}),
       });
     }
     clearDirty();

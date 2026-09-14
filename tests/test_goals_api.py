@@ -57,3 +57,26 @@ def test_simulate_price_via_api(client):
 
     unchanged = client.get("/api/companies/1/finance/cash-accounts")  # sanity: server still healthy
     assert unchanged.status_code == 200
+
+
+def test_a_wrong_goal_can_be_listed_corrected_and_removed(client):
+    # The R$ 80,00 saved by mistake, then the intended R$ 80.000,00 on the same date.
+    client.put("/api/companies/1/goals", json={"key": "revenue", "value": 8_000, "effective_from": "2026-09-14"})
+    fixed = client.put("/api/companies/1/goals", json={"key": "revenue", "value": 8_000_000, "effective_from": "2026-09-14"})
+    assert fixed.status_code == 200, fixed.text
+
+    listed = client.get("/api/companies/1/goals")
+    assert listed.status_code == 200
+    assert [(g["value"], g["effective_from"]) for g in listed.json()["revenue"]] == [(8_000_000, "2026-09-14")]
+    assert listed.json()["margin"] == []
+
+    removed = client.delete("/api/companies/1/goals/revenue/2026-09-14")
+    assert removed.status_code == 200, removed.text
+    assert client.get("/api/companies/1/goals").json()["revenue"] == []
+    assert client.get("/api/companies/1/goals/progress", params={"as_of": "2026-09-20"}).json() is None
+
+
+def test_removing_a_goal_that_does_not_exist_is_reported(client):
+    assert client.delete("/api/companies/1/goals/revenue/2026-09-14").status_code == 404
+    assert client.delete("/api/companies/1/goals/lucro/2026-09-14").status_code == 404
+    assert client.delete("/api/companies/1/goals/revenue/14-09-2026").status_code == 422

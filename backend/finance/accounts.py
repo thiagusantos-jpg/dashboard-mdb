@@ -315,6 +315,41 @@ def set_parameter(
     return dict(row)
 
 
+def list_parameters(company: int, key: str) -> list:
+    """General-scope entries of one parameter (no store/category/product), newest first."""
+    with db.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT key,value_json,effective_from,effective_to,version,updated_at FROM management_parameters
+            WHERE company=? AND key=? AND store=0 AND category=0 AND product=0
+            ORDER BY effective_from DESC
+            """,
+            (company, key),
+        ).fetchall()
+    return [
+        {
+            "key": row["key"],
+            "value": json.loads(row["value_json"]),
+            "effective_from": row["effective_from"],
+            "effective_to": row["effective_to"],
+            "version": row["version"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def delete_parameter(company: int, key: str, effective_from: str) -> bool:
+    """Removes one general-scope entry. False when there was nothing to remove."""
+    where = "company=? AND key=? AND effective_from=? AND store=0 AND category=0 AND product=0"
+    params = (company, key, effective_from)
+    with db.connection() as conn:
+        if not conn.execute(f"SELECT 1 FROM management_parameters WHERE {where}", params).fetchone():
+            return False
+        conn.execute(f"DELETE FROM management_parameters WHERE {where}", params)
+    return True
+
+
 def resolve_parameters(
     company: int,
     keys,

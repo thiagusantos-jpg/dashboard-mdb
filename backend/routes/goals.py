@@ -59,6 +59,36 @@ def put_goal(company: int, body: GoalSet):
     return accounts.set_parameter(company, "goal:margin", body.value, body.effective_from)
 
 
+GOAL_KEYS = {"revenue": "goal:revenue", "margin": "goal:margin"}
+
+
+@router.get(
+    "/goals",
+    dependencies=[Depends(permissions.require_permission("dashboard.read"))],
+)
+def list_goals(company: int):
+    """Every saved goal, so a wrong one can be found, corrected (same date) or removed."""
+    _require_company(company)
+    return {name: accounts.list_parameters(company, key) for name, key in GOAL_KEYS.items()}
+
+
+@router.delete(
+    "/goals/{key}/{effective_from}",
+    dependencies=[Depends(permissions.require_permission("settings.manage"))],
+)
+def delete_goal(company: int, key: str, effective_from: str):
+    _require_company(company)
+    if key not in GOAL_KEYS:
+        raise HTTPException(404, "Meta não encontrada.")
+    try:
+        date.fromisoformat(effective_from)
+    except ValueError:
+        raise HTTPException(422, "Data inválida: use AAAA-MM-DD.")
+    if not accounts.delete_parameter(company, GOAL_KEYS[key], effective_from):
+        raise HTTPException(404, "Meta não encontrada.")
+    return {"deleted": True}
+
+
 @router.get(
     "/goals/compare",
     dependencies=[Depends(permissions.require_permission("dashboard.read"))],

@@ -1172,6 +1172,23 @@ function welcomeBlock(data) {
   ${dataQualityBanner(data.totals)}`;
 }
 
+/* ---------------------------------------------------------------- Números digitados */
+
+// A number as a person in Brazil types it: "80.000,00", "80.000", "80000", "12,5", "R$ 1.234".
+// A dot followed by groups of exactly three digits is a thousands separator, never a
+// decimal point — reading "80.000" as 80 is how an R$ 80.000 goal was saved as R$ 80.
+function parseDecimalBR(text) {
+  let s = String(text == null ? '' : text).replace(/R\$|\s|%/g, '');
+  if (!s) return NaN;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : NaN;
+}
+
+function formatDecimalBR(value, digits) {
+  return Number(value).toLocaleString('pt-BR', {minimumFractionDigits: digits, maximumFractionDigits: digits});
+}
+
 /* ---------------------------------------------------------------- Meta do mês */
 
 function moneyShort(cents) {
