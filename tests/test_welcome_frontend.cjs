@@ -86,3 +86,60 @@ test('alert messages split into a scannable count and a muted sample of names', 
   assert.equal(detail, 'Ex.: COCA 2L, SUCO 900ML…');
   assert.deepEqual({...app.splitAlertMessage('Estoque ainda não sincronizado.')}, {head: 'Estoque ainda não sincronizado.', detail: ''});
 });
+
+const september = {period: '2026-09', end: '2026-09-13', as_of: '2026-09-13', partial_month: true};
+
+test('comparison chips name the same elapsed days of a month in progress', () => {
+  const app = loadApp(memoryStorage());
+  assert.equal(app.compareRef(september, {period: '2026-08'}), '1–13/ago');
+  assert.equal(app.compareRef(september, {period: '2025-09'}), '1–13/set/25');
+  assert.equal(app.compareRef({period: '2026-08', end: '2026-08-31', partial_month: false}, {period: '2026-07'}), 'jul');
+  assert.equal(app.compareRef(september, null), '');
+});
+
+test('delta chips carry an arrow and a spoken direction, not only a color', () => {
+  const app = loadApp(memoryStorage());
+  const down = app.deltaChip('vs 1–13/ago', -20.37);
+  assert.match(down, /delta-negative/);
+  assert.match(down, /aria-hidden="true">▼</);
+  assert.match(down, /visually-hidden">Queda de</);
+  assert.match(down, /vs 1–13\/ago/);
+  const up = app.deltaChip('vs 1–13/set/25', 9.43);
+  assert.match(up, /delta-positive/);
+  assert.match(up, />▲</);
+  assert.match(app.deltaChip('vs ago', 0.01), />=</);
+});
+
+test('the daily average skips the day still in progress and flags days under half of it', () => {
+  const app = loadApp(memoryStorage());
+  const daily = [['2026-09-11', 319000], ['2026-09-12', 160000], ['2026-09-06', 11000], ['2026-09-13', 15300]]
+    .map(([date, revenue]) => ({date, revenue}));
+  const stats = app.dailyStats(daily, september);
+  assert.equal(Math.round(stats.avg), Math.round((319000 + 160000 + 11000) / 3));
+  assert.deepEqual(stats.days.map((d) => d.weekday), ['sex', 'sáb', 'dom', 'dom']);
+  assert.deepEqual(stats.days.filter((d) => d.weak).map((d) => d.date), ['2026-09-06']);
+  assert.equal(stats.days[3].inProgress, true);
+  assert.match(app.dailyInsight(stats), /06\/09 \(dom\)/);
+  assert.match(app.dailyInsight(stats), /em andamento/);
+});
+
+test('goal figures show progress, where the calendar says it should be, and the pace projection', () => {
+  const app = loadApp(memoryStorage());
+  const f = app.goalFigures({target_cents: 8000000, achieved_cents: 2467349, remaining_days: 17, required_per_day: 325453}, september);
+  assert.equal(Math.round(f.pctDone), 31);
+  assert.equal(Math.round(f.expectedPct), 43);
+  assert.equal(f.onTrack, false);
+  assert.equal(Math.round(f.projection / 100), 56939);
+  assert.equal(app.moneyShort(2467349), 'R$ 24,7 mil');
+  assert.equal(app.goalFigures({target_cents: 100, achieved_cents: 150}, september).reached, true);
+});
+
+test('the Resumo loads the goal, mounts the weekday chart and has its own loading shape', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'web/assets/app.js'), 'utf8');
+  const charts = fs.readFileSync(path.join(__dirname, '..', 'web/assets/echarts-charts.js'), 'utf8');
+  assert.match(app, /loadResumoGoal\(data\)/);
+  assert.match(app, /\/goals\/progress/);
+  assert.match(app, /mountEchartDaily\(document\.getElementById\('echart-daily'\), daily\)/);
+  assert.match(app, /skeleton-welcome/);
+  assert.match(charts, /function mountEchartDaily\(/);
+});

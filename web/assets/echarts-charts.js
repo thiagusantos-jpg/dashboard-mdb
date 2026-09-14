@@ -59,6 +59,7 @@ function brandTokens() {
     blue: v('--blue', '#2E86C1'), muted: v('--text-muted', '#6B6B6B'),
     // Only defined by the dark theme (style.css); the fallbacks are the light values.
     grid: v('--chart-grid', '#f0f0f0'), axis: v('--chart-axis', '#ddd'), surface: v('--chart-surface', '#fff'),
+    weak: v('--chart-weak', '#E9A89F'),
   };
 }
 
@@ -123,6 +124,44 @@ function mountEchartLine(el, points) {
     }],
   });
   echartsTooltip(chart, (p) => `${fullDateLabel(points[p.dataIndex].label)}\n${points[p.dataIndex].display}`);
+}
+
+/* Resumo's daily revenue: one bar per day with the weekday under the date (the
+ * weekly rhythm is what explains a weak day), a dashed month average, days under
+ * half of it in a muted red and today's still-open day faded. `stats` comes from
+ * app.js dailyStats(); revenue is in cents. */
+function mountEchartDaily(el, stats) {
+  if (!el) return;
+  if (!stats || !stats.days.length) { el.innerHTML = '<div class="chart-empty">Sem dados no período.</div>'; return; }
+  const t = brandTokens();
+  const chart = echarts.init(el, null, {renderer: 'canvas'});
+  ECHARTS_INSTANCES.push(chart);
+  const avg = stats.avg == null ? null : stats.avg / 100;
+  chart.setOption({
+    animationDuration: CHART_ANIM_MS,
+    grid: {left: 8, right: 16, top: 26, bottom: 4, containLabel: true},
+    tooltip: {show: false},
+    xAxis: Object.assign({type: 'category', data: stats.days.map((d) => d.date)},
+      baseAxis(t, (v, i) => `${v.slice(8, 10)}\n${stats.days[i].weekday}`), {axisLabel: {
+        color: t.muted, fontSize: 11, lineHeight: 14, interval: 0,
+        formatter: (v, i) => `${v.slice(8, 10)}\n${stats.days[i].weekday}`}}),
+    yAxis: {type: 'value', splitLine: {lineStyle: {color: t.grid}}, axisLine: {show: false},
+      axisLabel: {color: t.muted, fontSize: 11, formatter: (v) => 'R$' + compactNum(v)}},
+    series: [{
+      type: 'bar', barMaxWidth: 28,
+      data: stats.days.map((d) => ({value: d.revenue / 100, itemStyle: {
+        color: d.weak ? t.weak : t.yellow, opacity: d.inProgress ? 0.45 : 1, borderRadius: [3, 3, 0, 0]}})),
+      markLine: avg == null ? undefined : {silent: true, symbol: 'none', data: [{yAxis: avg}],
+        lineStyle: {color: t.dark, width: 1.5, type: [5, 4]},
+        label: {show: true, position: 'insideEndTop', formatter: 'Média R$' + compactNum(avg), color: t.dark, fontSize: 11, fontWeight: 600}},
+    }],
+  });
+  echartsTooltip(chart, (p) => {
+    const d = stats.days[p.dataIndex];
+    return `${fullDateLabel(d.date)} (${d.weekday})\n${money(d.revenue)}${d.inProgress ? '\nDia em andamento' : ''}`;
+  });
+  srDataTable(el, 'Receita diária', ['Dia', 'Receita'],
+    stats.days.map((d) => [`${fullDateLabel(d.date)} (${d.weekday})`, money(d.revenue)]));
 }
 
 function mountEchartBar(el, points) {

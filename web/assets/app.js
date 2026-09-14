@@ -751,8 +751,16 @@ async function renderPage() {
   const cached = APP.dashboard && APP.dashboard.period === period && APP.dashboardCompany === company &&
     (!info || info.version === APP.dashboard.version);
   if (!cached) {
-    document.getElementById('content').innerHTML = `
-      <div class="skeleton-page">
+    // The Resumo's placeholder has the Resumo's shape (welcome card, four KPIs,
+    // attention list, charts row), so nothing jumps when the real page lands.
+    document.getElementById('content').innerHTML = page === 'resumo' ? `
+      <div class="skeleton-page" aria-busy="true" aria-label="Carregando o resumo">
+        <div class="skeleton-block skeleton-welcome"></div>
+        <div class="kpi-grid kpi-grid-4">${'<div class="skeleton-card"></div>'.repeat(4)}</div>
+        <div class="skeleton-block skeleton-attention"></div>
+        <div class="skeleton-row"><div class="skeleton-block"></div><div class="skeleton-block"></div></div>
+      </div>` : `
+      <div class="skeleton-page" aria-busy="true">
         <div class="skeleton-line skeleton-title"></div>
         <div class="skeleton-line skeleton-sub"></div>
         <div class="kpi-grid kpi-grid-4">${'<div class="skeleton-card"></div>'.repeat(4)}</div>
@@ -900,12 +908,30 @@ function dataQualityBanner(t) {
 /* ---------------------------------------------------------------- Resumo Executivo helpers */
 
 // value is a % change (e.g. mom.revenue_change); positiveIsGood=false flips the color (cancel rate, etc.)
+// The arrow repeats the color's meaning for anyone who can't tell red from green;
+// the hidden word gives screen readers the direction the arrow shows.
 function deltaChip(label, value, positiveIsGood) {
   if (positiveIsGood == null) positiveIsGood = true;
-  if (value == null) return `<span class="delta-chip">${label}: —</span>`;
+  if (value == null) return `<span class="delta-chip">${esc(label)}: —</span>`;
+  const flat = Math.abs(value) < 0.05;
   const good = positiveIsGood ? value >= 0 : value <= 0;
-  const cls = Math.abs(value) < 0.05 ? '' : (good ? 'delta-positive' : 'delta-negative');
-  return `<span class="delta-chip ${cls}">${label}: ${value > 0 ? '+' : ''}${pct(value)}</span>`;
+  const cls = flat ? '' : (good ? 'delta-positive' : 'delta-negative');
+  const arrow = flat ? '=' : (value > 0 ? '▲' : '▼');
+  const word = flat ? 'Estável' : (value > 0 ? 'Alta de' : 'Queda de');
+  return `<span class="delta-chip ${cls}" title="${word} ${pct(Math.abs(value))} ${esc(label)}">` +
+    `<span class="delta-arrow" aria-hidden="true">${arrow}</span><span class="visually-hidden">${word}</span> ` +
+    `${pct(Math.abs(value))} <span class="delta-ref">${esc(label)}</span></span>`;
+}
+
+// What a comparison chip is measured against. A month in progress is compared on the
+// same elapsed days (backend/api.py comparison_for), so the label says "1–13/ago".
+function compareRef(data, cmp) {
+  if (!cmp || !cmp.period) return '';
+  const [y, m] = cmp.period.split('-');
+  const month = MONTHS[parseInt(m, 10) - 1].toLowerCase();
+  const label = y === data.period.slice(0, 4) ? month : `${month}/${y.slice(2)}`;
+  const day = parseInt(String(data.end || '').slice(8, 10), 10);
+  return data.partial_month && day ? `1–${day}/${label}` : label;
 }
 
 function kpiCard(title, value, valueCls, deltasHtml, subtitle) {
@@ -977,9 +1003,14 @@ async function onCreateActionFromAlert(event) {
 function resumoNarrative(data) {
   const t = data.totals, cmp = data.comparison, mom = data.comparison_mom;
   const [y, m] = data.period.split('-');
-  const bits = [`${MONTHS[parseInt(m, 10) - 1]}/${y} faturou ${money(t.revenue)}`];
-  if (mom && mom.revenue_change != null) bits.push(`${mom.revenue_change >= 0 ? '+' : ''}${pct(mom.revenue_change)} sobre o mês anterior`);
-  if (cmp && cmp.revenue_change != null) bits.push(`${cmp.revenue_change >= 0 ? '+' : ''}${pct(cmp.revenue_change)} sobre ${esc(cmp.period.slice(0, 4))}`);
+  const day = parseInt(String(data.end || '').slice(8, 10), 10);
+  const partial = data.partial_month && day;
+  const sign = (v) => `${v >= 0 ? '+' : ''}${pct(v)}`;
+  const bits = [partial
+    ? `De 1 a ${day}/${m}, ${MONTHS[parseInt(m, 10) - 1]}/${y} faturou ${money(t.revenue)}`
+    : `${MONTHS[parseInt(m, 10) - 1]}/${y} faturou ${money(t.revenue)}`];
+  if (mom && mom.revenue_change != null) bits.push(`${sign(mom.revenue_change)} sobre ${partial ? 'os mesmos dias do mês anterior' : 'o mês anterior'}`);
+  if (cmp && cmp.revenue_change != null) bits.push(`${sign(cmp.revenue_change)} sobre ${partial ? 'o mesmo período de ' : ''}${esc(cmp.period.slice(0, 4))}`);
   let text = bits.join(', ') + '.';
   if (t.margin == null) {
     return text + ' Margem indisponível: há itens vendidos sem custo conhecido no período.';
@@ -1100,10 +1131,105 @@ function welcomeBlock(data) {
       ${recon}
       <span class="meta-pill muted">Atualizado ${dt(data.updated_at)}</span>
     </div>
+    <div id="resumo-goal" class="welcome-goal" hidden></div>
   </section>
   <p class="welcome-pulse">${icon('lightbulb')} ${esc(resumoNarrative(data))}</p>
   ${r.exact_match ? '' : reconciliationBanner(r)}
   ${dataQualityBanner(data.totals)}`;
+}
+
+/* ---------------------------------------------------------------- Meta do mês */
+
+function moneyShort(cents) {
+  const reais = (cents || 0) / 100;
+  if (Math.abs(reais) < 1000) return money(cents);
+  return `R$ ${(reais / 1000).toFixed(1).replace('.', ',')} mil`;
+}
+
+// Where the month stands against its goal: share achieved, where it "should" be by
+// calendar day, and the month-end total if the current daily pace holds.
+function goalFigures(progress, data) {
+  const [y, m] = data.period.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const day = Math.min(daysInMonth, parseInt(String(data.end || '').slice(8, 10), 10) || daysInMonth);
+  const target = progress.target_cents, achieved = progress.achieved_cents;
+  const pctDone = target ? achieved / target * 100 : 0;
+  const expectedPct = day / daysInMonth * 100;
+  return {pctDone, expectedPct, onTrack: pctDone >= expectedPct, reached: target > 0 && achieved >= target,
+    projection: Math.round(achieved / day * daysInMonth)};
+}
+
+function goalHtml(progress, data) {
+  const f = goalFigures(progress, data);
+  const [y, m] = data.period.split('-').map(Number);
+  const month = new Intl.DateTimeFormat('pt-BR', {month: 'long'}).format(new Date(y, m - 1, 1));  // "setembro", not "set"
+  const pace = f.reached
+    ? '<span><b>Meta batida</b> — tudo o que vier agora é resultado extra.</span>'
+    : `<span>${progress.remaining_days ? `Faltam <b>${progress.remaining_days} dias de funcionamento</b>` : '<b>Último dia do mês</b>'}${
+      progress.required_per_day != null ? ` · precisa de <b>${money(progress.required_per_day)}/dia</b>` : ''}</span>`;
+  return `
+    <div class="goal-top">
+      <span class="goal-label">Meta de ${esc(month)}</span>
+      <span class="goal-amount"><strong>${moneyShort(progress.achieved_cents)}</strong> de ${moneyShort(progress.target_cents)}</span>
+      <span class="goal-pct ${f.onTrack ? 'on-track' : ''}">${Math.round(f.pctDone)}%</span>
+    </div>
+    <div class="goal-track" role="img" aria-label="${Math.round(f.pctDone)}% da meta atingida; pelo calendário, o esperado hoje seria ${Math.round(f.expectedPct)}%">
+      <div class="goal-fill"></div><div class="goal-pace"></div>
+    </div>
+    <div class="goal-meta">${pace}<span>No ritmo atual fecha em <b>${moneyShort(f.projection)}</b></span></div>`;
+}
+
+/* The goal endpoint measures the month in progress up to today, so it only joins the
+ * Resumo of the current month. No goal yet: a quiet link to set one. Unreadable
+ * (profile without access, network): the card simply stays without it. */
+async function loadResumoGoal(data) {
+  const box = document.getElementById('resumo-goal');
+  if (!box || !data.partial_month || data.period !== String(data.as_of || '').slice(0, 7)) return;
+  let progress;
+  try {
+    progress = await api(`/api/companies/${APP.company}/goals/progress`);
+  } catch (e) {
+    return;
+  }
+  if (!box.isConnected) return;  // Resumo replaced while the request was in flight
+  if (!progress) {
+    box.innerHTML = '<p class="goal-empty">Nenhuma meta de faturamento para este mês. <a href="#/configuracoes/metas">Definir meta →</a></p>';
+    box.hidden = false;
+    return;
+  }
+  const f = goalFigures(progress, data);
+  box.innerHTML = goalHtml(progress, data);
+  // Widths through the CSSOM: the CSP (style-src 'self') blocks style="" attributes.
+  box.querySelector('.goal-fill').style.width = Math.min(100, f.pctDone).toFixed(1) + '%';
+  box.querySelector('.goal-pace').style.left = f.expectedPct.toFixed(1) + '%';
+  box.hidden = false;
+}
+
+/* ---------------------------------------------------------------- Receita diária */
+
+const WEEKDAYS = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+function weekdayOf(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  return WEEKDAYS[new Date(y, m - 1, d).getDay()];
+}
+
+// Average over complete days only: today's partial sales would drag it down and
+// flag today as a weak day before the store has even closed.
+function dailyStats(daily, data) {
+  const days = (daily || []).map((d) => ({date: d.date, revenue: d.revenue, weekday: weekdayOf(d.date),
+    inProgress: !!(data.partial_month && d.date === data.as_of)}));
+  const complete = days.filter((d) => !d.inProgress);
+  const avg = complete.length ? complete.reduce((s, d) => s + d.revenue, 0) / complete.length : null;
+  days.forEach((d) => { d.weak = avg != null && !d.inProgress && d.revenue < avg / 2; });
+  return {days, avg};
+}
+
+function dailyInsight(stats) {
+  if (stats.avg == null) return '';
+  const weak = stats.days.filter((d) => d.weak).map((d) => `${d.date.slice(8, 10)}/${d.date.slice(5, 7)} (${d.weekday})`);
+  const text = `Média de <b>${money(Math.round(stats.avg))}</b> por dia · ${weak.length
+    ? `abaixo da metade da média: <b>${esc(weak.join(', '))}</b>` : 'nenhum dia abaixo da metade da média'}.`;
+  return stats.days.some((d) => d.inProgress) ? text + ' Hoje ainda está em andamento e não entra na média.' : text;
 }
 
 function categoryBars(categories) {
@@ -1119,11 +1245,12 @@ function categoryBars(categories) {
 
 function renderResumo(data) {
   const t = data.totals, cmp = data.comparison, mom = data.comparison_mom;
-  const deltas = (change) => [deltaChip('Mês ant.', mom && mom[change]), deltaChip('Ano ant.', cmp && cmp[change])].join('');
+  const momRef = 'vs ' + (compareRef(data, mom) || 'mês ant.'), yoyRef = 'vs ' + (compareRef(data, cmp) || 'ano ant.');
+  const deltas = (change) => [deltaChip(momRef, mom && mom[change]), deltaChip(yoyRef, cmp && cmp[change])].join('');
+  const daily = dailyStats(data.daily, data);
   const cancelBase = t.receipts + t.cancelled;
   const cancelRate = cancelBase ? (t.cancelled / cancelBase) * 100 : null;
 
-  const dailyPoints = (data.daily || []).map((d) => ({label: d.date, value: d.revenue / 100, display: money(d.revenue)}));
   const timelinePoints = (data.timeline || []).map((tl) => ({label: tl.period, value: tl.revenue / 100, display: money(tl.revenue)}));
   const topProfit = (data.products || []).filter((p) => p.profit != null).slice().sort((a, b) => b.profit - a.profit).slice(0, 10);
   const topProfitSum = topProfit.reduce((s, p) => s + p.profit, 0);
@@ -1152,6 +1279,7 @@ function renderResumo(data) {
       <div class="col-60">
         <h2 class="section-header">Receita diária</h2>
         <div class="chart-container chart-box" id="echart-daily"></div>
+        <p class="daily-insight">${dailyInsight(daily)}</p>
       </div>
       <div class="col-40">
         <h2 class="section-header">Categorias que mais vendem</h2>
@@ -1172,9 +1300,10 @@ function renderResumo(data) {
     <div class="chart-container chart-box" id="echart-timeline"></div>
   `;
   loadResumoManagementCard(data.period);
+  loadResumoGoal(data);
   // Mounted after innerHTML so the container elements exist; each sizes itself off its
   // own CSS height (.chart-h-*) rather than a fixed viewBox like the old SVG charts.
-  mountEchartLine(document.getElementById('echart-daily'), dailyPoints);
+  mountEchartDaily(document.getElementById('echart-daily'), daily);
   mountEchartBar(document.getElementById('echart-timeline'), timelinePoints);
   mountEchartBarH(document.getElementById('echart-top10'), topPoints);
 }

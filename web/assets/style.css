@@ -1157,3 +1157,37 @@ h2.section-header { line-height: 1.3; }
 :root[data-theme="dark"] .sync-bar { background: #2A2A2A; }
 :root[data-theme="dark"] .sync-bar span { background: #7DB9E8; }
 :root[data-theme="dark"] .sync-spinner { border-color: #2A2A2A; border-top-color: #7DB9E8; }
+
+/* ============================================================
+   RESUMO — meta do mês, comparações com seta, receita diária e esqueleto
+   ============================================================ */
+.welcome-goal { flex: 1 1 100%; display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--divider); }
+.goal-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; font-size: 14px; color: var(--text-muted); }
+.goal-label { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-muted); }
+.goal-amount strong { font-family: var(--font-display); font-size: 20px; color: var(--dark); font-variant-numeric: tabular-nums; }
+.goal-pct { margin-left: auto; font-family: var(--font-display); font-size: 20px; font-weight: 700; color: var(--warn-text); font-variant-numeric: tabular-nums; }
+.goal-pct.on-track { color: var(--positive); }
+.goal-track { position: relative; height: 12px; margin-top: 14px; border-radius: 6px; background: var(--surface-muted); }
+.goal-fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 6px; background: var(--yellow); }
+.goal-pace { position: absolute; top: -5px; bottom: -5px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--dark); }
+.goal-pace::after { content: 'hoje'; position: absolute; bottom: calc(100% + 2px); left: 50%; transform: translateX(-50%); font-size: 10px; font-weight: 700; color: var(--text-muted); }
+.goal-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; font-size: 13px; color: var(--text-muted); }
+.goal-meta b { color: var(--dark); font-variant-numeric: tabular-nums; }
+.goal-empty { font-size: 13px; color: var(--text-muted); }
+.goal-empty a { color: var(--link); font-weight: 600; }
+
+.delta-chip { display: inline-flex; align-items: center; gap: 3px; }
+.delta-arrow { font-size: 9px; line-height: 1; }
+.delta-ref { font-weight: 500; opacity: 0.85; }
+
+.daily-insight { margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
+.daily-insight b { color: var(--dark); }
+
+.skeleton-page { width: 100%; }
+.skeleton-block.skeleton-welcome { height: 150px; margin: 0 0 12px; border-radius: 12px; }
+.skeleton-block.skeleton-attention { height: 112px; margin: 4px 0 0; border-radius: 12px; }
+.skeleton-row { display: grid; grid-template-columns: 3fr 2fr; gap: 20px; margin-top: 20px; }
+.skeleton-row .skeleton-block { height: 300px; margin-top: 0; }
+@media (max-width: 900px) { .skeleton-row { grid-template-columns: 1fr; } }
+
+:root[data-theme="dark"] { --chart-weak: #B35A50; }
