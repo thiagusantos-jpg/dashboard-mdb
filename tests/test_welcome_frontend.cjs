@@ -143,3 +143,38 @@ test('the Resumo loads the goal, mounts the weekday chart and has its own loadin
   assert.match(app, /skeleton-welcome/);
   assert.match(charts, /function mountEchartDaily\(/);
 });
+
+test('top products read their margin against the store margin and name the thin-margin best seller', () => {
+  const app = loadApp(memoryStorage());
+  assert.equal(app.marginBand(58, 52.12), 'good');
+  assert.equal(app.marginBand(41, 52.12), 'mid');
+  assert.equal(app.marginBand(22, 52.12), 'low');
+  assert.equal(app.marginBand(null, 52.12), 'mid');
+  assert.equal(app.marginBand(30, null), 'mid');
+  const top = [{name: 'BANANA PRATA', profit: 24695, margin: 58}, {name: 'CERVEJA ITAIPAVA', profit: 19352, margin: 22},
+    {name: 'OVOS CAIPIRA', profit: 19123, margin: 41}];
+  assert.match(app.topProfitInsight(top, 52.12), /CERVEJA ITAIPAVA é o 2º em lucro/);
+  assert.equal(app.topProfitInsight(top.slice(0, 1), 52.12), '');
+});
+
+test('an alert counts only the actions still open for its type, whatever the alert text says now', () => {
+  const app = loadApp(memoryStorage());
+  const list = [
+    {alert_key: 'estoque', alert_version: '170 produto(s)…', status: 'open'},
+    {alert_key: 'estoque', alert_version: '168 produto(s)…', status: 'in_progress'},
+    {alert_key: 'estoque', alert_version: '150 produto(s)…', status: 'resolved'},
+    {alert_key: 'preco', alert_version: '44 produto(s)…', status: 'dismissed'},
+  ];
+  assert.equal(app.alertActionCount(list, 'estoque'), 2);
+  assert.equal(app.alertActionCount(list, 'preco'), 0);
+  assert.equal(app.alertActionCount(null, 'estoque'), 0);
+});
+
+test('the Resumo lists the top 10 with margin and loads action counts on its alerts', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'web/assets/app.js'), 'utf8');
+  assert.match(app, /topProfitHtml\(topProfit, t\.margin, data\.period\)/);
+  assert.doesNotMatch(app, /mountEchartBarH\(document\.getElementById\('echart-top10'\)/);
+  assert.match(app, /data-alert-key=/);
+  assert.match(app, /data-action-count/);
+  assert.match(app, /loadAlertActions\(\);/);
+});

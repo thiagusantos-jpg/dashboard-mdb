@@ -964,13 +964,46 @@ function alertsBlock(alerts) {
       const f = ALERT_FILTERS[a.type];
       const {head, detail} = splitAlertMessage(a.message);
       const link = f ? `<a class="alert-action" href="${routeHash('estoque', APP.period, new URLSearchParams({filtro: f}))}">Ver produtos →</a>` : '';
-      return `<li class="attention-item severity-${esc(a.severity)}">
+      return `<li class="attention-item severity-${esc(a.severity)}" data-alert-key="${esc(a.type)}">
         <div class="attention-text"><strong>${esc(head)}</strong>${detail ? `<span class="attention-detail" title="${esc(detail)}">${esc(detail)}</span>` : ''}</div>
         <div class="attention-actions">${link}
+          <span class="action-count" data-action-count hidden></span>
           <button type="button" class="btn-secondary" data-create-action="${esc(a.type)}" data-action-title="${esc(a.message)}">Criar ação</button></div>
       </li>`;
     }).join('')}</ul>
   </section>`;
+}
+
+// Matched on the alert type only: the alert text (its "version") changes whenever the
+// product count moves — 170 becomes 168 — and that must not hide the action already open.
+function alertActionCount(list, alertKey) {
+  return (list || []).filter((a) => a.alert_key === alertKey && (a.status === 'open' || a.status === 'in_progress')).length;
+}
+
+/* Each Resumo alert shows how many actions are already open for it, so a partner
+ * follows the existing one instead of creating a duplicate. Unreadable list:
+ * the alerts stay exactly as they were, with only "Criar ação". */
+async function loadAlertActions() {
+  const items = document.querySelectorAll('.attention-item[data-alert-key]');
+  if (!items.length) return;
+  let list;
+  try {
+    list = await api(`/api/companies/${APP.company}/actions`);
+  } catch (e) {
+    return;
+  }
+  items.forEach((item) => {
+    if (!item.isConnected) return;  // Resumo replaced while the request was in flight
+    const count = alertActionCount(list, item.dataset.alertKey);
+    const slot = item.querySelector('[data-action-count]');
+    const btn = item.querySelector('[data-create-action]');
+    if (!slot) return;
+    slot.innerHTML = count
+      ? `<a class="action-state has" href="${routeHash('acoes', APP.period)}">${count} ${count === 1 ? 'ação aberta' : 'ações abertas'} →</a>`
+      : '<span class="action-state none">Nenhuma ação</span>';
+    slot.hidden = false;
+    if (btn && !btn.disabled) btn.textContent = count ? 'Criar outra ação' : 'Criar ação';
+  });
 }
 
 async function onCreateActionFromAlert(event) {
@@ -985,6 +1018,7 @@ async function onCreateActionFromAlert(event) {
       body: JSON.stringify({alert_key: alertKey, alert_version: title, title}),
     });
     btn.textContent = 'Ação criada ✓';
+    loadAlertActions();  // the new action now counts on its alert
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Criar ação';
@@ -1232,6 +1266,41 @@ function dailyInsight(stats) {
   return stats.days.some((d) => d.inProgress) ? text + ' Hoje ainda está em andamento e não entra na média.' : text;
 }
 
+/* ---------------------------------------------------------------- Top 10 por lucro */
+
+// A product's margin read against the store's own margin for the same period:
+// at or above it is good; under 60% of it earns little per unit however much it sells.
+function marginBand(margin, storeMargin) {
+  if (margin == null || storeMargin == null) return 'mid';
+  if (margin >= storeMargin) return 'good';
+  return margin < storeMargin * 0.6 ? 'low' : 'mid';
+}
+
+const MARGIN_BAND_WORDS = {good: 'acima da margem da loja', mid: 'abaixo da margem da loja', low: 'bem abaixo da margem da loja'};
+
+function topProfitHtml(top, storeMargin, period) {
+  if (!top.length) return '<div class="chart-empty">Sem produtos com custo conhecido neste período.</div>';
+  const max = top[0].profit || 1;
+  return `<div class="top-head" aria-hidden="true"><span>Produto</span><span>Lucro</span><span>Margem</span></div>
+    <ol class="top-list">${top.map((p) => {
+      const band = marginBand(p.margin, storeMargin);
+      return `<li>
+        <a class="top-name" href="#/produto/${esc(period)}?id=${esc(p.id)}" title="${esc(p.name)}">${esc(p.name)}</a>
+        <span class="top-profit">${money(p.profit)}</span>
+        <span class="top-margin ${band}">${pct(p.margin)}${storeMargin == null ? '' : `<span class="visually-hidden">, ${MARGIN_BAND_WORDS[band]}</span>`}</span>
+        <progress class="cat-bar top-bar" max="${max}" value="${Math.max(0, p.profit)}" aria-hidden="true"></progress>
+      </li>`;
+    }).join('')}</ol>`;
+}
+
+// Names the best-selling-but-thin-margin case among the top five, if there is one.
+function topProfitInsight(top, storeMargin) {
+  const index = top.slice(0, 5).findIndex((p) => marginBand(p.margin, storeMargin) === 'low');
+  if (index < 0) return '';
+  const p = top[index];
+  return ` ${esc(p.name)} é o ${index + 1}º em lucro, mas com margem de ${pct(p.margin)} (loja: ${pct(storeMargin)}): vende muito e ganha pouco por unidade.`;
+}
+
 function categoryBars(categories) {
   const top = (categories || []).slice().sort((a, b) => b.revenue - a.revenue).slice(0, 8);
   if (!top.length) return '<div class="chart-empty">Sem categorias neste período.</div>';
@@ -1254,8 +1323,6 @@ function renderResumo(data) {
   const timelinePoints = (data.timeline || []).map((tl) => ({label: tl.period, value: tl.revenue / 100, display: money(tl.revenue)}));
   const topProfit = (data.products || []).filter((p) => p.profit != null).slice().sort((a, b) => b.profit - a.profit).slice(0, 10);
   const topProfitSum = topProfit.reduce((s, p) => s + p.profit, 0);
-  const topPoints = topProfit.slice().reverse()
-    .map((p) => ({label: p.name, value: p.profit / 100, display: money(p.profit)}));
 
   // Four answers a partner looks for first: how much came in, what was left, how
   // big a purchase is and how many there were. Margin and cancellations ride along
@@ -1291,9 +1358,9 @@ function renderResumo(data) {
     </div>
 
     <h2 class="section-header">Top 10 produtos por lucro</h2>
-    <div class="chart-container chart-h-330" id="echart-top10"></div>
+    <div class="top-card">${topProfitHtml(topProfit, t.margin, data.period)}</div>
     ${topProfit.length ? `<div class="story-box">${icon('lightbulb')} Os 10 produtos mais lucrativos representam ${t.profit ? pct(topProfitSum / t.profit * 100) : '—'} do lucro do mês.
-      ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.
+      ${esc(topProfit[0].name)} lidera com ${money(topProfit[0].profit)}.${topProfitInsight(topProfit, t.margin)}
       <button type="button" class="btn-link" data-nav="mapa">Ver curva ABC completa em Mapa de produtos →</button></div>` : ''}
 
     <h2 class="section-header">Histórico mensal</h2>
@@ -1301,11 +1368,11 @@ function renderResumo(data) {
   `;
   loadResumoManagementCard(data.period);
   loadResumoGoal(data);
+  loadAlertActions();
   // Mounted after innerHTML so the container elements exist; each sizes itself off its
   // own CSS height (.chart-h-*) rather than a fixed viewBox like the old SVG charts.
   mountEchartDaily(document.getElementById('echart-daily'), daily);
   mountEchartBar(document.getElementById('echart-timeline'), timelinePoints);
-  mountEchartBarH(document.getElementById('echart-top10'), topPoints);
 }
 
 /* ---------------------------------------------------------------- Produtos & Estoque */
