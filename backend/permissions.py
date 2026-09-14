@@ -70,15 +70,23 @@ def ensure_permission(
     return auth
 
 
+def _path_id(raw: Optional[str], label: str) -> Optional[int]:
+    # int('null') used to escape as a 500 before FastAPI's own path validation ran.
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise HTTPException(422, f"{label} inválida.") from None
+
+
 def require_permission(permission: str, company_param: str = "company"):
     def dependency(
         request: Request,
         auth: security.AuthContext = Depends(security.authenticate),
     ) -> security.AuthContext:
-        raw_company = request.path_params.get(company_param)
-        company = int(raw_company) if raw_company is not None else None
-        raw_store = request.path_params.get("store")
-        store = int(raw_store) if raw_store is not None else None
+        company = _path_id(request.path_params.get(company_param), "Empresa")
+        store = _path_id(request.path_params.get("store"), "Loja")
         return ensure_permission(auth, permission, company, store)
 
     return dependency

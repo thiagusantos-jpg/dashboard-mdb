@@ -419,6 +419,7 @@ document.addEventListener('visibilitychange', () => {
  * request that fails (backend restarting, network blip) leaves whatever is on
  * screen exactly as it is instead of blanking the page. */
 async function backgroundRefresh() {
+  if (APP.company == null) return;  // login screen or bootstrap form: nothing to refresh yet
   try {
     await refreshStatus();
   } catch (e) {
@@ -439,6 +440,9 @@ async function backgroundRefresh() {
 /* ---------------------------------------------------------------- status/period */
 
 async function refreshStatus() {
+  // Timers and visibilitychange can fire before login (or on the bootstrap form)
+  // picks a company; asking for /companies/null/status only produced server errors.
+  if (APP.company == null) return;
   APP.status = await api(`/api/companies/${APP.company}/status`);
   APP.periods = APP.status.periods || [];
   buildPeriodSelector();

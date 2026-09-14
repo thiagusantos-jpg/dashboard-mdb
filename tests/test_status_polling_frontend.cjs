@@ -105,3 +105,14 @@ test('a sync in progress still reports live, on its own faster timer', () => {
   assert.match(app, /APP\.pollTimer = setInterval\([\s\S]*?\}, 4000\)/,
                'the 4s sync-progress poll must stay as it is');
 });
+
+test('no status request is sent before a company is known', async () => {
+  const {context} = loadApp();
+  const requested = [];
+  context.fetch = (url) => { requested.push(url); return new Promise(() => {}); };
+  // Top-level const APP lives in the script scope, not on the vm global: bridge it.
+  vm.runInContext('globalThis.APP = APP', context);
+  context.APP.company = null;
+  await context.refreshStatus();
+  assert.deepEqual(requested, []);
+});

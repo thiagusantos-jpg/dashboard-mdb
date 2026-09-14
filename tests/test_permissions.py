@@ -65,3 +65,14 @@ def test_management_result_endpoint_never_leaks_sensitive_totals(tmp_path, monke
     assert body["operating_expenses_cents"] is None
     assert body["data_status"]["restricted"] is True
     assert all(str(line["account_id"]) != str(secret["id"]) for line in body["accounts"])
+
+
+def test_non_numeric_company_in_the_path_is_a_client_error_not_a_crash():
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from backend import permissions
+
+    dependency = permissions.require_permission('dashboard.read')
+    with pytest.raises(HTTPException) as raised:
+        dependency(request=SimpleNamespace(path_params={'company': 'null'}), auth=None)
+    assert raised.value.status_code == 422

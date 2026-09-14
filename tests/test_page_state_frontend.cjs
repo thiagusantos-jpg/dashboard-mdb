@@ -141,6 +141,7 @@ test('a dirty form survives a background refresh tick even when the period versi
     return {periods: [{period: '2026-08', version: 2}], jobs: []};
   };
   context.APP.page = 'resumo';
+  context.APP.company = 1;
   context.APP.period = '2026-08';
   context.APP.dashboard = {period: '2026-08', version: 1};  // stale vs. the status response above
   context.APP.pageState.markDirty(true);  // user is mid-edit on the current page
