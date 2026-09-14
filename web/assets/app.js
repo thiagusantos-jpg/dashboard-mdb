@@ -1177,22 +1177,53 @@ function sortEstoque(key) {
 
 /* ---------------------------------------------------------------- sync trigger */
 
+// On Vercel the POST runs the whole sync inside the request (maxDuration 300s,
+// vercel.json), so it must outlive API_TIMEOUT_MS; status polling shows progress meanwhile.
+const SYNC_REQUEST_TIMEOUT_MS = 320000;
+const SYNC_FOLLOW_DELAY_MS = 2000;
+
+async function followSyncProgress() {
+  try {
+    await refreshStatus();
+  } catch (e) {
+    return;
+  }
+  if (typeof refreshSyncPanel === 'function') refreshSyncPanel();
+}
+
 // The panel lives in Configurações → Integrações (settings.js syncPanelHtml).
 async function triggerSync(mode, button) {
   const status = document.getElementById('sync-action-status');
+  const say = (text, ok) => {
+    if (!status) return;
+    status.textContent = text;
+    status.className = ok ? 'form-success' : 'form-error';
+  };
   if (button) button.disabled = true;
-  if (status) status.textContent = '';
+  say('', true);
+  const request = api(`/api/companies/${APP.company}/sync`,
+    {method: 'POST', body: JSON.stringify({mode}), timeout: SYNC_REQUEST_TIMEOUT_MS});
+  // The job row exists within a second: follow it instead of waiting for the run to end.
+  const follow = setTimeout(() => {
+    say('Sincronização em andamento: acompanhe o progresso abaixo.', true);
+    followSyncProgress();
+  }, SYNC_FOLLOW_DELAY_MS);
   try {
-    const result = await api(`/api/companies/${APP.company}/sync`, {method: 'POST', body: JSON.stringify({mode})});
-    if (status) {
-      status.textContent = result && result.already_running
-        ? 'Já existe uma sincronização em andamento: acompanhe o progresso abaixo.'
-        : 'Sincronização iniciada.';
-    }
-    await refreshStatus();
-    if (typeof refreshSyncPanel === 'function') refreshSyncPanel();
+    const result = await request;
+    clearTimeout(follow);
+    say(result && result.already_running
+      ? 'Já existe uma sincronização em andamento: acompanhe o progresso abaixo.'
+      : 'Sincronização iniciada.', true);
+    await followSyncProgress();
   } catch (e) {
-    if (status) status.textContent = 'Não foi possível iniciar a sincronização: ' + e.message;
+    clearTimeout(follow);
+    if (e.timedOut) {
+      // Only the browser stopped waiting; the run and its job row carry on server-side.
+      say('A sincronização continua no servidor: acompanhe o progresso abaixo.', true);
+      await followSyncProgress();
+    } else {
+      say('Não foi possível iniciar a sincronização: ' + e.message, false);
+    }
     if (button) button.disabled = false;
   }
 }
