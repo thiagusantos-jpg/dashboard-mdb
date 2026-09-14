@@ -90,3 +90,21 @@ test('Mapa de produtos and Desempenho de vendas keep one explanation and plain w
   assert.ok(mapa.indexOf('O que fazer com cada grupo') < mapa.indexOf('chart-mapa-matrix'));
   assert.match(diag, /worst && d\.nome === worst\.nome \? COR\.red/);
 });
+
+test('the product map keeps zero-cost products apart and spreads stacked bubbles without crossing the giro cut', () => {
+  const match = insights.match(/function spreadTurnover\([\s\S]*?\n}/);
+  assert.ok(match, 'spreadTurnover not found');
+  const spreadTurnover = new Function('GIRO_CORTE', `${match[0]}; return spreadTurnover;`)(0.6);
+  const xs = [1, 2, 3, 4, 5].map((id) => spreadTurnover({id, turnover: 10 / 13}));
+  assert.ok(new Set(xs.map((x) => x.toFixed(4))).size > 1, 'products on the same giro get different offsets');
+  assert.equal(spreadTurnover({id: 7, turnover: 0.77}), spreadTurnover({id: 7, turnover: 0.77}), 'same place on every visit');
+  for (let id = 1; id < 200; id++) {
+    assert.ok(spreadTurnover({id, turnover: 0.6}) >= 0.6);
+    assert.ok(spreadTurnover({id, turnover: 0.54}) < 0.6);
+  }
+  const mapa = insights.slice(insights.indexOf('function renderMapa'), insights.indexOf('/* ================================================================ PÁGINA: DIAGNÓSTICO'));
+  assert.match(mapa, /p\.cost === 0 && p\.revenue > 0/);
+  assert.doesNotMatch(mapa, /zeroCostBanner\(data\)/);
+  assert.match(mapa, /class="nocost-box"/);
+  assert.match(mapa, /Math\.max\(p\.margin, ys\.min\)/);
+});

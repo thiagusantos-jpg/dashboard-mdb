@@ -1270,3 +1270,8 @@ h2.section-header { line-height: 1.3; }
 .class-title { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; font-size: 15px; font-weight: 700; color: var(--dark); }
 .class-count { padding: 1px 8px; border-radius: 10px; background: var(--surface-muted); color: var(--text-muted); font-size: 12px; }
 .class-todo { margin: 0 0 8px; font-size: 13px; color: var(--text-muted); }
+
+/* Mapa de produtos — produtos sem custo, fora dos grupos */
+.nocost-box { margin: 8px 0 16px; padding: 4px 14px; border: 1px solid var(--border); border-radius: 8px; }
+.nocost-box summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--warn-text); }
+.nocost-box[open] summary { margin-bottom: 8px; }

@@ -497,8 +497,25 @@ function renderPrecos(data) {
 
 /* ================================================================ PÁGINA: MAPA DE PRODUTOS */
 
+// Lowest margin drawn on the product map; anything below sits on the edge (tooltip keeps the real value).
+const MARGEM_PISO = -20;
+
+// Giro is days sold ÷ days in the period, so products pile up in a few vertical columns.
+// A small offset fixed per product (same place on every visit, never crossing the giro
+// cut) spreads each column so the bubbles can be told apart.
+function spreadTurnover(p) {
+  const seed = Math.abs(Math.sin(Number(p.id) * 12.9898) * 43758.5453) % 1;
+  const x = p.turnover + (seed - 0.5) * 0.05;
+  return p.turnover >= GIRO_CORTE ? Math.max(GIRO_CORTE, x) : Math.min(GIRO_CORTE - 0.001, x);
+}
+
 function renderMapa(data) {
-  const P = periodInfo(data), prods = data.products || [];
+  const P = periodInfo(data);
+  // A product sold with cost R$ 0 shows a 100% margin it doesn't have: it lands among the
+  // opportunities and bends every group, so it stays apart until its cost is registered.
+  const allProds = data.products || [];
+  const noCost = allProds.filter((p) => p.cost === 0 && p.revenue > 0);
+  const prods = allProds.filter((p) => !(p.cost === 0 && p.revenue > 0));
   const [est, ger, opo, pm] = CLASSES.map((c) => prods.filter((p) => p.classification === c.key));
   const lucro = (arr) => sumBy(arr, (p) => p.profit);
   const lt = lucro(prods);
@@ -512,12 +529,14 @@ function renderMapa(data) {
 
   const pp = prods.filter((p) => p.revenue > 2000 && p.margin != null);
   const rOf = bubbleRadius(pp.map((p) => p.revenue), 3, 17);
-  const margins = pp.map((p) => p.margin);
+  // One product at −80% used to stretch the whole axis and squeeze everyone else into the top.
+  const clipped = pp.filter((p) => p.margin < MARGEM_PISO).length;
+  const margins = pp.map((p) => Math.max(p.margin, MARGEM_PISO));
   const ys = niceScale(Math.min(0, ...margins), Math.max(MARGEM_CORTE + 10, ...margins), 6);
   const span = ys.max - ys.min;
   const groups = CLASSES.map((c) => ({name: c.label, color: c.key === 'Baixo giro' ? COR.lightGray : c.color}));
   const matrixOpts = {
-    points: pp.map((p) => ({x: p.turnover, y: p.margin, r: rOf(p.revenue), g: CLASSES.indexOf(classInfo(p.classification)),
+    points: pp.map((p) => ({x: spreadTurnover(p), y: Math.max(p.margin, ys.min), r: rOf(p.revenue), g: CLASSES.indexOf(classInfo(p.classification)),
       tip: `${p.name}\nGiro: ${Math.round(p.turnover * 100)}% dos dias (${p.days_sold} dias)\nMargem: ${pct1(p.margin)}\nReceita: ${money(p.revenue)}\nLucro: ${money(p.profit)}`})),
     groups,
     xScale: {min: -0.05, max: 1.05}, yScale: {min: ys.min, max: ys.max},
@@ -539,9 +558,10 @@ function renderMapa(data) {
   const byProfit = (arr) => arr.slice().sort((a, b) => (b.profit || 0) - (a.profit || 0));
   const byRevenue = (arr) => arr.slice().sort((a, b) => b.revenue - a.revenue);
   // One block per group: what to do first, then its ten most relevant products.
+  const GROUP_TITLES = {'Estrela': 'Estrelas', 'Gerador de caixa': 'Geradores de caixa', 'Oportunidade': 'Oportunidades', 'Baixo giro': 'Baixo giro'};
   const group = (cls, list, todo, order) => `
-    <section class="class-group" aria-label="${esc(cls.label)}">
-      <h3 class="class-title">${icon(cls.icon)} ${esc(cls.label)} <span class="class-count">${num(list.length)}</span></h3>
+    <section class="class-group" aria-label="${esc(GROUP_TITLES[cls.key] || cls.label)}">
+      <h3 class="class-title">${icon(cls.icon)} ${esc(GROUP_TITLES[cls.key] || cls.label)} <span class="class-count">${num(list.length)}</span></h3>
       <p class="class-todo">${todo}</p>
       ${table(heads, rowsOf(list.slice(0, 10)))}
       <p class="section-note">${list.length > 10 ? `Mostrando 10 de ${num(list.length)}, ` : ''}${order}.</p>
@@ -550,7 +570,6 @@ function renderMapa(data) {
 
   document.getElementById('content').innerHTML = `
     ${insightHeader('map', 'Mapa de produtos', 'Quais produtos proteger, ajustar, divulgar ou rever?', P)}
-    ${zeroCostBanner(data)}
     <div class="kpi-grid kpi-grid-4">
       ${kpi(`${icon('star')} Estrelas`, num(est.length), `Vendem sempre, com boa margem · ${brl(lucro(est))} de lucro`)}
       ${kpi(`${icon('dollar-sign')} Geradores de caixa`, num(ger.length), `Vendem sempre, com margem baixa · ${brl(lucro(ger))} de lucro`)}
@@ -558,6 +577,14 @@ function renderMapa(data) {
       ${kpi(`${icon('triangle-alert')} Baixo giro`, num(pm.length), `Vendem pouco e ganham pouco · ${brl(lucro(pm))} de lucro`)}
     </div>
     ${story(`Apenas ${num(n80)} de ${num(prods.length)} produtos geram 80% do lucro. Antes de qualquer outra decisão, não deixe faltar as ${num(est.length)} estrelas.`)}
+    ${noCost.length ? `<details class="nocost-box">
+      <summary>${icon('triangle-alert')} ${num(noCost.length)} produto${noCost.length === 1 ? '' : 's'} vendido${noCost.length === 1 ? '' : 's'} com custo zero no Mobne
+        (${brl(sumBy(noCost, (p) => p.revenue))} de faturamento) ficaram fora dos grupos — ver quais</summary>
+      ${table(['Produto', 'Faturamento', 'Dias com venda'], noCost.slice().sort((a, b) => b.revenue - a.revenue).slice(0, 20)
+        .map((p) => [`<a href="#/produto/${esc(data.period)}?id=${esc(p.id)}">${esc(p.name)}</a>`, money(p.revenue), num(p.days_sold)]))}
+      <p class="section-note">Sem o custo, a margem aparece como 100% e o produto cairia no grupo errado.
+        ${noCost.length > 20 ? `Mostrando os 20 que mais faturam. ` : ''}Cadastre o custo no Mobne para que entrem no mapa.</p>
+    </details>` : ''}
     ${explain('esta página',
       `Cada produto entra em um grupo pelo giro (em quantos dias do período vendeu) e pela margem. Os cortes são vender em ${GIRO_CORTE * 100}% dos dias ou mais e ter margem de ${MARGEM_CORTE}% ou mais.`,
       'Estrelas: proteger o estoque. Geradores de caixa: renegociar custo ou ajustar preço. Oportunidades: dar visibilidade na loja. Baixo giro: avaliar se vale manter.',
@@ -578,7 +605,7 @@ function renderMapa(data) {
     ${section(`Giro × margem (${P.label})`)}
     <div class="chart-container chart-h-520" id="chart-mapa-matrix"></div>
     <p class="section-note">Cada bolha é um produto; quanto maior, mais faturamento. Mais à direita, vende em mais dias; mais no alto, margem maior.
-      Clique na legenda para filtrar os grupos.</p>
+      Clique na legenda para filtrar os grupos.${clipped ? ` ${num(clipped)} produto${clipped === 1 ? '' : 's'} com margem abaixo de ${MARGEM_PISO}% aparece${clipped === 1 ? '' : 'm'} na borda de baixo; passe o mouse para ver a margem real.` : ''}</p>
   `;
   mountEchartScatter(document.getElementById('chart-mapa-matrix'), matrixOpts);
 }
