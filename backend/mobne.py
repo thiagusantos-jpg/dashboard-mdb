@@ -32,13 +32,23 @@ class MobneClient:
 
     def request(self, resource, params):
         for attempt in range(4):
+            response = None
             try:
-                response = self.http.get(PATHS[resource], params=params)
+                # Status first, body second: Mobne (Kestrel) answers a rejected key with a
+                # 401 whose chunked body breaks mid-read, which used to surface as a retried
+                # "Falha de comunicação" instead of the credential problem it is.
+                response = self.http.send(self.http.build_request('GET', PATHS[resource], params=params), stream=True)
+                if response.status_code in (401, 403):
+                    raise MobneError('Credencial Mobne recusada (HTTP %d): verifique MOBNE_API_KEY no servidor.' % response.status_code)
+                response.read()
             except httpx.TransportError:
                 if attempt == 3:
                     raise MobneError('Falha de comunicação com o Mobne. A base anterior foi preservada.') from None
                 self.sleep(2 ** attempt)
                 continue
+            finally:
+                if response is not None:
+                    response.close()
             if response.status_code in (429, 500, 502, 503, 504):
                 if attempt == 3:
                     raise MobneError(f'Mobne temporariamente indisponível (HTTP {response.status_code}).')
@@ -48,8 +58,6 @@ class MobneClient:
                     delay = 2 ** attempt
                 self.sleep(min(60, max(1, delay)))
                 continue
-            if response.status_code in (401, 403):
-                raise MobneError('Credencial inválida ou sem permissão para esta consulta Mobne.')
             if response.status_code != 200:
                 raise MobneError(f'Consulta {resource} recusada pelo Mobne (HTTP {response.status_code}).')
             try:

@@ -59,6 +59,30 @@ def test_request_raises_immediately_on_401_without_leaking_body():
         client.close()
 
 
+def test_rejected_key_with_a_broken_body_is_reported_as_a_credential_error():
+    """Mobne (Kestrel) sends its 401 with a chunked body that breaks mid-read; that
+    must say the key was refused, not retry and blame the network."""
+    class BrokenBody(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.RemoteProtocolError('peer closed connection without sending complete message body')
+            yield b''
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(401, stream=BrokenBody())
+    client = MobneClient(key='test-key', transport=httpx.MockTransport(handler), sleeper=lambda s: None)
+    try:
+        with pytest.raises(MobneError) as excinfo:
+            client.request('companies', {})
+        assert 'Credencial Mobne recusada' in str(excinfo.value)
+        assert 'test-key' not in str(excinfo.value)
+        assert len(calls) == 1  # no retries for a refused key
+    finally:
+        client.close()
+
+
 def test_request_retries_after_429_then_succeeds():
     ok = page([], 0, 0, 1)
     client = client_with([429, ok])
