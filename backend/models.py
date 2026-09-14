@@ -198,7 +198,8 @@ def summarize(receipts, products=None, analysis=None):
     for p in ranked:
         before=acc/revenue if revenue else 0
         p['abc']='A' if before<.8 else 'B' if before<.95 else 'C'
-        acc+=p['revenue']; p['quantity']=float(p['quantity']); p['days_sold']=len(p.pop('days'))
+        acc+=p['revenue']; p['quantity']=float(p['quantity']); days=p.pop('days')
+        p['days_sold']=len(days); p['last_sold']=max(days) if days else None
         p['turnover']=p['days_sold']/len(daily) if daily else 0
         financial(p)
         p['classification']='Estrela' if p['turnover']>=.6 and (p['margin'] or 0)>=35 else 'Gerador de caixa' if p['turnover']>=.6 else 'Oportunidade' if (p['margin'] or 0)>=35 else 'Baixo giro'

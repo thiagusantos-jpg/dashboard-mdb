@@ -3,7 +3,7 @@ import hmac
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
@@ -272,6 +272,52 @@ def config(company:int,body:Config):
         conn.execute('INSERT INTO config VALUES(?,?) ON CONFLICT(company) DO UPDATE SET fixed_cost_cents=excluded.fixed_cost_cents',(company,body.fixed_cost_cents))
     return {'ok':True}
 
+PRODUCT_MAP_DAYS=30
+
+def _receipts_between(company,start,end,conn):
+    """Receipts dated start..end (ISO days) and their analysis rows, across the sales months they span."""
+    receipts,analysis=[],[]
+    for key in sync.month_range(start[:7],end[:7]):
+        ds=db.dataset(company,'sales',key,conn)
+        if not ds or not ds['payload'].get('raw_count'):
+            continue
+        receipts+=[r for r in ds['payload']['receipts'] if start<=r['date']<=end]
+        analysis+=ds['payload'].get('analysis') or []
+    return receipts,analysis
+
+def product_map_payload(company,end,catalog,conn):
+    """Product groups over the last 30 days up to `end`, not the calendar month: early in a
+    month the 60% giro cut meant 8 sales days out of 13, so groups swung week to week. The
+    30 days before that window give each product's previous group ("what changed")."""
+    end_day=date.fromisoformat(end)
+    start=(end_day-timedelta(days=PRODUCT_MAP_DAYS-1)).isoformat()
+    prev_end=(end_day-timedelta(days=PRODUCT_MAP_DAYS)).isoformat()
+    prev_start=(end_day-timedelta(days=2*PRODUCT_MAP_DAYS-1)).isoformat()
+    receipts,analysis=_receipts_between(company,start,end,conn)
+    current=models.summarize(receipts,catalog,analysis)
+    prev_receipts,prev_analysis=_receipts_between(company,prev_start,prev_end,conn)
+    previous={p['id']:p for p in models.summarize(prev_receipts,catalog,prev_analysis)['products']} if prev_receipts else {}
+    # A product sold at cost R$ 0 has a fake 100% margin; its group means nothing on either side.
+    reliable=lambda p:not (p['cost']==0 and p['revenue']>0)
+    def change(p,before,to):
+        return {'id':before['id'],'name':(p or before)['name'],'category':(p or before)['category'],
+            'from':before['classification'],'to':to,'revenue':p['revenue'] if p else 0,'previous_revenue':before['revenue']}
+    lost_star,became_low=[],[]
+    now={p['id']:p for p in current['products']}
+    for pid,before in previous.items():
+        p=now.get(pid)
+        if not reliable(before) or (p and not reliable(p)):
+            continue
+        if before['classification']=='Estrela' and (not p or p['classification']!='Estrela'):
+            lost_star.append(change(p,before,p['classification'] if p else 'Sem vendas'))
+        if p and p['classification']=='Baixo giro' and before['classification']!='Baixo giro':
+            became_low.append(change(p,before,'Baixo giro'))
+    order=lambda rows:sorted(rows,key=lambda r:(-r['previous_revenue'],r['id']))
+    return {'start':start,'end':end,'days':PRODUCT_MAP_DAYS,'sales_days':len(current['daily']),
+        'products':current['products'],
+        'previous':{'start':prev_start,'end':prev_end,'available':bool(prev_receipts)},
+        'changes':{'lost_star':order(lost_star),'became_low':order(became_low)}}
+
 @app.get('/api/companies/{company}/dashboard',dependencies=[Depends(permissions.require_permission('dashboard.read'))])
 def dashboard(company:int,period:str):
     authorized_company(company); validate_period(period)
@@ -325,6 +371,7 @@ def dashboard(company:int,period:str):
         # products that appear in a receipt, hiding unsold stock from every decision
         # this list feeds (low-stock alerts, replenishment, the Estoque page).
         inventory=inventory_catalog(company,period,conn)
+        product_map=product_map_payload(company,sales['payload']['end'],catalog,conn)
     today=datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat()
     margin=data['totals']['margin']
     # None when the period has any unknown-cost item, same as simulated_net below — a break-even
@@ -351,7 +398,7 @@ def dashboard(company:int,period:str):
     return {**data,'period':period,'start':sales['payload']['start'],'end':sales['payload']['end'],
         'updated_at':sales['updated_at'],'version':sales['version'],'comparison':comparison,'comparison_mom':comparison_mom,
         'reconciliation':sales['payload']['reconciliation'],'raw_count':sales['payload']['raw_count'],
-        'inventory':inventory,'stock_updated_at':stock['updated_at'] if stock else None,
+        'inventory':inventory,'product_map':product_map,'stock_updated_at':stock['updated_at'] if stock else None,
         'prices_updated_at':prices['updated_at'] if prices else None,'timeline':timeline,
         'fixed_cost_cents':fixed,'simulated_net':data['totals']['profit']-fixed if data['totals']['profit'] is not None else None,
         'break_even_cents':break_even_cents,'break_even_gap_pct':pct_change(data['totals']['revenue'],break_even_cents),

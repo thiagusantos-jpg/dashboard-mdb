@@ -150,3 +150,49 @@ def test_unsynced_stock_is_not_reported_as_zero_stock(isolated_db):
     assert d['inventory'][0]['stock'] is None
     assert not any(a['type'] == 'estoque' for a in d['alerts'])
     assert any(a['type'] == 'integracao' for a in d['alerts'])
+
+
+def _receipt_for(doc_id, day, product, revenue, cost):
+    row = raw_receipt(doc_id, day, revenue=revenue, cost=cost)
+    row['CupomFiscalItem'][0]['ProdutoId'] = product
+    return row
+
+
+def _analysis_for(doc_id, day, product, revenue, cost):
+    row = raw_analysis(doc_id, day, revenue=revenue, cost=cost)
+    row['Produto_ProdutoId'] = product
+    row['Produto_Descricao'] = f'Produto {product}'
+    return row
+
+
+def test_product_map_groups_the_last_30_days_and_lists_what_changed_group(isolated_db):
+    # January: products 501 and 502 sell every day of the 1st–20th with a 70% margin (both stars).
+    jan_r, jan_a, doc = [], [], 0
+    for day in range(1, 21):
+        for product in (501, 502):
+            doc += 1
+            d = f'2026-01-{day:02d}'
+            jan_r.append(_receipt_for(doc, d, product, 100.0, 30.0))
+            jan_a.append(_analysis_for(doc, d, product, 100.0, 30.0))
+    sync_month('2026-01', jan_r, jan_a)
+    # February: 502 keeps selling daily; 501 sells once, at a 10% margin (low turnover).
+    feb_r, feb_a = [], []
+    for day in range(1, 21):
+        doc += 1
+        d = f'2026-02-{day:02d}'
+        feb_r.append(_receipt_for(doc, d, 502, 100.0, 30.0))
+        feb_a.append(_analysis_for(doc, d, 502, 100.0, 30.0))
+    doc += 1
+    feb_r.append(_receipt_for(doc, '2026-02-01', 501, 100.0, 90.0))
+    feb_a.append(_analysis_for(doc, '2026-02-01', 501, 100.0, 90.0))
+    sync_month('2026-02', feb_r, feb_a)
+
+    m = api.dashboard(COMPANY, '2026-02')['product_map']
+
+    assert (m['start'], m['end'], m['days']) == ('2026-01-30', '2026-02-28', 30)
+    assert m['previous'] == {'start': '2025-12-31', 'end': '2026-01-29', 'available': True}
+    groups = {p['id']: p['classification'] for p in m['products']}
+    assert groups == {501: 'Baixo giro', 502: 'Estrela'}
+    assert next(p for p in m['products'] if p['id'] == 501)['last_sold'] == '2026-02-01'
+    assert [(c['id'], c['from'], c['to']) for c in m['changes']['lost_star']] == [(501, 'Estrela', 'Baixo giro')]
+    assert [(c['id'], c['from'], c['to']) for c in m['changes']['became_low']] == [(501, 'Estrela', 'Baixo giro')]

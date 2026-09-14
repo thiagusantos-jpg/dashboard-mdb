@@ -511,12 +511,13 @@ function spreadTurnover(p) {
 
 function renderMapa(data) {
   const P = periodInfo(data);
-  // A product sold with cost R$ 0 shows a 100% margin it doesn't have: it lands among the
-  // opportunities and bends every group, so it stays apart until its cost is registered.
-  const allProds = data.products || [];
-  const noCost = allProds.filter((p) => p.cost === 0 && p.revenue > 0);
-  const prods = allProds.filter((p) => !(p.cost === 0 && p.revenue > 0));
-  const [est, ger, opo, pm] = CLASSES.map((c) => prods.filter((p) => p.classification === c.key));
+  const pm = data.product_map;
+  // Groups come from the last 30 days (backend product_map); an older payload falls back to the month.
+  const all = pm ? pm.products : (data.products || []);
+  const noCost = all.filter(isZeroCost);
+  const prods = all.filter((p) => !isZeroCost(p));
+  const windowLabel = pm ? `${shortDateBR(pm.start)} a ${shortDateBR(pm.end)}` : P.label;
+  const [est, ger, opo, low] = CLASSES.map((c) => prods.filter((p) => p.classification === c.key));
   const lucro = (arr) => sumBy(arr, (p) => p.profit);
   const lt = lucro(prods);
   let acc = 0, n80 = 0;
@@ -526,19 +527,159 @@ function renderMapa(data) {
       if (acc >= lt * 0.8) break;
     }
   }
+  const idle = idleStockCents(low, data.inventory);
+  const categories = [...new Set(prods.map((p) => p.category || 'Sem categoria'))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  MAPA_STATE = {data, P, pm, prods, windowLabel, q: '', category: '',
+    // Actions are tied to this 30-day window: a later window can raise the same group again.
+    version: pm ? pm.end : data.period,
+    actions: {
+      'mapa:gerador': {count: ger.length, label: 'Criar ação: renegociar custo',
+        title: `Renegociar custo ou ajustar preço dos ${ger.length} geradores de caixa (vendas de ${windowLabel})`},
+      'mapa:baixo-giro': {count: low.length, label: 'Criar ação: avaliar retirada',
+        title: `Avaliar retirada ou liquidação dos ${low.length} produtos de baixo giro (${brl(idle)} parados em estoque)`},
+    }};
 
-  const pp = prods.filter((p) => p.revenue > 2000 && p.margin != null);
+  document.getElementById('content').innerHTML = `
+    ${insightHeader('map', 'Mapa de produtos', 'Quais produtos proteger, ajustar, divulgar ou rever?', P)}
+    <p class="section-note">Grupos calculados com as vendas de ${windowLabel}${pm ? ` (últimos ${pm.days} dias, ${num(pm.sales_days)} com venda)` : ''},
+      para que não mudem só porque o mês ainda está no começo.</p>
+    <div class="kpi-grid kpi-grid-4">
+      ${kpi(`${icon('star')} Estrelas`, num(est.length), `Vendem sempre, com boa margem · ${brl(lucro(est))} de lucro`)}
+      ${kpi(`${icon('dollar-sign')} Geradores de caixa`, num(ger.length), `Vendem sempre, com margem baixa · ${brl(lucro(ger))} de lucro`)}
+      ${kpi(`${icon('search')} Oportunidades`, num(opo.length), `Boa margem, vendem pouco · ${brl(lucro(opo))} de lucro`)}
+      ${kpi(`${icon('triangle-alert')} Baixo giro`, num(low.length), `Vendem pouco e ganham pouco · ${brl(idle)} parados em estoque`)}
+    </div>
+    ${story(`Apenas ${num(n80)} de ${num(prods.length)} produtos geram 80% do lucro. Antes de qualquer outra decisão, não deixe faltar as ${num(est.length)} estrelas.`)}
+    ${noCost.length ? `<details class="nocost-box">
+      <summary>${icon('triangle-alert')} ${num(noCost.length)} produto${noCost.length === 1 ? '' : 's'} vendido${noCost.length === 1 ? '' : 's'} com custo zero no Mobne
+        (${brl(sumBy(noCost, (p) => p.revenue))} de faturamento) ficaram fora dos grupos — ver quais</summary>
+      ${table(['Produto', 'Faturamento', 'Última venda'], noCost.slice().sort((a, b) => b.revenue - a.revenue).slice(0, 20)
+        .map((p) => [mapaProductLink(p, data.period), money(p.revenue), p.last_sold ? shortDateBR(p.last_sold) : '—']))}
+      <p class="section-note">Sem o custo, a margem aparece como 100% e o produto cairia no grupo errado.
+        ${noCost.length > 20 ? 'Mostrando os 20 que mais faturam. ' : ''}Cadastre o custo no Mobne para que entrem no mapa.
+        <a href="${routeHash('estoque', data.period, new URLSearchParams({filtro: 'custo-zero'}))}">Abrir a lista completa em Produtos e estoque →</a></p>
+    </details>` : ''}
+    ${explain('esta página',
+      `Cada produto entra em um grupo pelo giro (em quantos dias com venda da loja ele vendeu, nos últimos 30 dias) e pela margem. Os cortes são vender em ${GIRO_CORTE * 100}% desses dias ou mais e ter margem de ${MARGEM_CORTE}% ou mais.`,
+      'Estrelas: proteger o estoque. Geradores de caixa: renegociar custo ou ajustar preço. Oportunidades: dar visibilidade na loja. Baixo giro: avaliar se vale manter.',
+      'O mix certo libera espaço na prateleira e dinheiro parado em estoque para o que realmente dá lucro.')}
+
+    ${mapaChangesHtml(pm, data.period)}
+
+    <div class="mapa-filters" role="search" aria-label="Filtrar produtos do mapa">
+      <div class="mapa-filter"><label class="field-label" for="mapa-search">Buscar produto</label>
+        <input type="search" id="mapa-search" class="search-input" placeholder="Ex.: banana, cerveja…" autocomplete="off"></div>
+      ${categories.length > 1 ? `<div class="mapa-filter"><label class="field-label" for="mapa-category">Categoria</label>
+        <select id="mapa-category" class="login-input"><option value="">Todas</option>
+          ${categories.map((c) => `<option value="${esc(c)}">${esc(sentenceCase(c))}</option>`).join('')}</select></div>` : ''}
+      <span id="mapa-count" class="result-count" role="status" aria-live="polite"></span>
+    </div>
+    <div id="mapa-body"></div>
+  `;
+  renderMapaBody();
+  const search = document.getElementById('mapa-search');
+  let timer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { MAPA_STATE.q = fold(search.value).trim(); renderMapaBody(); }, 150);
+  });
+  const select = document.getElementById('mapa-category');
+  if (select) select.addEventListener('change', () => { MAPA_STATE.category = select.value; renderMapaBody(); });
+}
+
+/* ---------------------------------------------------------------- Mapa: helpers */
+
+let MAPA_STATE = null;
+const isZeroCost = (p) => p.cost === 0 && p.revenue > 0;
+const GROUP_TITLES = {'Estrela': 'Estrelas', 'Gerador de caixa': 'Geradores de caixa', 'Oportunidade': 'Oportunidades', 'Baixo giro': 'Baixo giro'};
+const GROUP_WORDS = {'Estrela': 'estrela', 'Gerador de caixa': 'gerador de caixa', 'Oportunidade': 'oportunidade', 'Baixo giro': 'baixo giro', 'Sem vendas': 'sem vendas'};
+
+// Mobne names come in capitals; tables read easier with only the first letter capitalized.
+function sentenceCase(name) {
+  const s = String(name || '').toLocaleLowerCase('pt-BR');
+  return s.charAt(0).toLocaleUpperCase('pt-BR') + s.slice(1);
+}
+
+const mapaProductLink = (p, period) =>
+  `<a href="#/produto/${esc(period)}?id=${esc(p.id)}" title="${esc(p.name)}">${esc(sentenceCase(p.name))}</a>`;
+
+// Money sitting on the shelf: stock × current cost; negative or unknown stock counts as zero.
+function idleStockCents(products, inventory) {
+  const inv = new Map((inventory || []).map((p) => [p.id, p]));
+  return sumBy(products, (p) => {
+    const i = inv.get(p.id);
+    return i && i.stock > 0 && i.current_cost > 0 ? Math.round(i.stock * i.current_cost) : 0;
+  });
+}
+
+function mapaChangesHtml(pm, period) {
+  if (!pm) return '';
+  const title = section('O que mudou de grupo');
+  if (!pm.previous || !pm.previous.available) {
+    return `${title}<p class="section-note">Ainda não há vendas dos 30 dias anteriores para comparar os grupos.</p>`;
+  }
+  const lost = (pm.changes && pm.changes.lost_star) || [];
+  const low = (pm.changes && pm.changes.became_low) || [];
+  const range = `Comparado com ${shortDateBR(pm.previous.start)} a ${shortDateBR(pm.previous.end)}.`;
+  if (!lost.length && !low.length) {
+    return `${title}<p class="section-note">${range}</p><div class="badge-success">Nenhum produto saiu das estrelas nem virou baixo giro.</div>`;
+  }
+  const card = (iconName, heading, list, textOf) => `<div class="change-card">
+      <h3 class="class-title">${icon(iconName)} ${heading} <span class="class-count">${num(list.length)}</span></h3>
+      ${list.length ? `<ul class="change-list">${list.slice(0, 10).map((c) =>
+        `<li>${mapaProductLink(c, period)} <span class="change-to">${textOf(c)}</span></li>`).join('')}</ul>` : '<p class="class-todo">Nenhum.</p>'}
+      ${list.length > 10 ? `<p class="section-note">Mostrando 10 de ${num(list.length)}, dos que mais vendiam antes.</p>` : ''}
+    </div>`;
+  return `${title}
+    <p class="section-note">${range} Mudanças de grupo mostram cedo o que está perdendo espaço no mix.</p>
+    <div class="row">
+      <div class="col-50">${card('star', 'Saíram das estrelas', lost, (c) => `agora ${GROUP_WORDS[c.to] || c.to}`)}</div>
+      <div class="col-50">${card('triangle-alert', 'Viraram baixo giro', low, (c) => `antes ${GROUP_WORDS[c.from] || c.from}`)}</div>
+    </div>`;
+}
+
+function renderMapaBody() {
+  const s = MAPA_STATE;
+  const body = document.getElementById('mapa-body');
+  if (!s || !body) return;
+  const oldChart = document.getElementById('chart-mapa-matrix');
+  if (oldChart && typeof echarts !== 'undefined') {
+    const chart = echarts.getInstanceByDom(oldChart);
+    if (chart) chart.dispose();
+  }
+  const filtered = !!(s.q || s.category);
+  const list = s.prods.filter((p) => (!s.category || (p.category || 'Sem categoria') === s.category) && (!s.q || fold(p.name).includes(s.q)));
+  const [est, ger, opo, low] = CLASSES.map((c) => list.filter((p) => p.classification === c.key));
+  const [cEst, cGer, cOpo, cLow] = CLASSES;
+  const byProfit = (arr) => arr.slice().sort((a, b) => (b.profit || 0) - (a.profit || 0));
+  const byRevenue = (arr) => arr.slice().sort((a, b) => b.revenue - a.revenue);
+  const group = (cls, arr, todo, order, actionKey) => {
+    const lowTurn = cls.key === 'Baixo giro';
+    const action = actionKey && s.actions[actionKey] && s.actions[actionKey].count
+      ? `<div class="row-actions group-actions" data-group-key="${actionKey}">
+          <span class="action-count" data-action-count hidden></span>
+          <button type="button" class="btn-secondary" data-group-action="${actionKey}">${s.actions[actionKey].label}</button></div>` : '';
+    return `<section class="class-group" aria-label="${esc(GROUP_TITLES[cls.key])}">
+      <div class="class-head"><h3 class="class-title">${icon(cls.icon)} ${esc(GROUP_TITLES[cls.key])} <span class="class-count">${num(arr.length)}</span></h3>${action}</div>
+      <p class="class-todo">${todo}</p>
+      ${table(['Produto', lowTurn ? 'Última venda' : 'Dias com venda', 'Margem', 'Faturamento', 'Lucro'],
+        arr.slice(0, 10).map((p) => [mapaProductLink(p, s.data.period),
+          lowTurn ? (p.last_sold ? shortDateBR(p.last_sold) : '—') : num(p.days_sold), pct1(p.margin), money(p.revenue), money(p.profit)]))}
+      <p class="section-note">${arr.length > 10 ? `Mostrando 10 de ${num(arr.length)}, ` : ''}${order}.</p>
+    </section>`;
+  };
+
+  const pp = list.filter((p) => p.revenue > 2000 && p.margin != null);
   const rOf = bubbleRadius(pp.map((p) => p.revenue), 3, 17);
   // One product at −80% used to stretch the whole axis and squeeze everyone else into the top.
   const clipped = pp.filter((p) => p.margin < MARGEM_PISO).length;
   const margins = pp.map((p) => Math.max(p.margin, MARGEM_PISO));
   const ys = niceScale(Math.min(0, ...margins), Math.max(MARGEM_CORTE + 10, ...margins), 6);
   const span = ys.max - ys.min;
-  const groups = CLASSES.map((c) => ({name: c.label, color: c.key === 'Baixo giro' ? COR.lightGray : c.color}));
   const matrixOpts = {
     points: pp.map((p) => ({x: spreadTurnover(p), y: Math.max(p.margin, ys.min), r: rOf(p.revenue), g: CLASSES.indexOf(classInfo(p.classification)),
-      tip: `${p.name}\nGiro: ${Math.round(p.turnover * 100)}% dos dias (${p.days_sold} dias)\nMargem: ${pct1(p.margin)}\nReceita: ${money(p.revenue)}\nLucro: ${money(p.profit)}`})),
-    groups,
+      tip: `${sentenceCase(p.name)}\nGiro: ${Math.round(p.turnover * 100)}% dos dias (${p.days_sold} dias)\nMargem: ${pct1(p.margin)}\nFaturamento: ${money(p.revenue)}\nLucro: ${money(p.profit)}`})),
+    groups: CLASSES.map((c) => ({name: GROUP_TITLES[c.key], color: c.key === 'Baixo giro' ? COR.lightGray : c.color})),
     xScale: {min: -0.05, max: 1.05}, yScale: {min: ys.min, max: ys.max},
     xTitle: 'Giro (% dos dias com venda)', yTitle: 'Margem (%)', xFmt: (v) => Math.round(v * 100) + '%', yFmt: (v) => v + '%',
     vlines: [{x: GIRO_CORTE}], hlines: [{y: MARGEM_CORTE}],
@@ -549,65 +690,75 @@ function renderMapa(data) {
       {x: 0.27, y: ys.max - span * 0.05, text: 'OPORTUNIDADES', color: COR.blue},
       {x: 0.27, y: ys.min + span * 0.05, text: 'BAIXO GIRO', color: COR.red},
     ],
-    empty: 'Nenhum produto com custo conhecido no período.',
+    empty: filtered ? 'Nenhum produto com essa busca e categoria.' : 'Nenhum produto com custo conhecido no período.',
   };
 
-  const rowsOf = (arr) => arr.map((p) => [`<a href="#/produto/${esc(data.period)}?id=${esc(p.id)}">${esc(p.name)}</a>`,
-    num(p.days_sold), pct1(p.margin), money(p.revenue), money(p.profit)]);
-  const heads = ['Produto', 'Dias com venda', 'Margem', 'Faturamento', 'Lucro'];
-  const byProfit = (arr) => arr.slice().sort((a, b) => (b.profit || 0) - (a.profit || 0));
-  const byRevenue = (arr) => arr.slice().sort((a, b) => b.revenue - a.revenue);
-  // One block per group: what to do first, then its ten most relevant products.
-  const GROUP_TITLES = {'Estrela': 'Estrelas', 'Gerador de caixa': 'Geradores de caixa', 'Oportunidade': 'Oportunidades', 'Baixo giro': 'Baixo giro'};
-  const group = (cls, list, todo, order) => `
-    <section class="class-group" aria-label="${esc(GROUP_TITLES[cls.key] || cls.label)}">
-      <h3 class="class-title">${icon(cls.icon)} ${esc(GROUP_TITLES[cls.key] || cls.label)} <span class="class-count">${num(list.length)}</span></h3>
-      <p class="class-todo">${todo}</p>
-      ${table(heads, rowsOf(list.slice(0, 10)))}
-      <p class="section-note">${list.length > 10 ? `Mostrando 10 de ${num(list.length)}, ` : ''}${order}.</p>
-    </section>`;
-  const [cEst, cGer, cOpo, cBaixo] = CLASSES;
-
-  document.getElementById('content').innerHTML = `
-    ${insightHeader('map', 'Mapa de produtos', 'Quais produtos proteger, ajustar, divulgar ou rever?', P)}
-    <div class="kpi-grid kpi-grid-4">
-      ${kpi(`${icon('star')} Estrelas`, num(est.length), `Vendem sempre, com boa margem · ${brl(lucro(est))} de lucro`)}
-      ${kpi(`${icon('dollar-sign')} Geradores de caixa`, num(ger.length), `Vendem sempre, com margem baixa · ${brl(lucro(ger))} de lucro`)}
-      ${kpi(`${icon('search')} Oportunidades`, num(opo.length), `Boa margem, vendem pouco · ${brl(lucro(opo))} de lucro`)}
-      ${kpi(`${icon('triangle-alert')} Baixo giro`, num(pm.length), `Vendem pouco e ganham pouco · ${brl(lucro(pm))} de lucro`)}
-    </div>
-    ${story(`Apenas ${num(n80)} de ${num(prods.length)} produtos geram 80% do lucro. Antes de qualquer outra decisão, não deixe faltar as ${num(est.length)} estrelas.`)}
-    ${noCost.length ? `<details class="nocost-box">
-      <summary>${icon('triangle-alert')} ${num(noCost.length)} produto${noCost.length === 1 ? '' : 's'} vendido${noCost.length === 1 ? '' : 's'} com custo zero no Mobne
-        (${brl(sumBy(noCost, (p) => p.revenue))} de faturamento) ficaram fora dos grupos — ver quais</summary>
-      ${table(['Produto', 'Faturamento', 'Dias com venda'], noCost.slice().sort((a, b) => b.revenue - a.revenue).slice(0, 20)
-        .map((p) => [`<a href="#/produto/${esc(data.period)}?id=${esc(p.id)}">${esc(p.name)}</a>`, money(p.revenue), num(p.days_sold)]))}
-      <p class="section-note">Sem o custo, a margem aparece como 100% e o produto cairia no grupo errado.
-        ${noCost.length > 20 ? `Mostrando os 20 que mais faturam. ` : ''}Cadastre o custo no Mobne para que entrem no mapa.</p>
-    </details>` : ''}
-    ${explain('esta página',
-      `Cada produto entra em um grupo pelo giro (em quantos dias do período vendeu) e pela margem. Os cortes são vender em ${GIRO_CORTE * 100}% dos dias ou mais e ter margem de ${MARGEM_CORTE}% ou mais.`,
-      'Estrelas: proteger o estoque. Geradores de caixa: renegociar custo ou ajustar preço. Oportunidades: dar visibilidade na loja. Baixo giro: avaliar se vale manter.',
-      'O mix certo libera espaço na prateleira e dinheiro parado em estoque para o que realmente dá lucro.')}
-
+  body.innerHTML = `
     ${section('O que fazer com cada grupo')}
+    ${filtered && !list.length ? '<div class="empty-state">Nenhum produto encontrado com essa busca e categoria.</div>' : ''}
     <div class="row">
       <div class="col-50">
         ${group(cEst, byProfit(est), 'Proteger: nunca deixar faltar na prateleira.', 'ordenados por lucro')}
         ${group(cOpo, byProfit(opo), 'Dar visibilidade: ponta de gôndola, degustação ou combo.', 'ordenados por lucro')}
       </div>
       <div class="col-50">
-        ${group(cGer, byRevenue(ger), 'Renegociar custo ou ajustar preço: vendem muito e ganham pouco.', 'ordenados por faturamento')}
-        ${group(cBaixo, byRevenue(pm), 'Avaliar retirada ou liquidação para liberar espaço e capital.', 'ordenados por faturamento')}
+        ${group(cGer, byRevenue(ger), 'Renegociar custo ou ajustar preço: vendem muito e ganham pouco.', 'ordenados por faturamento', 'mapa:gerador')}
+        ${group(cLow, byRevenue(low), `Avaliar retirada ou liquidação: ${brl(idleStockCents(low, s.data.inventory))} parados em estoque.`, 'ordenados por faturamento', 'mapa:baixo-giro')}
       </div>
     </div>
 
-    ${section(`Giro × margem (${P.label})`)}
+    ${section(`Giro × margem (${s.windowLabel})`)}
     <div class="chart-container chart-h-520" id="chart-mapa-matrix"></div>
     <p class="section-note">Cada bolha é um produto; quanto maior, mais faturamento. Mais à direita, vende em mais dias; mais no alto, margem maior.
       Clique na legenda para filtrar os grupos.${clipped ? ` ${num(clipped)} produto${clipped === 1 ? '' : 's'} com margem abaixo de ${MARGEM_PISO}% aparece${clipped === 1 ? '' : 'm'} na borda de baixo; passe o mouse para ver a margem real.` : ''}</p>
   `;
   mountEchartScatter(document.getElementById('chart-mapa-matrix'), matrixOpts);
+  const count = document.getElementById('mapa-count');
+  if (count) count.textContent = filtered ? `Mostrando ${num(list.length)} de ${num(s.prods.length)} produtos` : '';
+  body.querySelectorAll('[data-group-action]').forEach((b) => b.addEventListener('click', onGroupAction));
+  loadGroupActions();
+}
+
+async function loadGroupActions() {
+  const wraps = document.querySelectorAll('[data-group-key]');
+  if (!wraps.length) return;
+  let list;
+  try {
+    list = await api(`/api/companies/${APP.company}/actions`);
+  } catch (e) {
+    return;
+  }
+  wraps.forEach((wrap) => {
+    if (!wrap.isConnected) return;
+    const count = alertActionCount(list, wrap.dataset.groupKey);
+    const slot = wrap.querySelector('[data-action-count]');
+    const btn = wrap.querySelector('[data-group-action]');
+    if (slot) {
+      slot.innerHTML = count ? `<a class="action-state has" href="${routeHash('acoes', APP.period)}">${count} ${count === 1 ? 'ação aberta' : 'ações abertas'} →</a>` : '';
+      slot.hidden = !count;
+    }
+    if (btn && !btn.disabled && count) btn.textContent = 'Criar outra ação';
+  });
+}
+
+async function onGroupAction(event) {
+  const btn = event.currentTarget;
+  const s = MAPA_STATE;
+  const info = s && s.actions[btn.dataset.groupAction];
+  if (!info) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Criando…';
+  try {
+    await api(`/api/companies/${APP.company}/actions`, {method: 'POST', body: JSON.stringify({
+      alert_key: btn.dataset.groupAction, alert_version: String(s.version), title: info.title.slice(0, 240), priority: 'medium'})});
+    btn.textContent = 'Ação criada ✓';
+    loadGroupActions();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = label;
+    btn.insertAdjacentHTML('afterend', `<span class="form-error" role="alert">Não foi possível criar a ação: ${esc(e.message)}</span>`);
+  }
 }
 
 /* ================================================================ PÁGINA: DIAGNÓSTICO DE FATURAMENTO */

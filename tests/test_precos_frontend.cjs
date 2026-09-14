@@ -87,7 +87,7 @@ test('Mapa de produtos and Desempenho de vendas keep one explanation and plain w
   // Visible jargon only: mountEchartHeatmap() is the chart function's own name.
   assert.doesNotMatch(diag, /FATURAMENTO =|'Fluxo'|Heatmap por Dia|Heatmap Semanal/);
   assert.match(mapa, /O que fazer com cada grupo/);
-  assert.ok(mapa.indexOf('O que fazer com cada grupo') < mapa.indexOf('chart-mapa-matrix'));
+  assert.ok(mapa.indexOf('O que fazer com cada grupo') < mapa.indexOf('id="chart-mapa-matrix"'));
   assert.match(diag, /worst && d\.nome === worst\.nome \? COR\.red/);
 });
 
@@ -103,8 +103,34 @@ test('the product map keeps zero-cost products apart and spreads stacked bubbles
     assert.ok(spreadTurnover({id, turnover: 0.54}) < 0.6);
   }
   const mapa = insights.slice(insights.indexOf('function renderMapa'), insights.indexOf('/* ================================================================ PÁGINA: DIAGNÓSTICO'));
-  assert.match(mapa, /p\.cost === 0 && p\.revenue > 0/);
+  assert.match(mapa, /isZeroCost = \(p\) => p\.cost === 0 && p\.revenue > 0/);
   assert.doesNotMatch(mapa, /zeroCostBanner\(data\)/);
   assert.match(mapa, /class="nocost-box"/);
   assert.match(mapa, /Math\.max\(p\.margin, ys\.min\)/);
+});
+
+test('the product map searches, filters, compares 30-day windows and acts on groups', () => {
+  const mapa = insights.slice(insights.indexOf('function renderMapa'), insights.indexOf('/* ================================================================ PÁGINA: DIAGNÓSTICO'));
+  const app = read('web/assets/app.js');
+  assert.equal((mapa.match(/explain\(/g) || []).length, 1);
+  assert.match(mapa, /data\.product_map/);
+  assert.match(mapa, /id="mapa-search"/);
+  assert.match(mapa, /id="mapa-category"/);
+  assert.match(mapa, /O que mudou de grupo/);
+  assert.match(mapa, /'mapa:gerador'/);
+  assert.match(mapa, /'mapa:baixo-giro'/);
+  assert.match(mapa, /Última venda/);
+  assert.match(mapa, /filtro: 'custo-zero'/);
+  assert.match(app, /key: 'custo-zero'/);
+
+  const sentence = mapa.match(/function sentenceCase\([\s\S]*?\n}/);
+  const sentenceCase = new Function(`${sentence[0]}; return sentenceCase;`)();
+  assert.equal(sentenceCase('BANANA PRATA (KG)'), 'Banana prata (kg)');
+  assert.equal(sentenceCase('ÁGUA MINERAL'), 'Água mineral');
+  assert.equal(sentenceCase(''), '');
+
+  const idle = mapa.match(/function idleStockCents\([\s\S]*?\n}/);
+  const idleStockCents = new Function('sumBy', `${idle[0]}; return idleStockCents;`)((arr, fn) => arr.reduce((t, x) => t + (fn(x) || 0), 0));
+  const inventory = [{id: 1, stock: 10, current_cost: 250}, {id: 2, stock: -3, current_cost: 400}, {id: 3, stock: 4, current_cost: null}];
+  assert.equal(idleStockCents([{id: 1}, {id: 2}, {id: 3}, {id: 4}], inventory), 2500);
 });

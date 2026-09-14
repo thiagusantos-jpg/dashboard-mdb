@@ -1404,6 +1404,8 @@ const ESTOQUE_FILTERS = [
   {key: 'abaixo-custo', label: 'Preço abaixo do custo',
     test: (p) => p.current_price != null && p.current_cost != null && p.current_price < p.current_cost},
   {key: 'sem-custo', label: 'Vendido sem custo', test: (p) => p.unknown > 0},
+  // Same rule the Mapa de produtos uses to keep a product out of the groups (fake 100% margin).
+  {key: 'custo-zero', label: 'Custo zero', test: (p) => p.cost === 0 && p.revenue > 0},
 ];
 
 const ESTOQUE_COLS = [
