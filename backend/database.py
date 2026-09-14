@@ -4,7 +4,7 @@ import os
 import socket
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from . import settings
 from . import migrations
 
@@ -364,6 +364,23 @@ def periods(company):
     with connection() as db:
         return [dict(r) for r in db.execute('SELECT period,updated_at,version,documents FROM datasets WHERE company=? AND resource=? ORDER BY period DESC', (company, 'sales'))]
 
+# Vercel kills a function after maxDuration (300s, vercel.json) without running
+# except/finally, so the job row stays 'running'. Every sync step writes
+# updated_at, so an active job silent for longer than that is dead.
+STALE_JOB_SECONDS = 360
+
+def expire_stale_jobs(company):
+    """Serverless only: fail active jobs whose run was killed, so the
+    one_active_job index stops blocking 'Sincronizar agora' and the cron.
+    Locally the launcher already fails 'running' rows on restart, and a live
+    worker can legitimately wait out Mobne retries for longer."""
+    if not settings.IS_SERVERLESS:
+        return
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=STALE_JOB_SECONDS)).isoformat()
+    with connection() as db:
+        db.execute("UPDATE jobs SET state='failed',error=?,updated_at=? WHERE company=? AND state IN ('queued','running') AND updated_at<?",
+                   ('Execução interrompida pelo limite de tempo do servidor; sincronize novamente.', now(), company, cutoff))
+
 def claim_job(company, mode):
     """(job_id, created). A company has at most one queued/running job
     (one_active_job index): asking for another returns the active one with
@@ -371,6 +388,7 @@ def claim_job(company, mode):
     only do so when created is True — running an already-active job id again
     makes two runs write the same progress row, which is how a finished job
     ended up showing 9/6 with a stale "Cupons ... página" detail."""
+    expire_stale_jobs(company)
     with connection() as db:
         if PG:
             try:
@@ -400,5 +418,7 @@ def update_job(job, **fields):
         db.execute('UPDATE jobs SET '+','.join(k+'=?' for k in fields)+' WHERE id=?', (*fields.values(),job))
 
 def jobs(company):
+    # The status poll is what the page shows, so a killed run stops reading 'Em execução' there too.
+    expire_stale_jobs(company)
     with connection() as db:
         return [dict(r) for r in db.execute('SELECT * FROM jobs WHERE company=? ORDER BY id DESC LIMIT 15',(company,))]

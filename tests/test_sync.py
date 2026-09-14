@@ -210,6 +210,40 @@ def test_starting_a_sync_while_one_is_active_reuses_it_without_running_twice(iso
     assert created_again is False
 
 
+def _age_job(job_id, seconds):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    with db.connection() as conn:
+        conn.execute("UPDATE jobs SET state='running',updated_at=? WHERE id=?", (old, job_id))
+
+
+def test_serverless_run_killed_by_the_time_limit_no_longer_blocks_a_new_sync(isolated_db, monkeypatch):
+    from backend import settings
+    monkeypatch.setattr(settings, 'IS_SERVERLESS', True)
+    db.initialize()
+    stuck_id, _ = db.claim_job(COMPANY, 'recent')
+    _age_job(stuck_id, db.STALE_JOB_SECONDS + 60)
+
+    assert db.jobs(COMPANY)[0]['state'] == 'failed'
+    new_id, created = db.claim_job(COMPANY, 'recent')
+    assert created is True
+    assert new_id != stuck_id
+
+
+def test_recent_or_local_active_jobs_are_not_expired(isolated_db, monkeypatch):
+    from backend import settings
+    db.initialize()
+    active_id, _ = db.claim_job(COMPANY, 'recent')
+
+    monkeypatch.setattr(settings, 'IS_SERVERLESS', True)
+    _age_job(active_id, 60)
+    assert db.claim_job(COMPANY, 'recent') == (active_id, False)
+
+    monkeypatch.setattr(settings, 'IS_SERVERLESS', False)
+    _age_job(active_id, db.STALE_JOB_SECONDS + 60)
+    assert db.claim_job(COMPANY, 'recent') == (active_id, False)
+
+
 def test_serverless_trigger_does_not_start_a_second_run_on_an_active_job(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
     from backend import api, security, settings
