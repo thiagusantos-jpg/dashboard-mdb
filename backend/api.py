@@ -18,6 +18,7 @@ from . import sync
 from .finance import accounts
 from .operations.catalog import inventory_catalog
 from .operations.goals import current_goal_progress
+from .operations.sales_window import receipts_between as _receipts_between
 from .routes.finance_accounts import router as finance_accounts_router
 from .routes.financial_entries import router as financial_entries_router
 from .routes.actions import router as actions_router
@@ -274,17 +275,6 @@ def config(company:int,body:Config):
 
 PRODUCT_MAP_DAYS=30
 
-def _receipts_between(company,start,end,conn):
-    """Receipts dated start..end (ISO days) and their analysis rows, across the sales months they span."""
-    receipts,analysis=[],[]
-    for key in sync.month_range(start[:7],end[:7]):
-        ds=db.dataset(company,'sales',key,conn)
-        if not ds or not ds['payload'].get('raw_count'):
-            continue
-        receipts+=[r for r in ds['payload']['receipts'] if start<=r['date']<=end]
-        analysis+=ds['payload'].get('analysis') or []
-    return receipts,analysis
-
 def product_map_payload(company,end,catalog,conn):
     """Product groups over the last 30 days up to `end`, not the calendar month: early in a
     month the 60% giro cut meant 8 sales days out of 13, so groups swung week to week. The
@@ -317,6 +307,29 @@ def product_map_payload(company,end,catalog,conn):
         'products':current['products'],
         'previous':{'start':prev_start,'end':prev_end,'available':bool(prev_receipts)},
         'changes':{'lost_star':order(lost_star),'became_low':order(became_low)}}
+
+def dashboard_alerts(inventory,stock_synced,unknown_items):
+    """Resumo attention points. `count` is the number behind each message, so an action
+    created from it can later say how the problem moved (Central de Ações)."""
+    alerts=[]
+    low_stock=[p for p in inventory if p['abc']=='A' and p['stock'] is not None and p['stock']<=0]
+    if not stock_synced:
+        alerts.append({'severity':'medium','type':'integracao','count':None,
+            'message':'Estoque ainda não sincronizado. Consulte a integração Mobne para concluir a carga.'})
+    if low_stock:
+        names=', '.join(p['name'] for p in low_stock[:5])+('…' if len(low_stock)>5 else '')
+        alerts.append({'severity':'high','type':'estoque','count':len(low_stock),
+            'message':f'{len(low_stock)} produto(s) da curva A com estoque zerado ou negativo no Mobne: {names}.'})
+    underpriced=[p for p in inventory if p['current_price'] is not None and p['current_cost'] is not None
+                 and p['current_price']<p['current_cost']]
+    if underpriced:
+        names=', '.join(p['name'] for p in underpriced[:5])+('…' if len(underpriced)>5 else '')
+        alerts.append({'severity':'high','type':'preco','count':len(underpriced),
+            'message':f'{len(underpriced)} produto(s) vendendo abaixo do custo atual do Mobne: {names}.'})
+    if unknown_items>0:
+        alerts.append({'severity':'medium','type':'custo','count':unknown_items,
+            'message':f'{unknown_items} item(ns) vendido(s) sem custo conhecido — lucro do período não pôde ser calculado para eles.'})
+    return alerts
 
 @app.get('/api/companies/{company}/dashboard',dependencies=[Depends(permissions.require_permission('dashboard.read'))])
 def dashboard(company:int,period:str):
@@ -377,24 +390,7 @@ def dashboard(company:int,period:str):
     # None when the period has any unknown-cost item, same as simulated_net below — a break-even
     # point built on a partially-unknown margin would be worse than none at all.
     break_even_cents=round(fixed/(margin/100)) if margin else None
-    alerts=[]
-    low_stock=[p for p in inventory if p['abc']=='A' and p['stock'] is not None and p['stock']<=0]
-    if stock is None:
-        alerts.append({'severity':'medium','type':'integracao',
-            'message':'Estoque ainda não sincronizado. Consulte a integração Mobne para concluir a carga.'})
-    if low_stock:
-        names=', '.join(p['name'] for p in low_stock[:5])+('…' if len(low_stock)>5 else '')
-        alerts.append({'severity':'high','type':'estoque',
-            'message':f'{len(low_stock)} produto(s) da curva A com estoque zerado ou negativo no Mobne: {names}.'})
-    underpriced=[p for p in inventory if p['current_price'] is not None and p['current_cost'] is not None
-                 and p['current_price']<p['current_cost']]
-    if underpriced:
-        names=', '.join(p['name'] for p in underpriced[:5])+('…' if len(underpriced)>5 else '')
-        alerts.append({'severity':'high','type':'preco',
-            'message':f'{len(underpriced)} produto(s) vendendo abaixo do custo atual do Mobne: {names}.'})
-    if data['totals']['unknown']>0:
-        alerts.append({'severity':'medium','type':'custo',
-            'message':f'{data["totals"]["unknown"]} item(ns) vendido(s) sem custo conhecido — lucro do período não pôde ser calculado para eles.'})
+    alerts=dashboard_alerts(inventory,stock is not None,data['totals']['unknown'])
     return {**data,'period':period,'start':sales['payload']['start'],'end':sales['payload']['end'],
         'updated_at':sales['updated_at'],'version':sales['version'],'comparison':comparison,'comparison_mom':comparison_mom,
         'reconciliation':sales['payload']['reconciliation'],'raw_count':sales['payload']['raw_count'],

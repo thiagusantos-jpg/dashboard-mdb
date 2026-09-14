@@ -196,3 +196,20 @@ def test_product_map_groups_the_last_30_days_and_lists_what_changed_group(isolat
     assert next(p for p in m['products'] if p['id'] == 501)['last_sold'] == '2026-02-01'
     assert [(c['id'], c['from'], c['to']) for c in m['changes']['lost_star']] == [(501, 'Estrela', 'Baixo giro')]
     assert [(c['id'], c['from'], c['to']) for c in m['changes']['became_low']] == [(501, 'Estrela', 'Baixo giro')]
+
+
+def test_dashboard_alerts_carry_the_count_behind_each_message():
+    inventory = [
+        {'id': 1, 'name': 'A', 'abc': 'A', 'stock': 0, 'current_price': 500, 'current_cost': 300},
+        {'id': 2, 'name': 'B', 'abc': 'A', 'stock': -2, 'current_price': 200, 'current_cost': 250},
+        {'id': 3, 'name': 'C', 'abc': 'B', 'stock': 0, 'current_price': None, 'current_cost': 100},
+    ]
+    alerts = {a['type']: a for a in api.dashboard_alerts(inventory, True, 12)}
+    assert alerts['estoque']['count'] == 2
+    assert alerts['estoque']['message'].startswith('2 produto(s) da curva A')
+    assert alerts['preco']['count'] == 1
+    assert alerts['custo']['count'] == 12
+    assert 'integracao' not in alerts
+
+    unsynced = api.dashboard_alerts([], False, 0)
+    assert [(a['type'], a['count']) for a in unsynced] == [('integracao', None)]

@@ -65,3 +65,67 @@ def test_basket_pairs_endpoint(client):
     response = client.get("/api/companies/1/baskets", params={"period": "2026-09"})
     assert response.status_code == 200, response.text
     assert response.json()["receipt_count"] == 1
+
+
+def _create(client, **extra):
+    body = {"alert_key": "estoque", "alert_version": "v1", "title": "170 produto(s) sem estoque", **extra}
+    created = client.post("/api/companies/1/actions", json=body)
+    assert created.status_code == 201, created.text
+    return created.json()
+
+
+def test_create_keeps_the_count_behind_the_alert(client):
+    assert _create(client, baseline_count=170)["baseline_count"] == 170
+
+
+def test_assign_set_and_clear_the_due_date(client):
+    action = _create(client)
+    people = client.get("/api/companies/1/actions/assignees").json()
+    assert people, "the logged-in admin can own actions"
+
+    patched = client.patch(
+        f"/api/companies/1/actions/{action['id']}",
+        json={"assignee": people[0]["id"], "due_date": "2026-09-20", "priority": "high"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["due_date"] == "2026-09-20"
+    assert patched.json()["priority"] == "high"
+
+    cleared = client.patch(f"/api/companies/1/actions/{action['id']}", json={"due_date": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["due_date"] is None
+    assert str(cleared.json()["assignee"]) == str(people[0]["id"])  # untouched: not sent
+
+
+def test_assignee_without_access_is_refused(client):
+    action = _create(client)
+    response = client.patch(f"/api/companies/1/actions/{action['id']}", json={"assignee": 999})
+    assert response.status_code == 422
+
+
+def test_priority_cannot_be_cleared(client):
+    action = _create(client)
+    response = client.patch(f"/api/companies/1/actions/{action['id']}", json={"priority": None})
+    assert response.status_code == 422
+
+
+def test_taking_an_action_assigns_the_logged_partner(client):
+    action = _create(client)
+    taken = client.post(f"/api/companies/1/actions/{action['id']}/transition", json={"to_status": "in_progress"})
+    assert taken.status_code == 200, taken.text
+    assert taken.json()["assignee"] is not None
+    assert taken.json()["assignee_name"] is not None
+
+
+def test_closing_note_is_listed(client):
+    action = _create(client)
+    client.post(f"/api/companies/1/actions/{action['id']}/transition", json={"to_status": "resolved", "note": "Pedido feito"})
+    listed = client.get("/api/companies/1/actions").json()
+    assert listed[0]["status_note"] == "Pedido feito"
+
+
+def test_result_endpoint_answers_for_any_action(client):
+    action = _create(client)
+    response = client.get(f"/api/companies/1/actions/{action['id']}/result")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"kind": "none"}
