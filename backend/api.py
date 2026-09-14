@@ -2,6 +2,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -231,12 +232,13 @@ def trigger_sync(company:int,body:SyncRequest):
     # already re-validates the id against the live Mobne company list before touching anything,
     # so this endpoint can safely bootstrap a brand-new database the same way the old local-only
     # CLI entrypoint (`python -m backend.sync --company ...`) always did.
+    if settings.IS_SERVERLESS:
+        # No background Worker is running here to pick the job off the queue: this call
+        # runs it, in steps that fit the platform's time limit. 'paused' asks the page
+        # to post again to continue the same job.
+        return sync.run_serverless(company,body.mode)
     job_id,created=db.claim_job(company,body.mode)
-    if settings.IS_SERVERLESS and created:
-        # No background Worker is running here to pick the job off the queue. An
-        # already-active job is followed, never run a second time on the same row.
-        sync.run(company,body.mode,job_id=job_id)
-    return {'job_id':job_id,'already_running':not created}
+    return {'job_id':job_id,'already_running':not created,'paused':False}
 
 @app.get('/api/sync-jobs/{job_id}')
 def sync_job(job_id:int,auth=Depends(security.authenticate)):
@@ -255,13 +257,34 @@ def cron_sync(request:Request):
     secret=os.environ.get('CRON_SECRET')
     if not secret or request.headers.get('authorization')!=f'Bearer {secret}':
         raise HTTPException(401,'Não autorizado.')
+    started=time.monotonic()
+    ids=[c['id'] for c in db.companies()]
+    # A call chained below starts from the company it paused on; earlier ones are done.
+    resume_from=request.query_params.get('from','')
+    if resume_from.isdigit() and int(resume_from) in ids:
+        ids=ids[ids.index(int(resume_from)):]
     results=[]
-    for c in db.companies():
-        job_id,created=db.claim_job(c['id'],'recent')
-        if created:
-            sync.run(c['id'],'recent',job_id=job_id)
-            results.append(c['id'])
-    return {'synced':results}
+    for company in ids:
+        outcome=sync.run_serverless(company,'recent',started=started)
+        if not outcome['already_running']:
+            results.append(company)
+        if outcome['paused']:
+            # Hobby runs this cron once a day, so nobody else would resume the job:
+            # this call starts the next one. It stops when the job finishes or fails.
+            host=request.headers.get('x-forwarded-host') or request.headers.get('host')
+            _call_again(f'https://{host}/api/cron/sync?from={company}',secret)
+            return {'synced':results,'continuing':True}
+    return {'synced':results,'continuing':False}
+
+def _call_again(url,secret):
+    """Start another invocation without waiting for its answer. Only the request has
+    to reach Vercel: a function is not cancelled when its caller disconnects unless
+    supportsCancellation is set, and vercel.json does not set it."""
+    import httpx
+    try:
+        httpx.get(url,headers={'authorization':f'Bearer {secret}'},timeout=httpx.Timeout(10,read=2))
+    except httpx.HTTPError:
+        pass
 
 class Config(BaseModel):
     fixed_cost_cents:int=Field(ge=0,le=1000000000)

@@ -378,6 +378,10 @@ def expire_stale_jobs(company):
         return
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=STALE_JOB_SECONDS)).isoformat()
     with connection() as db:
+        # A paused job (sync.run_serverless) waits for the next call to resume it.
+        # If none comes — the tab was closed — its finished steps stay saved.
+        db.execute("UPDATE jobs SET state='failed',error=?,updated_at=? WHERE company=? AND state='queued' AND checkpoint IS NOT NULL AND updated_at<?",
+                   ('Sincronização pausada e não retomada; as etapas concluídas foram mantidas. Sincronize novamente.', now(), company, cutoff))
         db.execute("UPDATE jobs SET state='failed',error=?,updated_at=? WHERE company=? AND state IN ('queued','running') AND updated_at<?",
                    ('Execução interrompida pelo limite de tempo do servidor; sincronize novamente.', now(), company, cutoff))
 
@@ -410,8 +414,22 @@ def claim_job(company, mode):
 def create_job(company, mode):
     return claim_job(company, mode)[0]
 
+def job(job_id):
+    with connection() as db:
+        row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+    return dict(row) if row else None
+
+def resume_job(job_id):
+    """Take a paused job (queued with a checkpoint, see sync.run_serverless) for
+    this call. One conditional UPDATE, so a tab's continuation and the cron's never
+    both run it; a job just claimed (no checkpoint yet) belongs to its creator."""
+    with connection() as db:
+        cur = db.execute("UPDATE jobs SET state='running',updated_at=? WHERE id=? AND state='queued' AND checkpoint IS NOT NULL",
+                         (now(), job_id))
+        return cur.rowcount == 1
+
 def update_job(job, **fields):
-    allowed = {'state','detail','error','completed','total'}
+    allowed = {'state','detail','error','completed','total','checkpoint'}
     assert set(fields) <= allowed
     fields['updated_at'] = now()
     with connection() as db:

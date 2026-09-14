@@ -10,7 +10,7 @@ import json
 import sqlite3
 import pytest
 from backend import database as db, sync
-from backend.mobne import MobneError
+from backend.mobne import MobneDeadline, MobneError
 
 COMPANY = 218
 
@@ -244,9 +244,8 @@ def test_recent_or_local_active_jobs_are_not_expired(isolated_db, monkeypatch):
     assert db.claim_job(COMPANY, 'recent') == (active_id, False)
 
 
-def test_serverless_trigger_does_not_start_a_second_run_on_an_active_job(isolated_db, monkeypatch):
-    from fastapi.testclient import TestClient
-    from backend import api, security, settings
+def _serverless_app(monkeypatch):
+    from backend import security, settings
 
     monkeypatch.setattr(db, 'PG', False)
     monkeypatch.setattr(security, 'access_password', lambda: 'bootstrap-password')
@@ -255,21 +254,187 @@ def test_serverless_trigger_does_not_start_a_second_run_on_an_active_job(isolate
     db.initialize()
     with db.connection() as conn:
         conn.execute("INSERT OR IGNORE INTO companies(id,name) VALUES(?, 'Loja Teste')", (COMPANY,))
-    active_id, _ = db.claim_job(COMPANY, 'recent')
-    runs = []
-    monkeypatch.setattr(sync, 'run', lambda *args, **kwargs: runs.append((args, kwargs)))
     monkeypatch.setattr(settings, 'IS_SERVERLESS', True)
+
+
+def _post_sync(mode='recent'):
+    from fastapi.testclient import TestClient
+    from backend import api
 
     with TestClient(api.app) as client:
         login = client.post('/api/login', json={'email': 'admin@loja.test', 'password': 'bootstrap-password'})
         assert login.status_code == 200, login.text
         client.headers['x-csrf-token'] = login.json()['csrf']
-        response = client.post(f'/api/companies/{COMPANY}/sync', json={'mode': 'recent'})
-
+        response = client.post(f'/api/companies/{COMPANY}/sync', json={'mode': mode})
     assert response.status_code == 202, response.text
-    assert response.json()['job_id'] == active_id
-    assert response.json()['already_running'] is True
+    return response.json()
+
+
+def test_serverless_trigger_does_not_start_a_second_run_on_an_active_job(isolated_db, monkeypatch):
+    _serverless_app(monkeypatch)
+    active_id, _ = db.claim_job(COMPANY, 'recent')
+    runs = []
+    monkeypatch.setattr(sync, 'run', lambda *args, **kwargs: runs.append((args, kwargs)))
+
+    body = _post_sync()
+
+    assert body['job_id'] == active_id
+    assert body['already_running'] is True
     assert runs == []
+
+
+# --- A serverless run fits Vercel's 300 s limit (2026-09-14 incident) --------
+#
+# Hobby kills a function at 300 s without running except/finally. One 'recent'
+# run (37 + 12 receipt pages, two analyses, the catalogs) did not fit: the POST
+# came back 504, the job stayed 'running' until expired, and every retry
+# downloaded everything again from the first page.
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class TimedClient(FakeClient):
+    """Receipts for a period cost `cost` seconds of the fake clock; the period
+    `cut` runs out of the caller's time budget the first `cuts` times it is fetched."""
+
+    def __init__(self, clock, cost=None, cut=None, cuts=1):
+        clean = _clean_client()
+        super().__init__(clean.receipts_by_period, clean.analysis_by_period)
+        self.clock, self.cost, self.cut, self.cuts = clock, cost or {}, cut, cuts
+        self.fetched = []
+
+    def fetch_all(self, resource, params=None, progress=None):
+        if resource == 'receipts':
+            period = params['Filter.DataMovimentoInicial'][:7]
+            if period == self.cut and self.cuts:
+                self.cuts -= 1
+                raise MobneDeadline()
+            self.fetched.append(period)
+            self.clock.now += self.cost.get(period, 0)
+        return super().fetch_all(resource, params, progress)
+
+
+def _job(job_id):
+    return next(j for j in db.jobs(COMPANY) if j['id'] == job_id)
+
+
+def test_a_serverless_run_pauses_between_steps_and_the_next_call_resumes_it(isolated_db, monkeypatch):
+    monkeypatch.setattr(sync, 'datetime', _frozen_datetime('2026-09-15'))
+    clock = Clock()
+    client = TimedClient(clock, cost={'2026-08': sync.STEP_START_SECONDS})
+
+    job_id = sync.run(COMPANY, 'recent', client=client, started=0.0, clock=clock)
+
+    job = _job(job_id)
+    assert job['state'] == 'queued'  # paused, not killed: still the company's active job
+    assert (job['completed'], job['total']) == (1, 6)
+    assert job['error'] is None
+    assert db.dataset(COMPANY, 'sales', '2026-08') is not None  # the finished step is kept
+    assert db.dataset(COMPANY, 'sales', '2026-09') is None
+
+    assert db.resume_job(job_id) is True
+    assert db.resume_job(job_id) is False  # a second caller never runs it too
+    clock.now = 1000.0
+    sync.run(COMPANY, 'recent', job_id=job_id, client=client, started=1000.0, clock=clock)
+
+    job = _job(job_id)
+    assert job['state'] == 'completed'
+    assert job['completed'] == job['total'] == 6
+    assert client.fetched == ['2026-08', '2026-09']  # 2026-08 was not downloaded again
+
+
+def test_a_step_cut_by_the_time_limit_is_redone_whole_on_the_next_call(isolated_db, monkeypatch):
+    monkeypatch.setattr(sync, 'datetime', _frozen_datetime('2026-09-15'))
+    clock = Clock()
+    client = TimedClient(clock, cut='2026-09')
+
+    job_id = sync.run(COMPANY, 'recent', client=client, started=0.0, clock=clock)
+
+    job = _job(job_id)
+    assert job['state'] == 'queued'
+    assert job['completed'] == 1
+    assert job['error'] is None
+    assert db.dataset(COMPANY, 'sales', '2026-09') is None  # nothing half-saved
+
+    assert db.resume_job(job_id)
+    sync.run(COMPANY, 'recent', job_id=job_id, client=client, started=0.0, clock=clock)
+
+    assert _job(job_id)['state'] == 'completed'
+    assert db.dataset(COMPANY, 'sales', '2026-09') is not None
+
+
+def test_a_step_that_never_fits_the_time_limit_fails_instead_of_resuming_forever(isolated_db, monkeypatch):
+    monkeypatch.setattr(sync, 'datetime', _frozen_datetime('2026-09-15'))
+    clock = Clock()
+    client = TimedClient(clock, cut='2026-08', cuts=99)
+
+    job_id = sync.run(COMPANY, 'recent', client=client, started=0.0, clock=clock)
+    assert _job(job_id)['state'] == 'queued'  # one slow call may be Mobne having a bad minute
+    assert db.resume_job(job_id)
+    sync.run(COMPANY, 'recent', job_id=job_id, client=client, started=0.0, clock=clock)
+
+    job = _job(job_id)
+    assert job['state'] == 'failed'
+    assert 'limite de tempo' in job['error']
+
+
+def test_a_paused_job_nobody_continues_is_released(isolated_db, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from backend import settings
+    monkeypatch.setattr(settings, 'IS_SERVERLESS', True)
+    db.initialize()
+    paused_id, _ = db.claim_job(COMPANY, 'recent')
+    old = (datetime.now(timezone.utc) - timedelta(seconds=db.STALE_JOB_SECONDS + 60)).isoformat()
+    with db.connection() as conn:
+        conn.execute("UPDATE jobs SET state='queued',checkpoint='{}',updated_at=? WHERE id=?", (old, paused_id))
+
+    job = db.jobs(COMPANY)[0]
+    assert job['state'] == 'failed'
+    assert 'pausada' in job['error']
+    assert db.claim_job(COMPANY, 'recent')[1] is True
+
+
+def test_serverless_trigger_continues_a_paused_job_and_says_when_more_is_left(isolated_db, monkeypatch):
+    _serverless_app(monkeypatch)
+    paused_id, _ = db.claim_job(COMPANY, 'recent')
+    with db.connection() as conn:
+        conn.execute("UPDATE jobs SET checkpoint='{}' WHERE id=?", (paused_id,))
+    runs = []
+
+    def one_more_step(company, mode, job_id=None, **kwargs):
+        runs.append(job_id)
+        db.update_job(job_id, state='queued')  # still steps left after this call
+
+    monkeypatch.setattr(sync, 'run', one_more_step)
+
+    body = _post_sync()
+
+    assert body == {'job_id': paused_id, 'already_running': False, 'paused': True}
+    assert runs == [paused_id]
+
+
+def test_the_daily_cron_calls_itself_again_while_its_sync_is_paused(isolated_db, monkeypatch):
+    """Hobby allows one cron a day: without chaining, the unattended sync stops at the first pause."""
+    from fastapi.testclient import TestClient
+    from backend import api
+    _serverless_app(monkeypatch)
+    monkeypatch.setenv('CRON_SECRET', 'cron-secret')
+    monkeypatch.setattr(sync, 'run', lambda company, mode, job_id=None, **kw: db.update_job(job_id, state='queued'))
+    calls = []
+    monkeypatch.setattr(api, '_call_again', lambda url, secret: calls.append((url, secret)))
+
+    with TestClient(api.app) as client:
+        response = client.get('/api/cron/sync', headers={'authorization': 'Bearer cron-secret', 'x-forwarded-host': 'painel.test'})
+
+    assert response.status_code == 200, response.text
+    assert response.json()['continuing'] is True
+    assert calls == [(f'https://painel.test/api/cron/sync?from={COMPANY}', 'cron-secret')]
 
 
 def _frozen_datetime(day):

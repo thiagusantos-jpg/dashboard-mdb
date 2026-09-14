@@ -58,6 +58,13 @@ test('a click shows progress at once, before the server creates the job', () => 
   assert.match(html, /data-sync="reconcile" disabled/);
 });
 
+test('a sync paused between server calls still reads as syncing, not as waiting in line', () => {
+  const s = loadSettings();
+  const html = s.syncPanelHtml({jobs: [job({state: 'queued', total: 6, completed: 2})]});
+  assert.match(html, /Sincronizando · Recente/);
+  assert.doesNotMatch(html, /Na fila/);
+});
+
 test('an idle panel leads with the last result and its error', () => {
   const s = loadSettings();
   const html = s.syncPanelHtml({jobs: [job({state: 'failed', detail: 'Execução interrompida', error: 'Falha de comunicação'})]});

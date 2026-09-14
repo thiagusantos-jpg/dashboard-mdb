@@ -7,6 +7,11 @@ from . import settings
 class MobneError(Exception):
     pass
 
+class MobneDeadline(Exception):
+    """The caller's time budget (client.deadline) ran out. A pause for the caller to
+    resume later, not a Mobne failure, so it deliberately is not a MobneError."""
+    pass
+
 PATHS = {
     'companies': '/api/v1/Empresa/consulta-cadastro-empresa',
     'categories': '/api/v1/Produto/consulta-cadastro-categoria',
@@ -17,34 +22,55 @@ PATHS = {
     'analysis': '/api/v1/AnaliseVenda/AnaliseVendas',
 }
 
+TIMEOUT = httpx.Timeout(90, connect=15)
+
 class MobneClient:
-    def __init__(self, key=None, transport=None, sleeper=time.sleep):
+    def __init__(self, key=None, transport=None, sleeper=time.sleep, clock=time.monotonic):
         key = key or settings.API_KEY
         if not key:
             raise MobneError('Credencial Mobne não configurada no servidor.')
         self.http = httpx.Client(base_url=settings.BASE_URL,
             headers={'Authorization': 'ApiKey ' + key, 'Accept': 'application/json'},
-            timeout=httpx.Timeout(90, connect=15), follow_redirects=False, transport=transport)
+            timeout=TIMEOUT, follow_redirects=False, transport=transport)
         self.sleep = sleeper
+        self.clock = clock
+        # A clock() reading after which no request starts and none waits (None: no limit).
+        # Set by a serverless sync so a slow Mobne cannot outlive the platform's time limit.
+        self.deadline = None
 
     def close(self):
         self.http.close()
 
+    def _time_left(self):
+        if self.deadline is None:
+            return None
+        left = self.deadline - self.clock()
+        if left <= 0:
+            raise MobneDeadline()
+        return left
+
+    def _wait(self, seconds):
+        left = self._time_left()
+        self.sleep(seconds if left is None else min(seconds, left))
+
     def request(self, resource, params):
         for attempt in range(4):
             response = None
+            left = self._time_left()
+            timeout = TIMEOUT if left is None else httpx.Timeout(min(90, left), connect=min(15, left))
             try:
                 # Status first, body second: Mobne (Kestrel) answers a rejected key with a
                 # 401 whose chunked body breaks mid-read, which used to surface as a retried
                 # "Falha de comunicação" instead of the credential problem it is.
-                response = self.http.send(self.http.build_request('GET', PATHS[resource], params=params), stream=True)
+                response = self.http.send(self.http.build_request('GET', PATHS[resource], params=params, timeout=timeout), stream=True)
                 if response.status_code in (401, 403):
                     raise MobneError('Credencial Mobne recusada (HTTP %d): verifique MOBNE_API_KEY no servidor.' % response.status_code)
                 response.read()
             except httpx.TransportError:
+                self._time_left()  # a wait cut short by our own budget is a pause, not a network failure
                 if attempt == 3:
                     raise MobneError('Falha de comunicação com o Mobne. A base anterior foi preservada.') from None
-                self.sleep(2 ** attempt)
+                self._wait(2 ** attempt)
                 continue
             finally:
                 if response is not None:
@@ -56,7 +82,7 @@ class MobneClient:
                     delay = float(response.headers.get('Retry-After', 2 ** attempt))
                 except ValueError:
                     delay = 2 ** attempt
-                self.sleep(min(60, max(1, delay)))
+                self._wait(min(60, max(1, delay)))
                 continue
             if response.status_code != 200:
                 raise MobneError(f'Consulta {resource} recusada pelo Mobne (HTTP {response.status_code}).')

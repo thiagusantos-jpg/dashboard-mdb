@@ -1509,8 +1509,9 @@ function sortEstoque(key) {
 
 /* ---------------------------------------------------------------- sync trigger */
 
-// On Vercel the POST runs the whole sync inside the request (maxDuration 300s,
-// vercel.json), so it must outlive API_TIMEOUT_MS; status polling shows progress meanwhile.
+// On Vercel the POST runs the sync inside the request (maxDuration 300s, vercel.json),
+// so it must outlive API_TIMEOUT_MS; status polling shows progress meanwhile. A sync
+// longer than one request comes back paused, and posting again continues it.
 const SYNC_REQUEST_TIMEOUT_MS = 320000;
 const SYNC_FOLLOW_DELAY_MS = 2000;
 
@@ -1538,21 +1539,34 @@ async function triggerSync(mode, button) {
   say('', true);
   APP.syncPending = mode;
   if (typeof refreshSyncPanel === 'function') refreshSyncPanel();  // instant feedback, before the server answers
-  const request = api(`/api/companies/${APP.company}/sync`,
+  const post = () => api(`/api/companies/${APP.company}/sync`,
     {method: 'POST', body: JSON.stringify({mode}), timeout: SYNC_REQUEST_TIMEOUT_MS});
+  const request = post();
   // The job row exists within a second: follow it instead of waiting for the run to end.
   const follow = setTimeout(followSyncProgress, SYNC_FOLLOW_DELAY_MS);
   try {
-    // On Vercel this resolves only when the run is over; locally, as soon as it is queued.
-    const result = await request;
+    // On Vercel this resolves when the run is over or paused; locally, as soon as it is queued.
+    let result = await request;
     clearTimeout(follow);
     if (result && result.already_running) say('Já havia uma sincronização em andamento: o progresso dela aparece abaixo.', true);
+    // Paused before the server's time limit (backend/sync.py run_serverless): the
+    // finished steps are saved, and the next POST resumes the same job.
+    while (result && result.paused) {
+      await followSyncProgress();
+      result = await post();
+    }
     await followSyncProgress();
   } catch (e) {
     clearTimeout(follow);
     if (e.timedOut) {
       // Only the browser stopped waiting; the run and its job row carry on server-side.
       say('A sincronização continua no servidor: o progresso segue abaixo.', true);
+      await followSyncProgress();
+    } else if (e.status === 504) {
+      // The platform cut the request: the sync did start, and its finished steps are saved.
+      // Its job reads as running until the server releases it, so a retry must wait.
+      APP.syncPending = null;
+      say('A sincronização passou do limite de tempo do servidor. As etapas concluídas foram mantidas; tente de novo em alguns minutos.', false);
       await followSyncProgress();
     } else {
       APP.syncPending = null;

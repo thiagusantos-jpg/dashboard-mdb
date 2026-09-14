@@ -795,7 +795,7 @@ function syncRunningCard(job) {
       <div class="sync-card-head">
         <span class="sync-spinner" aria-hidden="true"></span>
         <div class="sync-card-title">
-          <strong>${pending ? 'Iniciando sincronização…' : job.state === 'queued' ? 'Na fila para sincronizar' : 'Sincronizando'} · ${esc(SYNC_MODE_LABELS[job.mode] || job.mode)}</strong>
+          <strong>${pending ? 'Iniciando sincronização…' : job.state === 'queued' && !job.total ? 'Na fila para sincronizar' : 'Sincronizando'} · ${esc(SYNC_MODE_LABELS[job.mode] || job.mode)}</strong>
           ${pending ? '<span class="muted">Conectando ao servidor</span>'
             : `<span class="muted">Em andamento há <span data-sync-since="${esc(job.created_at)}">${syncAgo(job.created_at)}</span> · última novidade há <span data-sync-since="${esc(job.updated_at)}">${syncAgo(job.updated_at)}</span></span>`}
         </div>
@@ -884,7 +884,7 @@ function syncPanelHtml(s, pending) {
       <h3 class="drawer-subtitle">Execuções recentes</h3>
       <div class="jobs-list">
         ${jobs.map((j) => `<div class="job-row">
-            <div><strong>${SYNC_MODE_LABELS[j.mode] || esc(j.mode)}</strong> ${jobBadge(j.state)}
+            <div><strong>${SYNC_MODE_LABELS[j.mode] || esc(j.mode)}</strong> ${jobBadge(j.state === 'queued' && j.total ? 'running' : j.state)}
               <div class="job-detail">${esc(j.detail || '')}</div>
               ${j.error ? `<div class="job-error">${esc(j.error)}</div>` : ''}
             </div>

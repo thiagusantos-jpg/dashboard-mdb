@@ -1,12 +1,30 @@
 from __future__ import annotations
 import argparse
 import calendar
+import json
 import threading
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from . import database as db, models, settings
-from .mobne import MobneClient, MobneError
+from .mobne import MobneClient, MobneDeadline, MobneError
 from .operations.snapshots import snapshot_catalogs
+
+# Vercel Hobby stops a function at 300 s (vercel.json maxDuration) without running
+# except/finally, and one 'recent' run did not fit: on 2026-09-14 its 37 + 12 receipt
+# pages and two analyses ended in a 504, and every retry started from page 1 again.
+# A serverless run therefore works in steps — one sales month, one catalog — and
+# pauses for the next call to resume: no step starts after STEP_START_SECONDS, and
+# Mobne calls stop at STEP_DEADLINE_SECONDS, leaving the rest to save and report.
+STEP_START_SECONDS = 120
+STEP_DEADLINE_SECONDS = 230
+# Calls in a row that finish no step before the job fails instead of pausing again:
+# a step that does not fit a call started from zero will not fit the next one either.
+IDLE_CALLS_LIMIT = 2
+CATALOGS = ['categories','products','stock','prices']
+
+class _Paused(Exception):
+    """This call has no time left to start the next step."""
 
 def month_end(period):
     year,month=map(int,period.split('-'))
@@ -61,36 +79,56 @@ def catalog_payload(resource,rows,categories=None):
             'price':models.cents(r['PrecoUnitario']),'updated_at':r.get('DtaAlteracao'),'cursor':r.get('NroBaseExportacao',0)} for r in rows]
     raise ValueError(resource)
 
-def run(company,mode='recent',period=None,job_id=None,client=None):
+def run(company,mode='recent',period=None,job_id=None,client=None,started=None,clock=time.monotonic):
+    """`started` is the clock() reading when this serverless call began: the run then
+    pauses before the platform's time limit and a later call resumes the job from its
+    checkpoint (see run_serverless). Without it — local worker, CLI — it runs to the end."""
     db.initialize()
     job_id=job_id or db.create_job(company,mode)
     client=client or MobneClient()
     today=datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+    saved=(db.job(job_id) or {}).get('checkpoint')
+    plan=json.loads(saved) if saved else None
+    progressed=paused=False
+    if started is not None:
+        client.deadline=started+STEP_DEADLINE_SECONDS
+    def before_step():
+        if started is not None and clock()-started>=STEP_START_SECONDS:
+            raise _Paused()
+    def finish(step,**fields):
+        nonlocal progressed
+        plan['done'].append(step); plan['idle']=0; progressed=True
+        db.update_job(job_id,completed=len(plan['done']),checkpoint=json.dumps(plan),**fields)
     try:
-        db.update_job(job_id,state='running',detail='Validando empresa')
+        db.update_job(job_id,state='running',detail='Retomando sincronização' if plan else 'Validando empresa')
         companies=client.fetch_all('companies')
         if company not in {int(r['EmpresaId']) for r in companies}:
             raise MobneError('Empresa não autorizada pela credencial Mobne.')
         db.save_companies(companies)
-        if mode=='history':
-            periods=month_range('2025-01',today.strftime('%Y-%m'))
-            # Completed immutable past windows are checkpoints. Failed windows are fetched again in full.
-            completed={r['period'] for r in db.periods(company)}
-            periods=[p for p in periods if p not in completed or p==today.strftime('%Y-%m')]
-        elif mode=='month':
-            periods=[period]
-        else:
-            first=today.replace(day=1)
-            periods=[(first-timedelta(days=1)).strftime('%Y-%m'),today.strftime('%Y-%m')]
-            if mode=='reconcile': periods=month_range('2025-01',today.strftime('%Y-%m'))
-        db.update_job(job_id,total=len(periods)+4,completed=0)
+        if plan is None:
+            if mode=='history':
+                periods=month_range('2025-01',today.strftime('%Y-%m'))
+                # Completed immutable past windows are checkpoints. Failed windows are fetched again in full.
+                completed={r['period'] for r in db.periods(company)}
+                periods=[p for p in periods if p not in completed or p==today.strftime('%Y-%m')]
+            elif mode=='month':
+                periods=[period]
+            else:
+                first=today.replace(day=1)
+                periods=[(first-timedelta(days=1)).strftime('%Y-%m'),today.strftime('%Y-%m')]
+                if mode=='reconcile': periods=month_range('2025-01',today.strftime('%Y-%m'))
+            # The plan is fixed here, so a job resumed in a later call (or after midnight) keeps its months.
+            plan={'periods':periods,'done':[],'failed':[],'idle':0}
+            db.update_job(job_id,total=len(periods)+len(CATALOGS),completed=0,checkpoint=json.dumps(plan))
         # Sales first: a catalog outage must not erase the last good sales dataset.
         # Each period is independent: a bad reconciliation or contract surprise in one
         # month must not block the clean months around it (see ANALISE_TECNICA_2026-09-11.md).
         # Only a MobneError (network/auth/contract-wide) aborts the whole run below, since
         # it will most likely repeat for every remaining period too.
-        failed_periods=[]
-        for index,p in enumerate(periods):
+        for p in plan['periods']:
+            if p in plan['done']:
+                continue
+            before_step()
             end=min(month_end(p),today).isoformat(); start=p+'-01'
             try:
                 if start>end: raise models.DataError('Período futuro não permitido.')
@@ -109,22 +147,25 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
                     db.put_dataset(company,'sales',p,{'receipts':canonical,'analysis':analysis,
                         'reconciliation':check,'raw_count':len(raw),'start':start,'end':end},conn,documents=len(raw),
                         summary=period_summary({'receipts':canonical,'end':end}))
-                db.update_job(job_id,completed=index+1,detail=f'{p} reconciliado e salvo')
+                finish(p,detail=f'{p} reconciliado e salvo')
             except (models.DataError,KeyError,ValueError,TypeError) as e:
                 message=str(e) if isinstance(e,models.DataError) else f'Contrato Mobne incompatível em {p}; consulte a cobertura da sincronização.'
-                failed_periods.append((p,message))
-                db.update_job(job_id,completed=index+1,detail=f'{p}: falhou — base anterior preservada')
+                plan['failed'].append([p,message])
+                finish(p,detail=f'{p}: falhou — base anterior preservada')
         # Full daily refresh, with per-entity atomic replacement. Current observations never rewrite historical costs.
         categories=db.dataset(company,'categories')
         cats={r['id']:r['name'] for r in categories['payload']} if categories else {}
         # Timestamps only: deciding "is this catalog younger than a day?" used to load
         # each payload in full (~4.4 MB per run) to read one field off it.
-        freshness=db.catalog_meta(company,['categories','products','stock','prices'])
-        for i,resource in enumerate(['categories','products','stock','prices']):
+        freshness=db.catalog_meta(company,CATALOGS)
+        for resource in CATALOGS:
+            if resource in plan['done']:
+                continue
+            before_step()
             cached=freshness.get(resource)
             age=(datetime.fromisoformat(db.now())-datetime.fromisoformat(cached['updated_at'])).total_seconds() if cached else float('inf')
             if age<86400:
-                db.update_job(job_id,completed=len(periods)+i+1,detail=f'{resource}: base atual preservada')
+                finish(resource,detail=f'{resource}: base atual preservada')
                 continue
             def progress(page,pages,count,total):
                 db.update_job(job_id,detail=f'{resource}: página {page}/{pages} · {count}/{total}')
@@ -136,10 +177,12 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
                     db.copy_dataset(company,resource,resource+'_previous',conn)
                 db.put_dataset(company,resource,'current',payload,conn)
             if resource=='categories': cats={r['id']:r['name'] for r in payload}
-            db.update_job(job_id,completed=len(periods)+i+1)
+            finish(resource)
+        before_step()
         # One row per product per day — the point-in-time history the previous
         # design lost by only ever keeping the latest stock/price dataset.
         snapshot_catalogs(company,today)
+        periods,failed_periods=plan['periods'],plan['failed']
         if failed_periods:
             ok=len(periods)-len(failed_periods)
             db.update_job(job_id,state='completed_with_errors',
@@ -147,6 +190,17 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
                 error='; '.join(f'{p}: {msg}' for p,msg in failed_periods))
         else:
             db.update_job(job_id,state='completed',detail='Sincronização concluída',error=None)
+    except (_Paused,MobneDeadline):
+        if plan is not None and not progressed:
+            plan['idle']+=1
+        if plan is None or plan['idle']>=IDLE_CALLS_LIMIT:
+            db.update_job(job_id,state='failed',detail='Execução interrompida; lotes completos preservados',
+                error='O Mobne demorou mais que o limite de tempo do servidor, mesmo numa chamada nova. As etapas concluídas foram mantidas; sincronize novamente mais tarde.')
+        else:
+            # Still the company's active job: the caller asks again (run_serverless 'paused').
+            paused=True
+            db.update_job(job_id,state='queued',checkpoint=json.dumps(plan),
+                detail=f'{len(plan["done"])} de {len(plan["periods"])+len(CATALOGS)} etapas salvas; continuando em uma nova chamada ao servidor')
     except (MobneError,models.DataError,KeyError,ValueError,TypeError) as e:
         message=str(e) if isinstance(e,(MobneError,models.DataError)) else 'Contrato Mobne incompatível; consulte a cobertura da sincronização.'
         db.update_job(job_id,state='failed',error=message,detail='Execução interrompida; lotes completos preservados')
@@ -161,12 +215,28 @@ def run(company,mode='recent',period=None,job_id=None,client=None):
         # from a finally block would replace the job's own outcome — including the
         # real error a user needs to see. Best-effort by design: whatever it misses,
         # the next run picks up, and the dashboard recomputes from the payload
-        # meanwhile (see api.py::dashboard's timeline fallback).
-        try:
-            _backfill_summaries(company)
-        except Exception:
-            pass
+        # meanwhile (see api.py::dashboard's timeline fallback). Skipped when paused:
+        # this call's time is spent, and the call that finishes the job runs it.
+        if not paused:
+            try:
+                _backfill_summaries(company)
+            except Exception:
+                pass
     return job_id
+
+def run_serverless(company,mode,started=None):
+    """One serverless call's share of a sync: start the company's job, or take it
+    back if it is paused, and work until the time budget above runs out. 'paused'
+    in the answer means steps are left: the page posts again, the cron calls itself."""
+    started=time.monotonic() if started is None else started
+    job_id,created=db.claim_job(company,mode)
+    if not created:
+        # A job still running in another call is followed, never run twice on the same row.
+        if not db.resume_job(job_id):
+            return {'job_id':job_id,'already_running':True,'paused':False}
+        mode=db.job(job_id)['mode']
+    run(company,mode,job_id=job_id,started=started)
+    return {'job_id':job_id,'already_running':False,'paused':db.job(job_id)['state']=='queued'}
 
 class Worker:
     def __init__(self):
@@ -177,7 +247,6 @@ class Worker:
     def loop(self):
         # One local process, plus database uniqueness to prevent conflicting manual jobs.
         next_run=0
-        import time
         while not self.stop.is_set():
             try:
                 with db.connection() as conn:

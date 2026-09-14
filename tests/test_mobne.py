@@ -4,7 +4,7 @@ page, and retry/backoff for 429/5xx per PLANO_IMPLEMENTACAO_MOBNE.md."""
 from __future__ import annotations
 import httpx
 import pytest
-from backend.mobne import MobneClient, MobneError
+from backend.mobne import MobneClient, MobneDeadline, MobneError
 
 
 def transport_from(responses):
@@ -101,5 +101,55 @@ def test_fetch_all_rejects_a_repeated_identical_page():
     try:
         with pytest.raises(MobneError):
             client.fetch_all('receipts', {'Filter.EmpresaId': 218})
+    finally:
+        client.close()
+
+
+# --- The caller's time budget (serverless sync steps, see sync.STEP_DEADLINE_SECONDS) ---
+
+
+def test_no_request_is_sent_once_the_time_budget_is_spent():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=page([], 0, 0, 1))
+    client = MobneClient(key='test-key', transport=httpx.MockTransport(handler), sleeper=lambda s: None, clock=lambda: 100.0)
+    client.deadline = 100.0
+    try:
+        with pytest.raises(MobneDeadline):
+            client.request('receipts', {})
+        assert calls == []
+    finally:
+        client.close()
+
+
+def test_each_request_waits_no_longer_than_the_time_left():
+    seen = []
+
+    def handler(request):
+        seen.append(request.extensions['timeout'])
+        return httpx.Response(200, json=page([], 0, 0, 1))
+    client = MobneClient(key='test-key', transport=httpx.MockTransport(handler), sleeper=lambda s: None, clock=lambda: 0.0)
+    client.deadline = 20.0
+    try:
+        client.request('receipts', {})
+        assert seen[0]['read'] == 20.0
+    finally:
+        client.close()
+
+
+def test_a_timeout_caused_by_the_time_budget_is_not_reported_as_a_mobne_failure():
+    """Running out of our own time is a pause, not 'Falha de comunicação com o Mobne'."""
+    now = [0.0]
+
+    def handler(request):
+        now[0] = 50.0  # the read waited out the rest of the budget
+        raise httpx.ReadTimeout('timed out', request=request)
+    client = MobneClient(key='test-key', transport=httpx.MockTransport(handler), sleeper=lambda s: None, clock=lambda: now[0])
+    client.deadline = 30.0
+    try:
+        with pytest.raises(MobneDeadline):
+            client.request('receipts', {})
     finally:
         client.close()
