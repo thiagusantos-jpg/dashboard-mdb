@@ -386,6 +386,7 @@ async function onAuthenticated(session) {
   APP.company = APP.companies[0].id;
   if (!APP.financePeriod) APP.financePeriod = navCurrentMonth();
   await refreshStatus();
+  if (typeof refreshActionsBadge === 'function') refreshActionsBadge();  // actions.js; absent in app.js-only tests
   onRouteChange();  // applies #/página/período from the URL (reload, favoritos), else the defaults
   // The automatic worker (backend/sync.py Worker) can finish a sync with nobody watching
   // the "sync" page; without this, new months only show up after a manual reload.
@@ -729,6 +730,11 @@ function onRouteChange() {
   if (pageChanged) window.scrollTo(0, 0);
 }
 
+function latestSalesPeriod() {
+  const withData = (APP.periods || []).find((p) => p.documents > 0);  // APP.periods is newest first
+  return withData ? withData.period : APP.period;
+}
+
 async function renderPage() {
   // Every render replaces #content's innerHTML somewhere below, which would orphan any
   // ECharts canvas mounted in the previous render (Fase 2 prototype, echarts-charts.js).
@@ -745,7 +751,9 @@ async function renderPage() {
   }
   // Identity of this request, captured before the await: APP may already point
   // at another company/period by the time the response arrives.
-  const company = APP.company, period = APP.period, page = APP.page;
+  const company = APP.company, page = APP.page;
+  // The Central de Ações has no month selector: "no painel hoje" always reads the newest synced month.
+  const period = page === 'acoes' ? latestSalesPeriod() : APP.period;
   // Every data page reads the same /dashboard payload; reuse it until the period or its version changes.
   const info = APP.periods.find((p) => p.period === period);
   const cached = APP.dashboard && APP.dashboard.period === period && APP.dashboardCompany === company &&
@@ -968,7 +976,8 @@ function alertsBlock(alerts) {
         <div class="attention-text"><strong>${esc(head)}</strong>${detail ? `<span class="attention-detail" title="${esc(detail)}">${esc(detail)}</span>` : ''}</div>
         <div class="attention-actions">${link}
           <span class="action-count" data-action-count hidden></span>
-          <button type="button" class="btn-secondary" data-create-action="${esc(a.type)}" data-action-title="${esc(a.message)}">Criar ação</button></div>
+          <button type="button" class="btn-secondary" data-create-action="${esc(a.type)}" data-action-title="${esc(a.message)}"
+            data-action-priority="${a.severity === 'high' ? 'high' : 'medium'}" data-action-baseline="${a.count == null ? '' : esc(a.count)}">Criar ação</button></div>
       </li>`;
     }).join('')}</ul>
   </section>`;
@@ -1010,15 +1019,18 @@ async function onCreateActionFromAlert(event) {
   const btn = event.currentTarget;
   const alertKey = btn.dataset.createAction;
   const title = btn.dataset.actionTitle;
+  const baselineCount = btn.dataset.actionBaseline ? Number(btn.dataset.actionBaseline) : null;
   btn.disabled = true;
   btn.textContent = 'Criando…';
   try {
     await api(`/api/companies/${APP.company}/actions`, {
       method: 'POST',
-      body: JSON.stringify({alert_key: alertKey, alert_version: title, title}),
+      body: JSON.stringify({alert_key: alertKey, alert_version: title, title: title.slice(0, 240),
+        priority: btn.dataset.actionPriority || 'medium', baseline_count: baselineCount}),
     });
     btn.textContent = 'Ação criada ✓';
     loadAlertActions();  // the new action now counts on its alert
+    if (typeof refreshActionsBadge === 'function') refreshActionsBadge();
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Criar ação';
@@ -1346,6 +1358,7 @@ function renderResumo(data) {
   // as each card's second line instead of competing as cards of their own.
   document.getElementById('content').innerHTML = `
     ${welcomeBlock(data)}
+    <p class="actions-notice" id="resumo-actions" hidden></p>
 
     <div class="kpi-grid kpi-grid-4">
       ${kpiCard('Faturamento', money(t.revenue), '', deltas('revenue_change'), `${num(t.receipts)} cupons no período`)}
@@ -1386,6 +1399,7 @@ function renderResumo(data) {
   loadResumoManagementCard(data.period);
   loadResumoGoal(data);
   loadAlertActions();
+  if (typeof loadResumoActionsNotice === 'function') loadResumoActionsNotice();
   // Mounted after innerHTML so the container elements exist; each sizes itself off its
   // own CSS height (.chart-h-*) rather than a fixed viewBox like the old SVG charts.
   mountEchartDaily(document.getElementById('echart-daily'), daily);

@@ -37,7 +37,11 @@ function canonicalRoute(hash) {
   return LEGACY_ROUTES[match[1]]();
 }
 
+// Pages of a module that do not depend on the chosen month (their data is always current).
+var PERIODLESS_PAGES = ['acoes'];
+
 function periodModeForPage(page) {
+  if (PERIODLESS_PAGES.includes(page)) return 'none';
   if (MODULE_PAGES.analises.includes(page)) return 'sales';
   if (COMPETENCE_PAGES.includes(page)) return 'competence';
   return 'none';

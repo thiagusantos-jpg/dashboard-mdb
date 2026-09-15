@@ -367,6 +367,7 @@ async function onPriceAction(event) {
       priority: r.erosao > 10 ? 'high' : 'medium'})});
     btn.textContent = 'Ação criada ✓';
     loadPriceActions();
+    if (typeof refreshActionsBadge === 'function') refreshActionsBadge();
     const dialog = btn.closest('dialog');
     if (dialog) loadPriceActions(dialog);
   } catch (e) {
@@ -751,9 +752,11 @@ async function onGroupAction(event) {
   btn.textContent = 'Criando…';
   try {
     await api(`/api/companies/${APP.company}/actions`, {method: 'POST', body: JSON.stringify({
-      alert_key: btn.dataset.groupAction, alert_version: String(s.version), title: info.title.slice(0, 240), priority: 'medium'})});
+      alert_key: btn.dataset.groupAction, alert_version: String(s.version), title: info.title.slice(0, 240), priority: 'medium',
+      baseline_count: info.count})});
     btn.textContent = 'Ação criada ✓';
     loadGroupActions();
+    if (typeof refreshActionsBadge === 'function') refreshActionsBadge();
   } catch (e) {
     btn.disabled = false;
     btn.textContent = label;

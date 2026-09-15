@@ -255,6 +255,7 @@ async function renderAcoes(data, token) {
   }
   if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
   Object.assign(ACTIONS_STATE, {list, people});
+  updateActionsBadge(list);
   content.innerHTML = `<div class="actions-page">
     ${actionsHeader()}
     <div class="actions-stats" id="actions-stats"></div>
@@ -439,6 +440,7 @@ async function quickTransition(a, toStatus, trigger, message) {
 
 async function reloadActions(message) {
   ACTIONS_STATE.list = await api(`/api/companies/${APP.company}/actions`);
+  updateActionsBadge(ACTIONS_STATE.list);
   renderActionsBody();
   if (message) announceActions(message, false);
 }
@@ -623,4 +625,43 @@ async function loadActionResults() {
       /* the row simply stays without a result line */
     }
   }
+}
+
+/* ---------------------------------------------------------------- Menu e Resumo */
+
+function updateActionsBadge(list) {
+  const badge = document.querySelector('[data-actions-badge]');
+  if (!badge) return;
+  const n = pendingActionCount(list);
+  badge.innerHTML = `${n > 99 ? '99+' : n}<span class="visually-hidden"> ${n === 1 ? 'ação pendente' : 'ações pendentes'}</span>`;
+  badge.hidden = n === 0;
+}
+
+async function refreshActionsBadge() {
+  if (APP.company == null) return;
+  try {
+    updateActionsBadge(await api(`/api/companies/${APP.company}/actions`));
+  } catch (e) {
+    /* the badge keeps its last value */
+  }
+}
+
+// One line under the Resumo welcome, only when something is overdue or stuck for a week.
+async function loadResumoActionsNotice() {
+  const box = document.getElementById('resumo-actions');
+  if (!box) return;
+  let list;
+  try {
+    list = await api(`/api/companies/${APP.company}/actions`);
+  } catch (e) {
+    return;
+  }
+  if (!box.isConnected) return;
+  updateActionsBadge(list);
+  const digest = actionDigest(list, isoDay(new Date()));
+  const text = actionsNoticeText(digest);
+  if (!text) return;
+  const params = new URLSearchParams(digest.overdue ? {situacao: 'atrasadas'} : {});
+  box.innerHTML = `${icon('triangle-alert')} ${esc(text)} <a href="${routeHash('acoes', null, params)}">Ver ações →</a>`;
+  box.hidden = false;
 }

@@ -174,3 +174,25 @@ test('a price action shows its measured result', () => {
   assert.equal(c.actionResultHtml({kind: 'none'}), '');
   assert.equal(c.actionResultHtml({kind: 'pending'}), '');
 });
+
+test('the Central de Ações has no month selector and reads the newest month', () => {
+  const nav = vm.createContext({console, URLSearchParams, window: {}, sessionStorage: {getItem: () => null, setItem() {}, removeItem() {}}});
+  // If navigation.js ever needs more globals at load, copy the stubs from tests/test_navigation_frontend.cjs.
+  vm.runInContext(read('web/assets/navigation.js'), nav);
+  assert.equal(nav.periodModeForPage('acoes'), 'none');
+  assert.equal(nav.periodModeForPage('resumo'), 'sales');
+  const app = read('web/assets/app.js');
+  assert.match(app, /const period = page === 'acoes' \? latestSalesPeriod\(\) : APP\.period;/);
+});
+
+test('the menu counts pending actions and the Resumo points to the overdue ones', () => {
+  const html = read('web/index.html');
+  assert.match(html, /data-page="acoes"[^\n]*data-actions-badge/);
+  const app = read('web/assets/app.js');
+  assert.match(app, /<p class="actions-notice" id="resumo-actions" hidden><\/p>/);
+  assert.match(app, /loadResumoActionsNotice\(\);/);
+  assert.match(app, /refreshActionsBadge\(\);/);
+  const actions = read('web/assets/actions.js');
+  assert.match(actions, /function updateActionsBadge\(/);
+  assert.match(actions, /situacao: 'atrasadas'/);
+});

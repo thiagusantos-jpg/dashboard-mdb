@@ -23,6 +23,11 @@ test('alerts can be turned into actions', () => {
   assert.match(app, /data-create-action/);
   assert.match(app, /function onCreateActionFromAlert/);
   assert.match(app, /method:\s*'POST'/);
+  assert.match(app, /data-action-priority="\$\{a\.severity === 'high' \? 'high' : 'medium'\}"/);
+  assert.match(app, /data-action-baseline=/);
+  assert.match(app, /baseline_count: baselineCount/);
+  const insights = fs.readFileSync(path.join(root, 'web/assets/insights.js'), 'utf8');
+  assert.match(insights, /baseline_count: info\.count/);
 });
 
 test('action cards take, conclude and dismiss through the transition endpoint', () => {
