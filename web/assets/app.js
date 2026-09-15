@@ -452,10 +452,16 @@ async function refreshStatus() {
   const hasActiveJob = (APP.status.jobs || []).some((j) => j.state === 'queued' || j.state === 'running');
   if (hasActiveJob && !APP.pollTimer) {
     APP.pollTimer = setInterval(async () => {
+      // A slow answer is waited for, never stacked: during a sync /status took 7 to 37 s,
+      // and a new request every 4 s piled up on the database until each one timed out.
+      if (APP.pollInFlight) return;
+      APP.pollInFlight = true;
       try {
         await refreshStatus();
       } catch (e) {
         return;  // uma leitura de status que falhou não apaga a página
+      } finally {
+        APP.pollInFlight = false;
       }
       if (APP.page === 'configuracoes' && APP.settingsSection === 'integracoes' && typeof refreshSyncPanel === 'function') refreshSyncPanel();
     }, 4000);

@@ -106,6 +106,30 @@ test('a sync in progress still reports live, on its own faster timer', () => {
                'the 4s sync-progress poll must stay as it is');
 });
 
+test('a slow status answer is waited for, not stacked with a new request every 4s', async () => {
+  /* 2026-09-15: while a sync wrote to the database each /status took 7 to 37 s. The
+   * 4s poll fired regardless, stacking up to nine requests per tab on the database,
+   * each aborted at 30 s — so no answer was ever drawn and the sync panel froze. */
+  const {context, intervals} = loadApp();
+  vm.runInContext('globalThis.APP = APP', context);
+  context.navRules = {mode: () => 'none'};
+  context.APP.company = 218;
+  const active = {jobs: [{id: 1, state: 'running'}], periods: []};
+  context.fetch = () => Promise.resolve({ok: true, status: 200, json: () => Promise.resolve(active)});
+  intervals.length = 0;
+  await context.refreshStatus();
+  const poll = intervals.find((i) => i.ms === 4000);
+  assert.ok(poll, 'an active sync starts the 4s progress poll');
+
+  let requests = 0;
+  context.fetch = () => { requests += 1; return new Promise(() => {}); };  // the database is slow
+  poll.fn();
+  poll.fn();
+  poll.fn();
+
+  assert.equal(requests, 1, 'the next tick must wait for the answer still on its way');
+});
+
 test('no status request is sent before a company is known', async () => {
   const {context} = loadApp();
   const requested = [];
