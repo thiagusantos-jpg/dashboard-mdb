@@ -87,7 +87,7 @@ test('the page leads with the result, keeps the break-even and says the status o
   assert.ok(page.indexOf('resultHeroHtml(') < page.indexOf('reviewPanelHtml('), 'numbers before the review checklist');
   assert.ok(page.indexOf('dreHtml(') < page.indexOf('reviewPanelHtml('));
   assert.match(page, /breakEvenHtml\(result\)/);
-  assert.match(page, /Nenhuma despesa lançada/);
+  assert.match(finance, /Nenhuma despesa lançada/);
   assert.match(finance, /Distribuição de lucros/);
   assert.doesNotMatch(page, /kpi\('Despesas operacionais'/, 'the nine equal cards are gone');
 });

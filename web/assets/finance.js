@@ -10,6 +10,8 @@ const FINANCE_SOURCE_LABELS = {
   multiple: 'Múltiplas origens',
   budget: 'Somente orçado',
   loan: 'Empréstimo',
+  recurrence: 'Despesa recorrente',
+  stone_receivable: 'Stone',
 };
 
 const FINANCE_STATUS_LABELS = {
@@ -226,6 +228,127 @@ function dreHtml(result) {
     </section>`;
 }
 
+/* ---------------------------------------------------------------- Custo zero e despesas fixas */
+
+// Revenue from items sold at a zero cost in the Mobne has no CMV behind it: the margin reads higher than it is.
+function costQualityNote(result) {
+  const quality = result && result.cost_quality;
+  if (!quality || quality.zero_cost_share_pct == null || quality.zero_cost_share_pct < 1) return null;
+  const items = quality.zero_cost_items;
+  return `${pctBR(quality.zero_cost_share_pct)} do faturamento (${items} ${items === 1 ? 'item vendido' : 'itens vendidos'}) veio de produtos com custo zero no Mobne: o CMV está subestimado e a margem pode estar maior do que a real.`;
+}
+
+function pendingForecasts(review) {
+  const check = ((review && review.checks) || []).find((item) => item.key === 'forecasts_pending');
+  return check && check.count ? check.count : 0;
+}
+
+function fixedSetupUrl() {
+  return `/api/companies/${APP.company}/finance/fixed-expenses`;
+}
+
+// Only the rows with a value are sent; each becomes a monthly recurrence confirmed for this month.
+function buildFixedSetupRequest(period, rows) {
+  const errors = {};
+  const items = [];
+  rows.forEach((row) => {
+    if (!String(row.amount || '').trim()) return;
+    const cents = parseMoneyToCents(row.amount);
+    const day = parseInt(row.due_day, 10);
+    if (cents == null || cents <= 0) errors[`amount-${row.system_key}`] = 'Valor inválido.';
+    if (!(day >= 1 && day <= 31)) errors[`due-${row.system_key}`] = 'Dia de 1 a 31.';
+    items.push({system_key: row.system_key, amount_cents: cents, due_day: day});
+  });
+  if (!items.length) errors.form = 'Preencha o valor de pelo menos uma despesa.';
+  if (Object.keys(errors).length) return {errors};
+  return {method: 'POST', path: fixedSetupUrl(), body: {period, items}};
+}
+
+function fixedSetupHtml(period) {
+  return `
+    <section class="fixed-setup" id="fixed-setup" aria-labelledby="fixed-setup-title">
+      <div class="fixed-setup-head">${icon('triangle-alert')}
+        <div><h2 id="fixed-setup-title">Nenhuma despesa lançada em ${financePeriodLabel(period)}</h2>
+          <p>Sem aluguel, salários e contas do mês, o resultado gerencial fica igual ao lucro bruto. Preencha as despesas que a loja paga todo mês:
+            elas ficam cadastradas e, nos próximos meses, aparecem como previstas para você só confirmar.</p></div>
+      </div>
+      <form id="fixed-setup-form" novalidate><div class="skeleton-block" aria-label="Carregando despesas típicas"></div></form>
+    </section>`;
+}
+
+function fixedSetupRowsHtml(rows, period) {
+  const cells = rows.map((row) => {
+    const key = esc(row.system_key);
+    if (row.configured) {
+      return `<span class="fixed-setup-label">${esc(row.label)}</span>
+        <span class="fixed-setup-done">${icon('circle-check')} Já cadastrada</span><span></span>`;
+    }
+    return `<label class="fixed-setup-label" for="fixed-amount-${key}">${esc(row.label)}</label>
+      <span><input id="fixed-amount-${key}" name="amount-${key}" class="login-input" inputmode="decimal" placeholder="0,00" autocomplete="off">
+        <span class="field-error" data-error-for="amount-${key}"></span></span>
+      <span><input id="fixed-due-${key}" name="due-${key}" class="login-input" type="number" min="1" max="31" value="10"
+          aria-label="Dia de vencimento de ${esc(row.label)}">
+        <span class="field-error" data-error-for="due-${key}"></span></span>`;
+  }).join('');
+  return `
+    <div class="fixed-setup-grid" role="group" aria-label="Despesas fixas do mês">
+      <span class="fixed-setup-col">Despesa</span><span class="fixed-setup-col">Valor por mês</span><span class="fixed-setup-col">Vence dia</span>
+      ${cells}
+    </div>
+    <p class="form-error" data-form-error role="alert"></p>
+    <div class="btn-row"><button type="submit" class="btn-primary btn-wide">Salvar despesas fixas</button>
+      <a class="btn-link" href="${routeHash('despesas', period)}">Lançar outra despesa em Custos e despesas →</a></div>`;
+}
+
+async function loadFixedSetup(period) {
+  const form = document.getElementById('fixed-setup-form');
+  if (!form) return;
+  let rows;
+  try {
+    rows = await api(fixedSetupUrl());
+  } catch (e) {
+    if (form.isConnected) {
+      form.innerHTML = `<p class="muted">Não foi possível carregar as despesas típicas: ${esc(e.message)}.
+        <a href="${routeHash('despesas', period)}">Abrir Custos e despesas →</a></p>`;
+    }
+    return;
+  }
+  if (!form.isConnected) return;
+  form.innerHTML = fixedSetupRowsHtml(rows, period);
+  if (typeof watchForm === 'function') watchForm(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    form.querySelectorAll('[data-error-for]').forEach((slot) => { slot.textContent = ''; });
+    const formError = form.querySelector('[data-form-error]');
+    formError.textContent = '';
+    const values = rows.filter((row) => !row.configured).map((row) => ({
+      system_key: row.system_key,
+      amount: form.elements[`amount-${row.system_key}`].value,
+      due_day: form.elements[`due-${row.system_key}`].value,
+    }));
+    const request = buildFixedSetupRequest(period, values);
+    if (request.errors) {
+      Object.entries(request.errors).forEach(([field, message]) => {
+        const slot = form.querySelector(`[data-error-for="${field}"]`);
+        if (slot) slot.textContent = message; else formError.textContent = message;
+      });
+      return;
+    }
+    const button = form.querySelector('[type="submit"]');
+    button.disabled = true;
+    button.textContent = 'Salvando…';
+    try {
+      await api(request.path, {method: 'POST', body: JSON.stringify(request.body)});
+      if (typeof clearDirty === 'function') clearDirty();
+      refreshKeepingScroll(() => renderFinanceiro());
+    } catch (e) {
+      button.disabled = false;
+      button.textContent = 'Salvar despesas fixas';
+      formError.textContent = 'Não foi possível salvar: ' + e.message;
+    }
+  });
+}
+
 function financePeriodLabel(period) {
   const [y, m] = (period || '').split('-').map(Number);
   return m ? `${MONTHS[m - 1]}/${y}` : '—';
@@ -308,6 +431,8 @@ async function renderFinanceiro(token) {
   const period = financeCompetence();
   const status = managementStatus(result);
   const expensesHref = routeHash('despesas', period);
+  const forecasts = pendingForecasts(review);
+  const costNote = costQualityNote(result);
   const rows = result.accounts.map((line) => {
     // Spending above budget is bad news; earning above it is good news.
     const spending = RESULT_EXPENSE_NATURES.includes(line.nature) || line.nature === 'cogs';
@@ -326,10 +451,13 @@ async function renderFinanceiro(token) {
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
     ${resultHeroHtml(result, period, status)}
-    ${hasNoExpenses(result) ? `<div class="result-warning" role="note">${icon('triangle-alert')}
-      <p><strong>Nenhuma despesa lançada em ${financePeriodLabel(period)}.</strong>
-        Sem aluguel, salários e contas do mês, o resultado gerencial fica igual ao lucro bruto.
-        <a href="${expensesHref}">Lançar despesas →</a></p></div>` : ''}
+    ${hasNoExpenses(result) && !forecasts ? fixedSetupHtml(period) : ''}
+    ${hasNoExpenses(result) && forecasts ? `<div class="result-warning" role="note">${icon('triangle-alert')}
+      <p><strong>${forecasts} ${forecasts === 1 ? 'despesa prevista aguarda' : 'despesas previstas aguardam'} confirmação em ${financePeriodLabel(period)}.</strong>
+        Enquanto não forem confirmadas, o resultado gerencial fica igual ao lucro bruto.
+        <a href="${expensesHref}">Confirmar em Custos e despesas →</a></p></div>` : ''}
+    ${costNote ? `<div class="result-warning" role="note">${icon('triangle-alert')}
+      <p>${esc(costNote)} <a href="${routeHash('estoque', period, new URLSearchParams({filtro: 'custo-zero'}))}">Ver produtos com custo zero →</a></p></div>` : ''}
     <div class="result-layout">
       <div class="result-main">${dreHtml(result)}</div>
       <aside class="result-side" aria-label="Ponto de equilíbrio e revisão do mês">
@@ -345,6 +473,7 @@ async function renderFinanceiro(token) {
       <a href="${expensesHref}">Abrir Custos e despesas →</a></p>`}`;
   // Bar lengths through the CSSOM: the CSP forbids inline style attributes.
   document.querySelectorAll('#content [data-w]').forEach((el) => { el.style.width = `${el.dataset.w}%`; });
+  if (hasNoExpenses(result) && !forecasts) loadFixedSetup(period);
   const reviewForm = document.getElementById('period-review-form');
   if (reviewForm && typeof bindForm === 'function') {
     bindForm(reviewForm, (values) => buildReviewRequest(review, values), () => refreshKeepingScroll(() => renderFinanceiro()));

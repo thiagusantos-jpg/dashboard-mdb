@@ -17,6 +17,7 @@ from ..finance.entry_management import (
     update_entry,
 )
 from ..finance.expense_schedules import confirm_entry, create_expense_schedule, preview_expense_schedule
+from ..finance import fixed_expenses
 from ..finance.payments import CASH_LINK_REQUIRED_MESSAGE
 from ..finance.recurrence import (
     RecurrenceConflictError,
@@ -597,3 +598,46 @@ def get_history(
     except EntryNotFoundError as exc:
         raise HTTPException(404, _error_detail("not_found", str(exc))) from exc
     return [_stringify_history_item(item) for item in history]
+
+
+# --- Resultado gerencial: guided setup of the store's fixed monthly expenses ---
+
+
+class FixedExpenseItem(BaseModel):
+    system_key: str = Field(min_length=1, max_length=60)
+    amount_cents: int = Field(gt=0)
+    due_day: int = Field(ge=1, le=31)
+
+
+class FixedExpenseSetup(BaseModel):
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    items: list[FixedExpenseItem] = Field(min_length=1, max_length=20)
+
+
+@router.get("/fixed-expenses")
+def get_fixed_expense_template(
+    company: int,
+    auth=Depends(permissions.require_permission("finance.read")),
+):
+    return fixed_expenses.setup_template(company)
+
+
+@router.post("/fixed-expenses", status_code=201)
+def post_fixed_expenses(
+    company: int,
+    body: FixedExpenseSetup,
+    auth: security.AuthContext = Depends(permissions.require_permission("finance.write")),
+):
+    rows = {row["system_key"]: row for row in fixed_expenses.setup_template(company)}
+    for item in body.items:
+        row = rows.get(item.system_key)
+        if row is None:
+            raise HTTPException(422, _error_detail("invalid_fields", "Despesa fixa desconhecida."))
+        # Salários e encargos são contas sensíveis.
+        _require_sensitive_if_needed(company, row["account_id"], auth)
+    try:
+        return fixed_expenses.setup_fixed_expenses(
+            company, body.period, [item.model_dump() for item in body.items], created_by=auth.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, _error_detail("invalid_fields", str(exc))) from exc

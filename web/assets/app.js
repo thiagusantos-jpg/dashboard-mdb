@@ -386,7 +386,8 @@ async function onAuthenticated(session) {
   APP.company = APP.companies[0].id;
   if (!APP.financePeriod) APP.financePeriod = navCurrentMonth();
   await refreshStatus();
-  if (typeof refreshActionsBadge === 'function') refreshActionsBadge();  // actions.js; absent in app.js-only tests
+  // actions.js (absent in app.js-only tests): last month's closing action, then the menu counter.
+  if (typeof ensureClosingReminder === 'function') ensureClosingReminder();
   onRouteChange();  // applies #/página/período from the URL (reload, favoritos), else the defaults
   // The automatic worker (backend/sync.py Worker) can finish a sync with nobody watching
   // the "sync" page; without this, new months only show up after a manual reload.

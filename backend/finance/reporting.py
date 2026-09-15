@@ -61,9 +61,17 @@ def management_result(
         totals = models.summarize(sales["payload"]["receipts"])["totals"]
         revenue = int(totals["revenue"])
         cogs = None if totals["unknown"] else int(totals["cost"])
+        # Items the Mobne sold at a zero cost carry no CMV: the margin reads higher than it is.
+        zero_cost_revenue = int(totals.get("zero_cost_revenue", 0))
+        cost_quality = {
+            "zero_cost_items": int(totals["zero_cost_items"]),
+            "zero_cost_revenue_cents": zero_cost_revenue,
+            "zero_cost_share_pct": round(zero_cost_revenue * 100 / revenue, 1) if revenue else 0.0,
+        }
     else:
         revenue = None
         cogs = None
+        cost_quality = None
     gross_profit = revenue - cogs if revenue is not None and cogs is not None else None
 
     store_filter = " AND e.store IN (0,?)" if store is not None else ""
@@ -188,6 +196,7 @@ def management_result(
         "profit_distribution_cents": distributions,
         "accounts": account_lines,
         "break_even": break_even,
+        "cost_quality": cost_quality,
         "data_status": {
             "sales_available": sales_available,
             "expenses_reviewed": reviewed,

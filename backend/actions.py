@@ -196,3 +196,42 @@ def list_actions(company: int, *, status: Optional[str] = None) -> list:
             _SELECT_ACTION + " WHERE a.company=?" + where + " ORDER BY a.created_at DESC", params
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+_MONTH_LABELS = ("Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez")
+CLOSING_REMINDER_DAY = 5
+
+
+def ensure_closing_reminder(company: int, today, *, created_by: Optional[int] = None) -> dict:
+    """Last month's closing action in the Central de Ações. Created once, from day 5 on,
+    and never again after it is concluded or dismissed; resolved by itself as soon as
+    the month is marked as reviewed. Runs whenever someone opens the dashboard, so no
+    scheduled job is needed."""
+    from .finance import period_reviews
+
+    year, month = (today.year, today.month - 1) if today.month > 1 else (today.year - 1, 12)
+    period = f"{year:04d}-{month:02d}"
+    if today.day < CLOSING_REMINDER_DAY:
+        return {"period": period, "status": "too_early", "action": None}
+    key = f"fechamento:{period}"
+    reviewed = period_reviews.get_review(company, period)["status"] == "reviewed"
+    with db.connection() as conn:
+        existing = conn.execute(
+            "SELECT id,status FROM actions WHERE company=? AND alert_key=? ORDER BY created_at DESC LIMIT 1",
+            (company, key),
+        ).fetchone()
+        current = _get(conn, existing["id"]) if existing else None
+    if current:
+        if reviewed and current["status"] in _ACTIVE_STATUSES:
+            resolved = transition_action(current["id"], "resolved", note="Mês marcado como revisado.", created_by=created_by)
+            return {"period": period, "status": "resolved", "action": resolved}
+        return {"period": period, "status": "exists", "action": current}
+    if reviewed:
+        return {"period": period, "status": "reviewed", "action": None}
+    label = f"{_MONTH_LABELS[month - 1]}/{year}"
+    action = create_from_alert(
+        company, key, period,
+        f"Fechar {label}: confirmar as despesas previstas, enviar o XML da Stone e marcar o mês como revisado",
+        priority="high", due_date=f"{today.year:04d}-{today.month:02d}-10", created_by=created_by,
+    )
+    return {"period": period, "status": "created", "action": action}

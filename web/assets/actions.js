@@ -14,6 +14,7 @@ const ACTION_ORIGINS = {
   integracao: {label: 'Integração', icon: 'link'},
   mapa: {label: 'Mapa de produtos', icon: 'map'},
   manual: {label: 'Manual', icon: 'clipboard-list'},
+  fechamento: {label: 'Fechamento do mês', icon: 'calendar'},
 };
 const ACTION_PRIORITY_LABELS = {high: 'Alta', medium: 'Média', low: 'Baixa'};
 const ACTION_PRIORITY_RANK = {high: 0, medium: 1, low: 2};
@@ -141,6 +142,8 @@ function actionSource(a, period) {
     return {href: routeHash('estoque', period, new URLSearchParams({filtro: ALERT_FILTERS[key]})), label: 'Ver produtos'};
   }
   if (key === 'integracao') return {href: '#/configuracoes/integracoes', label: 'Abrir integrações'};
+  const closing = key.match(/^fechamento:(\d{4}-\d{2})$/);
+  if (closing) return {href: routeHash('financeiro', closing[1]), label: 'Abrir Resultado gerencial'};
   if (key.startsWith('mapa:')) return {href: routeHash('mapa', period), label: 'Abrir no mapa'};
   const price = key.match(/^preco:(\d+)$/);
   if (price) return {href: `#/produto/${period}?id=${price[1]}`, label: 'Ver produto'};
@@ -664,4 +667,16 @@ async function loadResumoActionsNotice() {
   const params = new URLSearchParams(digest.overdue ? {situacao: 'atrasadas'} : {});
   box.innerHTML = `${icon('triangle-alert')} ${esc(text)} <a href="${routeHash('acoes', null, params)}">Ver ações →</a>`;
   box.hidden = false;
+}
+
+/* The backend creates the closing action for last month once (from day 5 on) and
+ * resolves it by itself when that month is reviewed. No finance access: nothing happens. */
+async function ensureClosingReminder() {
+  if (APP.company == null) return;
+  try {
+    await api(`/api/companies/${APP.company}/actions/closing-reminder`, {method: 'POST'});
+  } catch (e) {
+    /* the badge below still counts whatever exists */
+  }
+  refreshActionsBadge();
 }

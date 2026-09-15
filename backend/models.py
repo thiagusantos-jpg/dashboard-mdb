@@ -163,7 +163,7 @@ def summarize(receipts, products=None, analysis=None):
     cats=defaultdict(lambda:{'revenue':0,'cost':0,'unknown':0,'docs':set()})
     prods={}
     revenue=cost=unknown=documents=cancelled=0
-    zero_cost=items_total=0
+    zero_cost=zero_cost_revenue=items_total=0
     for doc in receipts:
         if doc['status']=='C':
             cancelled+=1
@@ -188,7 +188,7 @@ def summarize(receipts, products=None, analysis=None):
                 unknown+=1; p['unknown']+=1; c['unknown']+=1; day['unknown']+=1
             else:
                 cost+=item['cost']; p['cost']+=item['cost']; c['cost']+=item['cost']; day['cost']+=item['cost']
-                if item['cost']==0 and item['revenue']>0: zero_cost+=1
+                if item['cost']==0 and item['revenue']>0: zero_cost+=1; zero_cost_revenue+=item['revenue']
     def financial(r):
         r['profit']=None if r['unknown'] else r['revenue']-r['cost']
         r['margin']=round(r['profit']/r['revenue']*100,2) if r['profit'] is not None and r['revenue'] else None
@@ -205,7 +205,7 @@ def summarize(receipts, products=None, analysis=None):
         p['classification']='Estrela' if p['turnover']>=.6 and (p['margin'] or 0)>=35 else 'Gerador de caixa' if p['turnover']>=.6 else 'Oportunidade' if (p['margin'] or 0)>=35 else 'Baixo giro'
     totals=financial({'revenue':revenue,'cost':cost,'unknown':unknown,'receipts':documents})
     totals.update(ticket=round(revenue/documents) if documents else None, cancelled=cancelled,
-                  products=len(ranked),zero_cost_items=zero_cost,
+                  products=len(ranked),zero_cost_items=zero_cost,zero_cost_revenue=zero_cost_revenue,
                   # Mobne reports an explicit 0 as a real known cost (e.g. free/promo items),
                   # never remapped to "unknown" here — but a high ratio means many items likely
                   # had no purchase-cost history yet (new store/product), and margin is overstated.

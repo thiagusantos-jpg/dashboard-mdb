@@ -172,12 +172,76 @@ def _checks(data: dict) -> list:
     ]
 
 
+def _setup_checks(conn, company: int, period: str) -> list:
+    """Checks that help close the month but are not part of its revision: adding
+    them must never put an already reviewed month back "em apuração"."""
+    from .accounts import default_cost_behavior
+
+    rows = _rows(
+        conn,
+        """
+        SELECT a.system_key,a.nature,a.cost_behavior,COUNT(*) AS n
+        FROM financial_entries e
+        JOIN finance_accounts a ON a.id=e.account_id
+        WHERE e.company=? AND e.competence=? AND e.status NOT IN ('cancelled','reversed')
+        GROUP BY a.id,a.system_key,a.nature,a.cost_behavior
+        """,
+        (company, period),
+    )
+    fixed = sum(
+        int(row["n"]) for row in rows
+        if (row["cost_behavior"] or default_cost_behavior(row["system_key"], row["nature"])) == "fixed"
+    )
+    stone = conn.execute(
+        "SELECT COUNT(*) AS n FROM stone_receivables WHERE company=? AND settlement_date>=? AND settlement_date<=?",
+        (company, period + "-01", period + "-31"),
+    ).fetchone()["n"]
+    checks = [
+        {
+            "key": "fixed_expenses",
+            "label": "Despesas fixas lançadas (aluguel, salários, contas)",
+            "ok": fixed > 0,
+            "count": fixed,
+            "detail": "" if fixed else (
+                "Sem despesas fixas, o resultado fica maior do que o real e o ponto de equilíbrio não é calculado. "
+                "Cadastre-as no Resultado gerencial ou em Custos e despesas."
+            ),
+        },
+        {
+            "key": "stone_file",
+            "label": "Arquivo da Stone importado (taxas de cartão)",
+            "ok": stone > 0,
+            "count": None,
+            "detail": "" if stone else "Envie o XML do mês em Recebíveis para as taxas de cartão entrarem no resultado.",
+        },
+    ]
+    # The cached sales summary avoids re-reading every receipt; without it the check is simply left out.
+    cached = conn.execute(
+        "SELECT summary FROM datasets WHERE company=? AND resource='sales' AND period=?", (company, period)
+    ).fetchone()
+    totals = (json.loads(cached["summary"]) or {}).get("totals") if cached and cached["summary"] else None
+    if totals and totals.get("zero_cost_ratio") is not None:
+        ratio = float(totals["zero_cost_ratio"])
+        checks.append({
+            "key": "zero_cost",
+            "label": "Itens vendidos com custo zero no Mobne",
+            "ok": ratio < 0.01,
+            "count": int(totals.get("zero_cost_items") or 0),
+            "detail": "" if ratio < 0.01 else (
+                f"{round(ratio * 100)}% dos itens vendidos estavam com custo zero: o CMV fica subestimado. "
+                "Corrija o custo no Mobne e sincronize o mês."
+            ),
+        })
+    return checks
+
+
 def get_review(company: int, period: str) -> dict:
     with db.connection() as conn:
         data = _period_data(conn, company, period)
         row = conn.execute(
             "SELECT * FROM period_reviews WHERE company=? AND period=?", (company, period)
         ).fetchone()
+        setup = _setup_checks(conn, company, period)
     revision = _revision(data)
     row = dict(row) if row else None
     reviewed = bool(row and row["status"] == "reviewed" and row["revision"] == revision)
@@ -189,7 +253,7 @@ def get_review(company: int, period: str) -> dict:
         "reviewed_by": str(row["reviewed_by"]) if reviewed and row["reviewed_by"] is not None else None,
         "reason": row["reason"] if row else "",
         "changed_since_review": bool(row and row["status"] == "reviewed" and row["revision"] != revision),
-        "checks": _checks(data),
+        "checks": _checks(data) + setup,
     }
 
 
