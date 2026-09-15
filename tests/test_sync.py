@@ -384,6 +384,42 @@ def test_a_step_that_never_fits_the_time_limit_fails_instead_of_resuming_forever
     assert 'limite de tempo' in job['error']
 
 
+def _saved_at(period, iso):
+    with db.connection() as conn:
+        conn.execute("UPDATE datasets SET updated_at=? WHERE company=? AND resource='sales' AND period=?", (iso, COMPANY, period))
+
+
+def test_recent_does_not_download_again_a_previous_month_saved_after_it_settled(isolated_db, monkeypatch):
+    """2026-09-14: every 'Recente' spent ~1.5 min downloading all 37 pages of August
+    again, though August had been saved on 14/09. Late fixes after that are what
+    'Reconciliar' is for."""
+    monkeypatch.setattr(sync, 'datetime', _frozen_datetime('2026-09-15'))
+    db.initialize()
+    db.put_dataset(COMPANY, 'sales', '2026-08', {'receipts': [], 'end': '2026-08-31'}, documents=1)
+    _saved_at('2026-08', '2026-09-14T13:16:39+00:00')
+    client = TimedClient(Clock())
+
+    job_id = sync.run(COMPANY, 'recent', client=client)
+
+    job = _job(job_id)
+    assert client.fetched == ['2026-09']
+    assert job['state'] == 'completed'
+    assert job['total'] == 1 + len(sync.CATALOGS)
+
+
+def test_recent_still_refreshes_a_previous_month_saved_before_it_settled(isolated_db, monkeypatch):
+    """Receipts for the last days of a month still arrive in the first days of the next one."""
+    monkeypatch.setattr(sync, 'datetime', _frozen_datetime('2026-09-15'))
+    db.initialize()
+    db.put_dataset(COMPANY, 'sales', '2026-08', {'receipts': [], 'end': '2026-08-31'}, documents=1)
+    _saved_at('2026-08', '2026-09-01T02:00:00+00:00')
+    client = TimedClient(Clock())
+
+    sync.run(COMPANY, 'recent', client=client)
+
+    assert client.fetched == ['2026-08', '2026-09']
+
+
 def test_a_paused_job_nobody_continues_is_released(isolated_db, monkeypatch):
     from datetime import datetime, timedelta, timezone
     from backend import settings

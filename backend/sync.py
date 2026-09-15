@@ -22,6 +22,8 @@ STEP_DEADLINE_SECONDS = 230
 # a step that does not fit a call started from zero will not fit the next one either.
 IDLE_CALLS_LIMIT = 2
 CATALOGS = ['categories','products','stock','prices']
+# Days into a month after which the previous month's receipts are taken as settled.
+PREVIOUS_MONTH_SETTLE_DAYS = 5
 
 class _Paused(Exception):
     """This call has no time left to start the next step."""
@@ -113,10 +115,20 @@ def run(company,mode='recent',period=None,job_id=None,client=None,started=None,c
                 periods=[p for p in periods if p not in completed or p==today.strftime('%Y-%m')]
             elif mode=='month':
                 periods=[period]
+            elif mode=='reconcile':
+                periods=month_range('2025-01',today.strftime('%Y-%m'))
             else:
                 first=today.replace(day=1)
-                periods=[(first-timedelta(days=1)).strftime('%Y-%m'),today.strftime('%Y-%m')]
-                if mode=='reconcile': periods=month_range('2025-01',today.strftime('%Y-%m'))
+                previous=(first-timedelta(days=1)).strftime('%Y-%m')
+                periods=[today.strftime('%Y-%m')]
+                # The month that just closed is fetched again only until one copy is taken
+                # after it settled: receipts for its last days still arrive early in the next
+                # month, but downloading a settled month on every run cost ~1.5 min (all 37
+                # pages of 2026-08, on 2026-09-14). Later fixes are what 'reconcile' is for.
+                saved={r['period']:r['updated_at'] for r in db.periods(company)}.get(previous)
+                settled=first+timedelta(days=PREVIOUS_MONTH_SETTLE_DAYS)
+                if saved is None or datetime.fromisoformat(saved).astimezone(ZoneInfo('America/Sao_Paulo')).date()<settled:
+                    periods.insert(0,previous)
             # The plan is fixed here, so a job resumed in a later call (or after midnight) keeps its months.
             plan={'periods':periods,'done':[],'failed':[],'idle':0}
             db.update_job(job_id,total=len(periods)+len(CATALOGS),completed=0,checkpoint=json.dumps(plan))
