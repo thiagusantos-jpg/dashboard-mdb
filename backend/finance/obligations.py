@@ -344,6 +344,77 @@ def list_obligations(
     }
 
 
+URGENCY_BUCKETS = ("overdue", "today", "week", "month", "later")
+
+
+def obligation_summary(company: int, *, today: date, include_sensitive: bool = False) -> dict:
+    """Contas a pagar by urgency (civil date `today`), the recurring forecasts to
+    confirm within 30 days, and whether the cash on hand pays what is overdue or
+    falls due in the next 7 days. Reads every open obligation, not a page."""
+    from datetime import timedelta
+
+    from . import ledger
+
+    items = _entry_rows(company) + _loan_installment_rows(company)
+    if not include_sensitive:
+        items = [item for item in items if not item["_sensitive"]]
+    today_iso = today.isoformat()
+    week_end = (today + timedelta(days=7)).isoformat()
+    month_end = (today + timedelta(days=30)).isoformat()
+
+    buckets = {key: {"count": 0, "cents": 0} for key in URGENCY_BUCKETS}
+    for item in items:
+        if item["open_cents"] <= 0:
+            continue
+        due = str(item["due_date"])[:10]
+        key = ("overdue" if due < today_iso else "today" if due == today_iso
+               else "week" if due <= week_end else "month" if due <= month_end else "later")
+        buckets[key]["count"] += 1
+        buckets[key]["cents"] += item["open_cents"]
+
+    nature_placeholders = ",".join("?" for _ in _NON_PAYABLE_NATURES)
+    with db.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.id,e.version,e.description,e.due_date,e.competence,e.amount_cents,a.sensitive
+            FROM financial_entries e
+            JOIN finance_accounts a ON a.id=e.account_id
+            WHERE e.company=? AND e.status='forecast' AND e.due_date<=?
+              AND a.nature NOT IN ({nature_placeholders})
+            ORDER BY e.due_date,e.id
+            """,
+            (company, month_end, *_NON_PAYABLE_NATURES),
+        ).fetchall()
+        has_cash_account = conn.execute(
+            "SELECT 1 FROM cash_accounts WHERE company=? AND archived=0", (company,)
+        ).fetchone() is not None
+    forecasts = [
+        {
+            "id": str(row["id"]), "version": int(row["version"]), "description": row["description"],
+            "due_date": str(row["due_date"])[:10], "competence": row["competence"],
+            "amount_cents": int(row["amount_cents"]),
+        }
+        for row in rows if include_sensitive or not row["sensitive"]
+    ]
+
+    balance = ledger.consolidated_balance(company) if has_cash_account else None
+    coverage = None
+    if balance is not None:
+        due_soon = buckets["overdue"]["cents"] + buckets["today"]["cents"] + buckets["week"]["cents"]
+        coverage = {"due_cents": due_soon, "shortfall_cents": max(0, due_soon - balance)}
+
+    return {
+        "today": today_iso,
+        "buckets": buckets,
+        "count": sum(bucket["count"] for bucket in buckets.values()),
+        "open_cents": sum(bucket["cents"] for bucket in buckets.values()),
+        "forecasts": forecasts,
+        "forecast_cents": sum(forecast["amount_cents"] for forecast in forecasts),
+        "cash_balance_cents": balance,
+        "coverage": coverage,
+    }
+
+
 def get_obligation(
     company: int,
     kind: str,

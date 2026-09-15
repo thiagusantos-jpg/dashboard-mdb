@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime as _datetime
+from zoneinfo import ZoneInfo
+
 from datetime import date
 from typing import Optional
 
@@ -113,6 +116,18 @@ def list_obligations(
     if not can_write:
         result["items"] = [_strip_write_actions(item) for item in result["items"]]
     return result
+
+
+@router.get("/obligations/summary")
+def obligations_summary(
+    company: int,
+    auth: security.AuthContext = Depends(permissions.require_permission("finance.read")),
+):
+    return obligations.obligation_summary(
+        company,
+        today=_datetime.now(ZoneInfo("America/Sao_Paulo")).date(),
+        include_sensitive=_has_permission(auth, "finance.sensitive.read", company),
+    )
 
 
 @router.get("/obligations/{kind}/{obligation_id}")

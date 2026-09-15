@@ -594,6 +594,70 @@ async function renderDespesas(token) {
 const OBLIGATION_STATUS_FILTERS = [
   ['', 'Todas em aberto'], ['overdue', 'Vencidas'], ['partially_paid', 'Parcialmente pagas'], ['open', 'Em dia'],
 ];
+const OBLIGATION_QUICK_FILTERS = [
+  ['todas', 'Todas'], ['vencidas', 'Vencidas'], ['semana', 'Vencem em 7 dias'], ['mes', 'Próximos 30 dias'], ['emprestimos', 'Empréstimos'],
+];
+const OBLIGATION_BUCKETS = [
+  ['overdue', 'Vencidas'], ['today', 'Vence hoje'], ['week', 'Próximos 7 dias'], ['month', 'Próximos 30 dias'], ['later', 'Depois'],
+];
+
+function isoAddDays(iso, days) {
+  const d = new Date(`${String(iso).slice(0, 10)}T12:00:00`);
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Fallback when the summary (which carries the store's civil date) could not load.
+function localTodayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Calendar days from today: what the partner reads first ("venceu há 5 dias").
+function dueInfo(dueDate, today) {
+  const days = Math.round((Date.parse(`${String(dueDate).slice(0, 10)}T12:00:00`) - Date.parse(`${today}T12:00:00`)) / 86400000);
+  const bucket = days < 0 ? 'overdue' : days === 0 ? 'today' : days <= 7 ? 'week' : days <= 30 ? 'month' : 'later';
+  const text = days < -1 ? `venceu há ${-days} dias` : days === -1 ? 'venceu ontem' : days === 0 ? 'vence hoje'
+    : days === 1 ? 'vence amanhã' : `vence em ${days} dias`;
+  return {days, bucket, text};
+}
+
+function groupObligations(items, today) {
+  return OBLIGATION_BUCKETS.map(([bucket, label]) => {
+    const list = items.filter((item) => dueInfo(item.due_date, today).bucket === bucket);
+    return {bucket, label, items: list, cents: list.reduce((sum, item) => sum + (item.open_cents || 0), 0)};
+  }).filter((group) => group.items.length);
+}
+
+// Does the cash on hand pay what is overdue plus what falls due in the next 7 days?
+function coverageMessage(summary) {
+  if (!summary || summary.cash_balance_cents == null || !summary.coverage) {
+    return {tone: 'none', text: 'Cadastre as contas de caixa em Fluxo de caixa para ver se o saldo cobre as contas da semana.'};
+  }
+  const balance = summary.cash_balance_cents;
+  const {due_cents: due, shortfall_cents: shortfall} = summary.coverage;
+  if (!due) return {tone: 'ok', text: `Saldo em caixa de ${money(balance)} e nada vencido ou vencendo nos próximos 7 dias.`};
+  if (!shortfall) {
+    return {tone: 'ok', text: `O saldo em caixa (${money(balance)}) cobre as contas vencidas e as dos próximos 7 dias (${money(due)}).`};
+  }
+  return {tone: 'short', text: `Faltam ${money(shortfall)} no caixa para pagar as contas vencidas e as dos próximos 7 dias (${money(due)}; saldo de ${money(balance)}).`};
+}
+
+function quickFilter(quick, today) {
+  const filters = {quick, kind: '', status: '', due_from: '', due_to: ''};
+  if (quick === 'vencidas') filters.status = 'overdue';
+  if (quick === 'semana') Object.assign(filters, {due_from: today, due_to: isoAddDays(today, 7)});
+  if (quick === 'mes') Object.assign(filters, {due_from: today, due_to: isoAddDays(today, 30)});
+  if (quick === 'emprestimos') filters.kind = 'loan_installment';
+  return filters;
+}
+
+function buildForecastConfirm(forecast) {
+  return {
+    method: 'POST', path: `/api/companies/${APP.company}/finance/entries/${forecast.id}/confirm`,
+    body: {expected_version: forecast.version},
+  };
+}
 
 function obligationQuery(filters, cursor) {
   const params = new URLSearchParams({limit: '50'});
@@ -602,39 +666,77 @@ function obligationQuery(filters, cursor) {
   return `/api/companies/${APP.company}/finance/obligations?${params}`;
 }
 
-function obligationRow(item) {
+function obligationRow(item, today) {
+  const due = dueInfo(item.due_date, today);
+  const urgent = due.bucket === 'overdue' || due.bucket === 'today';
   const actions = [];
   if (item.allowed_actions.includes('pay')) {
-    actions.push(`<button type="button" class="btn-secondary" data-obligation-pay="${esc(item.key)}" aria-label="Pagar: ${esc(item.description)}">Pagar</button>`);
+    actions.push(`<button type="button" class="${urgent ? 'btn-primary' : 'btn-secondary'} btn-compact" data-obligation-pay="${esc(item.key)}" aria-label="Pagar: ${esc(item.description)}">Pagar</button>`);
   }
-  actions.push(`<button type="button" class="btn-secondary" data-obligation-details="${esc(item.key)}" aria-label="Detalhes: ${esc(item.description)}">Detalhes</button>`);
+  actions.push(`<button type="button" class="btn-secondary btn-compact" data-obligation-details="${esc(item.key)}" aria-label="Detalhes: ${esc(item.description)}">Detalhes</button>`);
+  const tag = item.kind === 'loan_installment' ? '<span class="payables-tag">Empréstimo</span>'
+    : item.count > 1 ? `<span class="payables-tag">Parcela ${esc(item.number)}/${esc(item.count)}</span>` : '';
+  const partial = item.paid_cents > 0 ? `<div class="muted">Pago ${money(item.paid_cents)} de ${money(item.total_cents)}</div>` : '';
   return `
     <tr>
-      <td>${esc(item.description)}${item.kind === 'loan_installment' ? '<div class="muted">Empréstimo</div>' : ''}</td>
-      <td class="${item.status === 'overdue' ? 'cell-alert' : ''}">${dateBR(item.due_date)}</td>
-      <td class="num">${money(item.total_cents)}</td>
-      <td class="num">${money(item.paid_cents)}</td>
+      <td><div class="payables-desc">${esc(item.description)}${tag}</div>${partial}</td>
+      <td><div class="${due.bucket === 'overdue' ? 'due-late' : due.bucket === 'today' ? 'due-today' : ''}">${due.text}</div>
+        <div class="muted">${dateBR(item.due_date)}</div></td>
       <td class="num"><strong>${money(item.open_cents)}</strong></td>
-      <td>${statusBadge(item.status)}</td>
       <td><div class="row-actions">${actions.join('')}</div></td>
     </tr>`;
+}
+
+function payablesCardsHtml(summary, filters, page) {
+  if (!summary) return `<div class="kpi-grid kpi-grid-3 mt-16">${kpi('Saldo em aberto', money(page.open_cents))}${kpi('Contas', page.total)}</div>`;
+  const b = summary.buckets;
+  const plural = (n) => `${n} ${n === 1 ? 'conta' : 'contas'}`;
+  const card = (quick, label, cents, sub, alert) => `<button type="button" class="action-stat${alert ? ' alert' : ''}" data-quick-filter="${quick}" aria-pressed="${filters.quick === quick}">
+      <span class="action-stat-value">${money(cents)}</span><span class="action-stat-label">${label}</span><span class="action-stat-sub">${sub}</span></button>`;
+  const weekCount = b.today.count + b.week.count;
+  return `<div class="actions-stats payables-cards">
+    ${card('vencidas', 'Vencidas', b.overdue.cents, b.overdue.count ? plural(b.overdue.count) : 'nenhuma', b.overdue.count > 0)}
+    ${card('semana', 'Vencem em 7 dias', b.today.cents + b.week.cents, weekCount ? `${plural(weekCount)}${b.today.count ? ` · ${b.today.count} hoje` : ''}` : 'nenhuma', false)}
+    ${card('mes', 'Próximos 30 dias', b.today.cents + b.week.cents + b.month.cents, plural(b.today.count + b.week.count + b.month.count), false)}
+    ${card('todas', 'Total em aberto', summary.open_cents, plural(summary.count), false)}
+  </div>`;
+}
+
+function forecastsHtml(summary, today) {
+  const forecasts = (summary && summary.forecasts) || [];
+  if (!forecasts.length) return '';
+  return `
+    <section class="forecast-card" aria-labelledby="forecast-title">
+      <div class="forecast-head"><h2 id="forecast-title">Previstas para confirmar</h2>
+        <span>${forecasts.length} ${forecasts.length === 1 ? 'despesa' : 'despesas'} · ${money(summary.forecast_cents)}</span></div>
+      <p class="forecast-lead">Despesas recorrentes até 30 dias. Confirme quando a conta chegar: só então ela entra no resultado e na lista para pagar.</p>
+      <ul class="forecast-list">${forecasts.map((forecast) => `
+        <li><div><strong>${esc(forecast.description)}</strong><span>${dueInfo(forecast.due_date, today).text} · ${dateBR(forecast.due_date)}</span></div>
+          <span class="num">${money(forecast.amount_cents)}</span>
+          <button type="button" class="btn-secondary btn-compact" data-forecast-confirm="${esc(forecast.id)}" aria-label="Confirmar: ${esc(forecast.description)}">Confirmar</button></li>`).join('')}
+      </ul>
+      <p class="form-error" data-forecast-error role="alert"></p>
+      <p class="forecast-foot">Valor diferente este mês? <a href="${routeHash('despesas', today.slice(0, 7))}">Ajuste em Custos e despesas →</a></p>
+    </section>`;
 }
 
 async function renderContasPagar(token) {
   token = token || beginPage();
   const title = `${icon('calendar', {class: 'title-icon'})}Contas a pagar`;
-  const subtitle = 'Despesas e parcelas de empréstimo em aberto, vencidas ou parcialmente pagas, em qualquer competência.';
+  const subtitle = 'O que precisa ser pago, do mais urgente ao mais distante.';
   const routeKind = APP.routeParams && APP.routeParams.get('tipo') === 'emprestimo' ? 'loan_installment' : '';
-  const filters = financeFilters('contas-pagar', {kind: routeKind, status: '', q: '', due_from: '', due_to: ''});
-  if (routeKind) filters.kind = routeKind;
+  const filters = financeFilters('contas-pagar', {quick: 'todas', kind: routeKind, status: '', q: '', due_from: '', due_to: ''});
+  if (routeKind) Object.assign(filters, {quick: 'emprestimos', kind: routeKind});
   financeLoading(title, subtitle, 'Carregando contas a pagar');
-  let page, positions = null;
+  let page, positions = null, summary = null;
   try {
     // The loan filter also shows the contracts (ficha, renegotiation), which
     // used to live on their own Empréstimos page.
-    [page, positions] = await Promise.all([
+    [page, positions, summary] = await Promise.all([
       api(obligationQuery(filters)),
       filters.kind === 'loan_installment' ? api(`/api/companies/${APP.company}/finance/loans`) : Promise.resolve(null),
+      // The urgency summary is a guide on top of the list: without it the list still works.
+      api(`/api/companies/${APP.company}/finance/obligations/summary`).catch(() => null),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -642,12 +744,14 @@ async function renderContasPagar(token) {
   }
   if (!APP.pageState.isCurrent(token)) return;
 
+  const today = (summary && summary.today) || localTodayISO();
   const items = page.items.slice();
+  const hasFilter = filters.quick !== 'todas' || filters.q;
+  const coverage = summary ? coverageMessage(summary) : null;
+  const chips = OBLIGATION_QUICK_FILTERS.map(([value, label]) =>
+    `<button type="button" class="payables-chip" data-quick-filter="${value}" aria-pressed="${filters.quick === value}">${label}</button>`).join('');
   const statusOptions = OBLIGATION_STATUS_FILTERS
     .map(([value, label]) => `<option value="${value}"${value === filters.status ? ' selected' : ''}>${label}</option>`).join('');
-  const kindOptions = [['', 'Todas'], ['entry', 'Despesas'], ['loan_installment', 'Parcelas de empréstimo']]
-    .map(([value, label]) => `<option value="${value}"${value === filters.kind ? ' selected' : ''}>${label}</option>`).join('');
-  const hasFilter = filters.kind || filters.status || filters.q || filters.due_from || filters.due_to;
 
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
@@ -656,45 +760,49 @@ async function renderContasPagar(token) {
       <button type="button" class="btn-primary btn-wide" data-expense-new>Nova despesa</button>
       <button type="button" class="btn-secondary" data-loan-new>Novo empréstimo</button>
     </div>
-    <div class="kpi-grid kpi-grid-3 mt-16">
-      ${kpi('Saldo em aberto', money(page.open_cents), hasFilter ? 'no filtro atual' : null)}
-      ${kpi('Obrigações', page.total)}
+    ${payablesCardsHtml(summary, filters, page)}
+    ${coverage ? `<p class="payables-coverage ${coverage.tone}" role="status">${icon(coverage.tone === 'short' ? 'triangle-alert' : coverage.tone === 'ok' ? 'circle-check' : 'lightbulb')}
+      <span>${esc(coverage.text)}</span>${coverage.tone === 'ok' ? '' : ` <a href="${routeHash('fluxo-caixa')}">Abrir Fluxo de caixa →</a>`}</p>` : ''}
+    ${forecastsHtml(summary, today)}
+    <div class="payables-toolbar">
+      <div class="payables-chips" role="group" aria-label="Filtro rápido">${chips}</div>
+      <label class="visually-hidden" for="obligations-q">Buscar</label>
+      <input id="obligations-q" type="search" class="login-input payables-search" maxlength="120" value="${esc(filters.q)}" placeholder="Buscar por descrição ou credor">
+      ${hasFilter ? '<button type="button" class="btn-link" data-obligations-clear>Limpar filtros</button>' : ''}
+      <details class="payables-more"${filters.quick === 'custom' ? ' open' : ''}>
+        <summary>Mais filtros</summary>
+        <form id="obligations-filter" class="payables-more-form">
+          <div><label class="field-label" for="obligations-status">Situação</label>
+            <select id="obligations-status" name="status" class="login-input">${statusOptions}</select></div>
+          <div><label class="field-label" for="obligations-due-from">Vence de</label>
+            <input id="obligations-due-from" name="due_from" type="date" class="login-input" value="${esc(filters.due_from)}"></div>
+          <div><label class="field-label" for="obligations-due-to">até</label>
+            <input id="obligations-due-to" name="due_to" type="date" class="login-input" value="${esc(filters.due_to)}"></div>
+          <button type="submit" class="btn-secondary">Aplicar</button>
+        </form>
+      </details>
     </div>
-    <form id="obligations-filter" class="page-toolbar">
-      <div class="filters">
-        <div><label class="field-label" for="obligations-kind">Tipo</label>
-          <select id="obligations-kind" name="kind" class="login-input">${kindOptions}</select></div>
-        <div><label class="field-label" for="obligations-status">Situação</label>
-          <select id="obligations-status" name="status" class="login-input">${statusOptions}</select></div>
-        <div><label class="field-label" for="obligations-due-from">Vence de</label>
-          <input id="obligations-due-from" name="due_from" type="date" class="login-input" value="${esc(filters.due_from)}"></div>
-        <div><label class="field-label" for="obligations-due-to">até</label>
-          <input id="obligations-due-to" name="due_to" type="date" class="login-input" value="${esc(filters.due_to)}"></div>
-        <div><label class="field-label" for="obligations-q">Buscar</label>
-          <input id="obligations-q" name="q" type="search" class="login-input" maxlength="120" value="${esc(filters.q)}" placeholder="Descrição ou credor"></div>
-      </div>
-      <div class="btn-row">
-        <button type="submit" class="btn-primary btn-wide">Filtrar</button>
-        ${hasFilter ? '<button type="button" class="btn-secondary" data-obligations-clear>Limpar filtros</button>' : ''}
-      </div>
-    </form>
     <div id="obligations-list"></div>
     ${positions ? `<h2 class="section-header">Contratos de empréstimo</h2>${loanContractsHtml(positions)}` : ''}`;
 
   const refresh = () => refreshKeepingScroll(() => renderContasPagar());
+  const content = document.getElementById('content');
   const list = document.getElementById('obligations-list');
   let nextCursor = page.next_cursor;
   const paint = () => {
     if (!items.length) {
       list.innerHTML = hasFilter
-        ? '<div class="empty-state">Nenhuma obrigação com estes filtros.</div>'
-        : '<div class="empty-state">Nenhuma conta em aberto. Novas despesas entram aqui a partir de Custos e Despesas.</div>';
+        ? '<div class="empty-state">Nenhuma conta com estes filtros.</div>'
+        : '<div class="empty-state">Nenhuma conta em aberto. Novas despesas entram aqui a partir de Custos e despesas.</div>';
       return;
     }
     list.innerHTML = `
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Descrição</th><th>Vencimento</th><th class="num">Total</th><th class="num">Pago</th><th class="num">Saldo</th><th>Status</th><th>Ações</th></tr></thead>
-        <tbody>${items.map(obligationRow).join('')}</tbody>
+      <div class="table-wrap"><table class="data-table payables-table">
+        <thead><tr><th>Conta</th><th>Vencimento</th><th class="num">Saldo a pagar</th><th><span class="visually-hidden">Ações</span></th></tr></thead>
+        ${groupObligations(items, today).map((group) => `<tbody class="payables-group ${group.bucket}">
+          <tr class="payables-group-row"><th colspan="4" scope="rowgroup">${group.label}
+            <span>${group.items.length} ${group.items.length === 1 ? 'conta' : 'contas'} · ${money(group.cents)}</span></th></tr>
+          ${group.items.map((item) => obligationRow(item, today)).join('')}</tbody>`).join('')}
       </table></div>
       <p class="muted">Exibindo ${items.length} de ${page.total}.</p>
       ${nextCursor ? '<div class="btn-row"><button type="button" class="btn-secondary" data-obligations-more>Carregar mais</button></div>' : ''}`;
@@ -722,22 +830,56 @@ async function renderContasPagar(token) {
     }
   };
   paint();
-  const content = document.getElementById('content');
+
   content.querySelectorAll('[data-expense-new]').forEach((button) =>
     button.addEventListener('click', () => openExpenseForm(null, {trigger: button, onSaved: refresh})));
   content.querySelectorAll('[data-loan-new]').forEach((button) =>
     button.addEventListener('click', () => openLoanForm(null, {trigger: button, onSaved: refresh})));
   if (positions) bindLoanCards(content, positions, refresh);
 
+  // One click filters: the cards and the chips share the same quick filters.
+  content.querySelectorAll('[data-quick-filter]').forEach((button) => button.addEventListener('click', () => {
+    Object.assign(filters, quickFilter(button.dataset.quickFilter, today));
+    renderContasPagar();
+  }));
+  const search = document.getElementById('obligations-q');
+  if (filters.focusSearch) {
+    search.focus();
+    search.setSelectionRange(search.value.length, search.value.length);
+    filters.focusSearch = false;
+  }
+  let searchTimer;
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      Object.assign(filters, {q: search.value.trim(), focusSearch: true});
+      renderContasPagar();
+    }, 400);
+  });
   document.getElementById('obligations-filter').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const form = ev.currentTarget;
-    ['kind', 'status', 'q', 'due_from', 'due_to'].forEach((key) => { filters[key] = form.elements.namedItem(key).value.trim(); });
+    Object.assign(filters, {quick: 'custom', kind: ''});
+    ['status', 'due_from', 'due_to'].forEach((key) => { filters[key] = form.elements.namedItem(key).value.trim(); });
     renderContasPagar();
   });
-  const clear = document.querySelector('[data-obligations-clear]');
+  const clear = content.querySelector('[data-obligations-clear]');
   if (clear) clear.addEventListener('click', () => {
-    Object.assign(filters, {kind: '', status: '', q: '', due_from: '', due_to: ''});
+    Object.assign(filters, quickFilter('todas', today), {q: ''});
     renderContasPagar();
   });
+  content.querySelectorAll('[data-forecast-confirm]').forEach((button) => button.addEventListener('click', async () => {
+    const forecast = summary.forecasts.find((item) => String(item.id) === button.dataset.forecastConfirm);
+    const request = buildForecastConfirm(forecast);
+    button.disabled = true;
+    button.textContent = 'Confirmando…';
+    try {
+      await api(request.path, {method: request.method, body: JSON.stringify(request.body)});
+      refresh();
+    } catch (e) {
+      button.disabled = false;
+      button.textContent = 'Confirmar';
+      content.querySelector('[data-forecast-error]').textContent = 'Não foi possível confirmar: ' + e.message;
+    }
+  }));
 }
