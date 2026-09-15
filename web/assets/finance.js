@@ -54,12 +54,24 @@ function buildReviewRequest(review, values) {
   };
 }
 
+function reviewSummary(review) {
+  const checks = (review && review.checks) || [];
+  return {total: checks.length, pending: checks.filter((check) => !check.ok).length};
+}
+
+/* Compact review: one line saying whether the automatic checks passed, the list
+ * opened only when something needs attention, then the acknowledgement. */
 function reviewPanelHtml(review) {
+  const {total, pending} = reviewSummary(review);
   const checks = (review.checks || []).map((check) => `
     <li class="${check.ok ? 'check-ok' : 'check-pending'}">
-      <strong>${check.ok ? 'OK' : 'Atenção'}</strong> — ${esc(check.label)}${check.count != null ? `: ${check.count}` : ''}
-      ${check.detail ? `<div class="muted">${esc(check.detail)}</div>` : ''}
+      ${icon(check.ok ? 'circle-check' : 'triangle-alert')}
+      <span><span class="visually-hidden">${check.ok ? 'OK: ' : 'Atenção: '}</span>${esc(check.label)}${check.count != null ? `: ${check.count}` : ''}
+      ${check.detail ? `<span class="muted">${esc(check.detail)}</span>` : ''}</span>
     </li>`).join('');
+  const summary = !total ? 'Sem conferências automáticas para este mês'
+    : pending ? `${pending} ${pending === 1 ? 'ponto' : 'pontos'} para conferir`
+      : `Todas as ${total} conferências automáticas estão OK`;
   const reviewed = review.status === 'reviewed';
   const action = reviewed ? `
       <div class="form-field">
@@ -73,16 +85,16 @@ function reviewPanelHtml(review) {
       <div class="form-error" data-form-error role="alert"></div>
       <div class="btn-row"><button type="submit" class="btn-primary btn-wide">Marcar como revisado</button></div>`;
   return `
-    <section class="settings-block" aria-labelledby="period-review-title">
-      <div class="settings-heading">
-        <div><h2 id="period-review-title">Revisão do mês</h2>
-          <p>Revisão gerencial, não fechamento contábil: lançamentos continuam liberados e qualquer alteração volta o mês para Em apuração.</p></div>
-        <span class="${reviewed ? 'badge-success' : 'badge-warning'}">${reviewed ? 'Revisado' : 'Em apuração'}</span>
-      </div>
+    <section class="side-card review-card" aria-labelledby="period-review-title">
+      <h2 id="period-review-title" class="side-card-title">Revisão do mês</h2>
+      <p class="side-card-lead">Conferência gerencial, não fechamento contábil: qualquer alteração volta o mês para Em apuração.</p>
       ${review.changed_since_review ? '<div class="story-box">Os dados foram alterados depois da última revisão.</div>' : ''}
       ${reviewed && review.reviewed_at ? `<p class="muted">Revisado em ${esc(typeof dt === 'function' ? dt(review.reviewed_at) : review.reviewed_at)}.</p>` : ''}
       ${!reviewed && review.reason ? `<p class="muted">Reaberto: ${esc(review.reason)}</p>` : ''}
-      <ul class="review-checks">${checks}</ul>
+      <details class="review-details"${pending ? ' open' : ''}>
+        <summary><span class="review-summary ${pending ? 'pending' : 'ok'}">${icon(pending ? 'triangle-alert' : 'circle-check')} ${summary}</span></summary>
+        <ul class="review-checks">${checks}</ul>
+      </details>
       <form id="period-review-form" novalidate>${action}</form>
     </section>`;
 }
@@ -97,7 +109,7 @@ function managementStatus(result) {
   }
   return {
     label: status.expenses_reviewed ? 'Revisado' : 'Em apuração',
-    detail: notes.join(' ') || 'Despesas do mês ainda não revisadas.',
+    detail: notes.join(' ') || (status.expenses_reviewed ? 'Despesas do mês revisadas pelos sócios.' : 'Despesas do mês ainda não revisadas.'),
   };
 }
 
@@ -114,20 +126,103 @@ function breakEvenHtml(result) {
   const gapText = gap == null ? '' : gap >= 0
     ? `Faturamento ${pctBR(gap)} acima do ponto de equilíbrio.`
     : `Faturamento ${pctBR(Math.abs(gap))} abaixo do ponto de equilíbrio.`;
+  const reached = available ? Math.min(100, Math.round(((result && result.revenue_cents) || 0) * 100 / be.break_even_cents)) : 0;
   return `
-    <section class="settings-block" aria-labelledby="break-even-title">
-      <div class="settings-heading">
-        <div><h2 id="break-even-title">Ponto de equilíbrio</h2>
-          <p>Custos fixos ÷ margem de contribuição (faturamento − CMV − custos variáveis). Fixo ou variável é definido por categoria em Configurações → Categorias e favorecidos.</p></div>
+    <section class="side-card break-even-card" aria-labelledby="break-even-title">
+      <h2 id="break-even-title" class="side-card-title">Ponto de equilíbrio</h2>
+      <p class="be-value ${available ? (gap >= 0 ? 'positive' : 'negative') : 'unavailable'}">${available ? money(be.break_even_cents) : 'Indisponível'}</p>
+      ${available ? `<p class="be-gap">${gapText}</p>
+        <div class="be-track" aria-hidden="true"><span class="be-fill${gap >= 0 ? ' over' : ''}" data-w="${reached}"></span></div>`
+        : `<p class="be-reason">${esc(be.reason || 'Dados insuficientes para calcular.')}</p>`}
+      <dl class="be-facts">
+        <div><dt>Custos fixos</dt><dd>${money(be.fixed_costs_cents)}</dd></div>
+        <div><dt>Custos variáveis</dt><dd>${money(be.variable_costs_cents)}</dd></div>
+        <div><dt>Margem de contribuição</dt><dd>${pctBR(be.contribution_margin_pct)}${be.contribution_margin_cents == null ? '' : ` · ${money(be.contribution_margin_cents)}`}</dd></div>
+      </dl>
+      <details class="be-how"><summary>Como é calculado</summary>
+        <p>Custos fixos ÷ margem de contribuição (faturamento − CMV − custos variáveis). Fixo ou variável é definido por categoria em Configurações → Categorias e favorecidos.</p></details>
+    </section>`;
+}
+
+/* ---------------------------------------------------------------- Cascata do resultado */
+
+// finance-forms.js already owns a global EXPENSE_NATURES; a second declaration stops this whole script loading.
+const RESULT_EXPENSE_NATURES = ['operating_expense', 'tax_expense', 'financial_expense'];
+const DRE_LINES = [
+  ['revenue_cents', 'Receita', 'base'],
+  ['cogs_cents', 'CMV', 'minus'],
+  ['gross_profit_cents', 'Lucro bruto', 'subtotal'],
+  ['operating_expenses_cents', 'Despesas operacionais', 'minus'],
+  ['owner_compensation_cents', 'Pró-labore', 'minus'],
+  ['operating_result_cents', 'Resultado operacional', 'subtotal'],
+  ['financial_expenses_cents', 'Despesas financeiras', 'minus'],
+  ['managerial_result_cents', 'Resultado gerencial', 'total'],
+];
+
+function shareOfRevenue(cents, revenue) {
+  return cents == null || !revenue ? null : Math.round(cents * 1000 / revenue) / 10;
+}
+
+// A zero expense line is "sem lançamentos", never a confirmed zero.
+function dreRows(result) {
+  return DRE_LINES.map(([key, label, kind]) => ({
+    key, label, kind, cents: result[key],
+    pct: shareOfRevenue(result[key], result.revenue_cents),
+    empty: kind === 'minus' && key !== 'cogs_cents' && result[key] === 0,
+  }));
+}
+
+function resultHeadline(result) {
+  const cents = result.managerial_result_cents;
+  return {cents, tone: cents == null ? 'unavailable' : cents < 0 ? 'negative' : 'positive',
+    marginPct: shareOfRevenue(cents, result.revenue_cents)};
+}
+
+// With sales in but no expense launched, the result is only the gross profit; say so.
+function hasNoExpenses(result) {
+  const status = result.data_status || {};
+  if (status.restricted || result.revenue_cents == null) return false;
+  return !(result.accounts || []).some((line) => RESULT_EXPENSE_NATURES.includes(line.nature) && line.actual_cents);
+}
+
+function resultHeroHtml(result, period, status) {
+  const h = resultHeadline(result);
+  const reviewed = status.label === 'Revisado';
+  return `
+    <section class="result-hero" aria-labelledby="result-hero-title">
+      <div class="result-hero-main">
+        <p class="result-eyebrow" id="result-hero-title">Resultado gerencial de ${financePeriodLabel(period)}</p>
+        <p class="result-value ${h.tone}">${h.cents == null ? 'Indisponível' : money(h.cents)}</p>
+        <p class="result-note">${h.marginPct == null ? 'Sem receita e CMV confirmados para calcular a margem.'
+          : `${pctBR(h.marginPct)} da receita de ${money(result.revenue_cents)}`}</p>
       </div>
-      <div class="kpi-grid kpi-grid-4">
-        ${kpi('Ponto de equilíbrio', available ? money(be.break_even_cents) : 'Indisponível', available ? gapText : null, null,
-          available ? (gap >= 0 ? 'kpi-positive' : 'kpi-negative') : 'kpi-unavailable')}
-        ${kpi('Custos fixos', money(be.fixed_costs_cents))}
-        ${kpi('Custos variáveis', money(be.variable_costs_cents))}
-        ${kpi('Margem de contribuição', pctBR(be.contribution_margin_pct), be.contribution_margin_cents == null ? null : money(be.contribution_margin_cents))}
+      <div class="result-hero-status">
+        <span class="${reviewed ? 'badge-success' : 'badge-warning'}">${esc(status.label)}</span>
+        <p>${esc(status.detail)}</p>
       </div>
-      ${available ? '' : `<div class="story-box">${esc(be.reason || 'Dados insuficientes para calcular.')}</div>`}
+    </section>`;
+}
+
+function dreHtml(result) {
+  const rows = dreRows(result).map((r) => {
+    const sign = r.kind === 'minus' ? '−' : r.kind === 'base' ? '' : '=';
+    const tone = r.kind === 'total' && r.cents != null ? (r.cents < 0 ? ' negative' : ' positive') : '';
+    const width = r.pct == null ? 0 : Math.max(0, Math.min(100, Math.abs(r.pct)));
+    return `<li class="dre-row ${r.kind}${r.empty ? ' empty' : ''}${tone}">
+      <span class="dre-sign" aria-hidden="true">${sign}</span>
+      <span class="dre-label">${esc(r.label)}${r.empty ? ' <small>sem lançamentos</small>' : ''}</span>
+      <span class="dre-value">${r.cents == null ? 'Indisponível' : money(r.cents)}</span>
+      <span class="dre-pct">${pctBR(r.pct)}</span>
+      <span class="dre-bar" aria-hidden="true"><i data-w="${width}"></i></span>
+    </li>`;
+  }).join('');
+  const distribution = result.profit_distribution_cents;
+  return `
+    <section class="dre-card" aria-labelledby="dre-title">
+      <div class="dre-head"><h2 id="dre-title">Do faturamento ao resultado</h2><span>% da receita</span></div>
+      <ol class="dre-list">${rows}</ol>
+      <p class="dre-after">Distribuição de lucros: <b>${distribution == null ? 'Indisponível' : money(distribution)}</b>
+        · retirada dos sócios depois do resultado, não entra no cálculo.</p>
     </section>`;
 }
 
@@ -196,7 +291,7 @@ function renderFinancePage(token) {
 async function renderFinanceiro(token) {
   token = token || beginPage();
   const title = `${icon('gauge', {class: 'title-icon'})}Resultado gerencial`;
-  const subtitle = 'Resultado gerencial da competência: receita, custos, despesas e distribuições.';
+  const subtitle = 'Quanto sobrou do faturamento depois de custos e despesas, no mês de competência.';
   financeLoading(title, subtitle, 'Carregando resultado gerencial');
   let result, review;
   try {
@@ -210,41 +305,46 @@ async function renderFinanceiro(token) {
     return financeError(title, subtitle, e, () => renderFinanceiro());
   }
   if (!APP.pageState.isCurrent(token)) return;  // resposta obsoleta: descarta em silêncio
-  const kpis = [
-    kpi('Receita', money(result.revenue_cents)),
-    kpi('CMV', money(result.cogs_cents)),
-    kpi('Lucro bruto', money(result.gross_profit_cents)),
-    kpi('Despesas operacionais', money(result.operating_expenses_cents)),
-    kpi('Pró-labore', money(result.owner_compensation_cents)),
-    kpi('Resultado operacional', money(result.operating_result_cents)),
-    kpi('Despesas financeiras', money(result.financial_expenses_cents)),
-    kpi('Resultado gerencial', money(result.managerial_result_cents), null, null,
-      result.managerial_result_cents == null ? '' : result.managerial_result_cents < 0 ? 'kpi-negative' : 'kpi-positive'),
-    kpi('Distribuição de lucros', money(result.profit_distribution_cents)),
-  ].join('');
-  const rows = result.accounts.map((line) => `
+  const period = financeCompetence();
+  const status = managementStatus(result);
+  const expensesHref = routeHash('despesas', period);
+  const rows = result.accounts.map((line) => {
+    // Spending above budget is bad news; earning above it is good news.
+    const spending = RESULT_EXPENSE_NATURES.includes(line.nature) || line.nature === 'cogs';
+    const variance = line.variance_cents;
+    const tone = !variance ? '' : (variance > 0) === spending ? ' var-bad' : ' var-good';
+    return `
     <tr>
       <td>${esc(line.name)}</td>
       <td class="num">${money(line.actual_cents)}</td>
       <td class="num">${line.budget_cents == null ? '—' : money(line.budget_cents)}</td>
-      <td class="num">${line.variance_cents == null ? '—' : money(line.variance_cents)}</td>
+      <td class="num${tone}">${variance == null ? '—' : money(variance)}</td>
       <td>${esc(FINANCE_SOURCE_LABELS[line.source] || line.source)}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(financeCompetence())}</span>
-    <div class="story-box mt-16" role="status"><span class="badge-warning">${esc(managementStatus(result).label)}</span>
-      ${esc(managementStatus(result).detail)}</div>
-    ${review ? reviewPanelHtml(review) : ''}
-    <hr class="divider">
-    <div class="kpi-grid kpi-grid-4">${kpis}</div>
-    ${breakEvenHtml(result)}
-    <h2 class="section-header">Contas — Realizado vs. Orçado</h2>
+    ${resultHeroHtml(result, period, status)}
+    ${hasNoExpenses(result) ? `<div class="result-warning" role="note">${icon('triangle-alert')}
+      <p><strong>Nenhuma despesa lançada em ${financePeriodLabel(period)}.</strong>
+        Sem aluguel, salários e contas do mês, o resultado gerencial fica igual ao lucro bruto.
+        <a href="${expensesHref}">Lançar despesas →</a></p></div>` : ''}
+    <div class="result-layout">
+      <div class="result-main">${dreHtml(result)}</div>
+      <aside class="result-side" aria-label="Ponto de equilíbrio e revisão do mês">
+        ${breakEvenHtml(result)}
+        ${review ? reviewPanelHtml(review) : ''}
+      </aside>
+    </div>
+    ${rows ? `<h2 class="section-header">Contas — Realizado vs. Orçado</h2>
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Conta</th><th class="num">Realizado</th><th class="num">Orçado</th><th class="num">Variação</th><th>Origem</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5">Nenhum lançamento nesta competência.</td></tr>'}</tbody>
-    </table></div>`;
+      <tbody>${rows}</tbody>
+    </table></div>` : `<p class="accounts-empty">Nenhuma conta com lançamento ou orçamento em ${financePeriodLabel(period)}.
+      <a href="${expensesHref}">Abrir Custos e despesas →</a></p>`}`;
+  // Bar lengths through the CSSOM: the CSP forbids inline style attributes.
+  document.querySelectorAll('#content [data-w]').forEach((el) => { el.style.width = `${el.dataset.w}%`; });
   const reviewForm = document.getElementById('period-review-form');
   if (reviewForm && typeof bindForm === 'function') {
     bindForm(reviewForm, (values) => buildReviewRequest(review, values), () => refreshKeepingScroll(() => renderFinanceiro()));
