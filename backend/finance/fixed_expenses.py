@@ -38,6 +38,9 @@ def _configured(conn, company: int, account_id: int, period: Optional[str] = Non
 
 
 def setup_template(company: int) -> list:
+    from .stone_guard import coverage
+
+    stone_months = coverage(company)["months"]
     rows = []
     for key, label in TEMPLATE:
         account = accounts.account_by_key(company, key)
@@ -46,6 +49,8 @@ def setup_template(company: int) -> list:
         rows.append({
             "system_key": key, "label": label, "account_id": account["id"],
             "sensitive": bool(account["sensitive"]), "configured": configured,
+            # The Stone report books the terminal fee by itself once imported.
+            "stone_automatic": key == "payment_terminal_rent" and bool(stone_months),
         })
     return rows
 

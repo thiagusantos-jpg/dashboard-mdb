@@ -227,3 +227,20 @@ test('the checklist offers to update the reserve balance when the reserve accoun
   assert.match(html, /data-source-action="reserve" data-account="12">Atualizar saldo da Reserva/);
   assert.doesNotMatch(context.reconciliationSourcesSection(src, [{id: '11', name: 'Conta Stone'}]), /Atualizar saldo da Reserva/);
 });
+
+test('the Stone import says what it booked by itself and the monthly fee line is cash only', () => {
+  const context = loadReconciliation();
+  const summary = context.stoneAutomaticSummary({fee_entries: 92, fee_cents: 319305, monthly_fees: 3, monthly_fee_cents: 27000});
+  assert.match(summary, /taxas de 92 dia\(s\) de vendas \(R\$319305\) e 3 mensalidade\(s\) Stone \(R\$27000\)/);
+  assert.match(summary, /Não lance essas taxas nem a mensalidade à mão/);
+  assert.equal(context.stoneAutomaticSummary({fee_entries: 0, monthly_fees: 0}), '');
+
+  assert.ok(context.isStoneChargeLine('LOJA LTDA - Mensalidade | Cobrança'));
+  assert.ok(!context.isStoneChargeLine('FORNECEDOR - Pagamento'));
+  const html = context.bankPreviewBody({count: 1, start: '2026-06-05', end: '2026-06-05', total_cents: -9000, preview_hash: 'h',
+    already_imported: 0, stone_charges: 1,
+    items: [{external_id: 'm', date: '2026-06-05', amount_cents: -9000, description: 'LOJA - Mensalidade | Cobrança',
+      candidate_cash_event_ids: [], decision: 'new', already_imported: false, internal_transfer: false, stone_charge: true}]}, {});
+  assert.match(html, /<strong>1<\/strong> mensalidade\(s\) Stone: só o dinheiro entra/);
+  assert.match(html, /Mensalidade Stone — despesa já lançada pelo relatório/);
+});

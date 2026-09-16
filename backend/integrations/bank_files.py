@@ -44,6 +44,16 @@ RESERVE_DECISION = "transfer:reserve"
 _RESERVE_LINE = re.compile(r"reserva\s+stone", re.IGNORECASE)
 
 
+# "LOJA - Mensalidade | Cobrança": the terminal fee, when Stone charges it
+# apart from a deposit. The expense itself comes from the receivables report
+# (backend/finance/receivables.py), so this line is cash only.
+_STONE_CHARGE_LINE = re.compile(r"mensalidade\s*\|\s*cobran", re.IGNORECASE)
+
+
+def is_stone_charge(description: str) -> bool:
+    return bool(_STONE_CHARGE_LINE.search(description or ""))
+
+
 def is_reserve_move(description: str) -> bool:
     return bool(_RESERVE_LINE.search(description or ""))
 
@@ -349,6 +359,7 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
                 "decision": "new",
                 "already_imported": True,
                 "internal_transfer": False,
+                "stone_charge": is_stone_charge(tx.description),
             })
             continue
         if is_reserve_move(tx.description):
@@ -361,6 +372,7 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
                 "decision": RESERVE_DECISION,
                 "already_imported": False,
                 "internal_transfer": True,
+                "stone_charge": False,
             })
             continue
         candidates = _candidate_cash_events(
@@ -382,6 +394,7 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
             "decision": decision,
             "already_imported": False,
             "internal_transfer": False,
+            "stone_charge": is_stone_charge(tx.description),
         })
     return items
 
@@ -428,6 +441,7 @@ def preview_bank_import(company: int, cash_account_id: int, filename: str, conte
         "total_cents": sum(t.amount_cents for t in transactions),
         "already_imported": sum(1 for item in items if item["already_imported"]),
         "internal_transfers": sum(1 for item in items if item["internal_transfer"]),
+        "stone_charges": sum(1 for item in items if item["stone_charge"] and not item["already_imported"]),
         "items": items,
     }
 

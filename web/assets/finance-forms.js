@@ -229,6 +229,7 @@ function buildExpenseRequest(entry, values) {
   if (!isBlank(values.counterparty_id)) common.counterparty_id = String(values.counterparty_id);
   if (!isBlank(values.payment_method)) common.payment_method = String(values.payment_method);
   if (!isBlank(values.payment_code)) common.payment_code = String(values.payment_code).trim();
+  if (values.confirm_not_stone_duplicate === true) common.confirm_not_stone_duplicate = true;
   const base = financeBasePath();
 
   if (values.mode === 'recurring') {
@@ -435,13 +436,20 @@ function formActions(primaryLabel, extra) {
     </div>`;
 }
 
+/* A form can hold the same field in two mode sections (the expense form's
+ * "competence" in Única and in Parcelada); the hidden one is disabled. An
+ * enabled field always wins, whatever the order; a field that only exists
+ * disabled (a locked edit) is still reported. */
 function readFormValues(form) {
   const values = {};
+  const fromEnabled = new Set();
   Array.from(form.elements).forEach((el) => {
     if (!el.name) return;
+    if (el.disabled && fromEnabled.has(el.name)) return;
     if (el.type === 'radio') { if (el.checked) values[el.name] = el.value; return; }
-    if (el.type === 'checkbox') { values[el.name] = el.checked; return; }
-    values[el.name] = el.value;
+    if (el.type === 'checkbox') values[el.name] = el.checked;
+    else values[el.name] = el.value;
+    if (!el.disabled) fromEnabled.add(el.name);
   });
   return values;
 }
@@ -469,6 +477,10 @@ function formUiFor(form) {
           first = first || el;
         }
       });
+      // Reveal the Stone warning first, so focus can land on its checkbox.
+      if ((fields || []).includes('confirm_not_stone_duplicate') && typeof CustomEvent === 'function') {
+        form.dispatchEvent(new CustomEvent('stone-duplicate', {detail: message}));
+      }
       if (first && typeof first.focus === 'function') first.focus();
     },
   };
@@ -602,6 +614,8 @@ async function financeLookups(needs) {
     counterparties: () => api(`${base}/counterparties`),
     cashAccounts: () => api(`${base}/cash-accounts`),
     cashEvents: () => api(`${base}/cash-events`),
+    // Optional: without it the server still refuses a duplicate and the form shows why.
+    stoneCoverage: () => api(`${base}/stone-coverage`).catch(() => null),
   };
   const keys = needs.filter((k) => tasks[k]);
   const results = await Promise.all(keys.map((k) => tasks[k]()));
@@ -623,7 +637,7 @@ async function openExpenseForm(entry, ctx) {
   const drawer = openDrawer({title: entry ? 'Editar despesa' : 'Nova despesa', body: '<div class="skeleton-block" aria-label="Carregando formulário"></div>', trigger: ctx.trigger});
   let lookups;
   try {
-    lookups = ctx.accounts && ctx.counterparties ? ctx : await financeLookups(['accounts', 'counterparties']);
+    lookups = ctx.accounts && ctx.counterparties ? ctx : await financeLookups(['accounts', 'counterparties', 'stoneCoverage']);
   } catch (e) {
     return drawerLoadError(drawer, e, () => { drawer.close(); openExpenseForm(entry, ctx); });
   }
@@ -659,6 +673,11 @@ async function openExpenseForm(entry, ctx) {
       ${modeSwitch}
       ${formField('description', 'Descrição', withLock(textInput(v.description, 240), 'description'))}
       ${formField('account_id', 'Categoria da despesa', withLock(selectControl(accountOptions, v.account_id, 'Escolha…'), 'account_id'))}
+      ${entry ? '' : `<div class="stone-warning" data-stone-warning hidden role="status">
+        <p data-stone-warning-text></p>
+        <label class="checkbox-row"><input type="checkbox" name="confirm_not_stone_duplicate">
+          É outra cobrança (outra maquininha ou serviço), não a da Stone já importada.</label>
+      </div>`}
       ${formField('amount', '<span data-amount-label>Valor (R$)</span>', withLock(moneyInput(entry ? centsToMoneyInput(v.amount_cents) : ''), 'amount_cents'), 'Use vírgula para centavos: 1.234,56')}
       <div data-mode-section="single">
         <div class="form-grid">
@@ -722,6 +741,7 @@ async function openExpenseForm(entry, ctx) {
   };
   form.addEventListener('change', (ev) => { if (ev.target.name === 'mode') syncMode(); });
   syncMode();
+  if (!entry) wireStoneWarning(form, lookups.stoneCoverage);
 
   const previewButton = form.querySelector('[data-schedule-preview]');
   if (previewButton) {
@@ -770,6 +790,64 @@ async function openExpenseForm(entry, ctx) {
     if (ctx.onSaved) ctx.onSaved(result);
     if (intent === 'again') openExpenseForm(null, Object.assign({}, ctx, lookups, {trigger: ctx.trigger}));
   });
+}
+
+var STONE_WHAT = {
+  acquiring_fees: ['as taxas da maquininha', 'entram'], receivables_advance: ['a antecipação de recebíveis', 'entra'],
+  payment_terminal_rent: ['a mensalidade da Stone', 'entra'],
+};
+
+/* The months a new expense would land in, per mode; null = open-ended (recurring). */
+function expenseMonths(values) {
+  if (values.mode === 'recurring') return null;
+  if (values.mode === 'installments' && values.competence_mode === 'distributed') {
+    const first = String(values.first_due || '').slice(0, 7);
+    const count = parseInt(values.count, 10);
+    if (!first || !(count >= 1)) return [];
+    const [y, m] = first.split('-').map(Number);
+    return Array.from({length: count}, (_, i) => {
+      const d = new Date(Date.UTC(y, m - 1 + i, 1));
+      return d.toISOString().slice(0, 7);
+    });
+  }
+  return values.competence ? [values.competence] : [];
+}
+
+/* Same rule as the server (backend/finance/stone_guard.py): text for the warning, or ''. */
+function stoneDuplicateWarning(coverage, values) {
+  if (!coverage || !coverage.months || !coverage.months.length) return '';
+  const key = (coverage.accounts || {})[String(values.account_id || '')];
+  if (!key) return '';
+  const months = expenseMonths(values);
+  const [what, verb] = STONE_WHAT[key];
+  if (months === null) {
+    return `${what[0].toUpperCase()}${what.slice(1)} já ${verb} automaticamente pelo relatório de recebíveis da Stone. Uma despesa recorrente nesta categoria vai contar em dobro.`;
+  }
+  const hit = months.filter((m) => coverage.months.includes(m));
+  if (!hit.length) return '';
+  return `Em ${hit.map((m) => financePeriodLabel(m)).join(', ')}, ${what} já ${verb} automaticamente pelo relatório de recebíveis da Stone. Lançar aqui vai contar em dobro.`;
+}
+
+function wireStoneWarning(form, coverage) {
+  const box = form.querySelector('[data-stone-warning]');
+  if (!box) return;
+  const text = box.querySelector('[data-stone-warning-text]');
+  const refresh = () => {
+    const message = stoneDuplicateWarning(coverage, readFormValues(form));
+    // A server refusal (coverage not loaded) keeps the box open with its own message.
+    if (!message && box.dataset.fromServer) return;
+    box.hidden = !message;
+    text.textContent = message;
+    if (!message) box.querySelector('input').checked = false;
+  };
+  form.addEventListener('input', refresh);
+  form.addEventListener('change', (ev) => { if (ev.target.name !== 'confirm_not_stone_duplicate') refresh(); });
+  form.addEventListener('stone-duplicate', (ev) => {
+    box.dataset.fromServer = '1';
+    text.textContent = ev.detail;
+    box.hidden = false;
+  });
+  refresh();
 }
 
 /* "+ Novo favorecido" inside the expense form: creates the counterparty,

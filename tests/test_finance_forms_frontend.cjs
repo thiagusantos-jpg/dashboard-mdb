@@ -273,3 +273,46 @@ test('finance pages use the shared forms, list first, and never alert()', () => 
   assert.match(sources, /openLoanForm/);
   assert.match(sources, /class="data-table"/);
 });
+
+/* Stone: taxas e mensalidade já vêm do relatório; lançar à mão pede confirmação. */
+const COVERAGE = {accounts: {'70': 'acquiring_fees', '71': 'payment_terminal_rent'}, months: ['2026-08', '2026-09']};
+
+test('the expense form warns about a Stone duplicate only in covered months and categories', () => {
+  const {context} = load();
+  context.financePeriodLabel = (p) => `mês ${p}`;
+  const warn = (values) => context.stoneDuplicateWarning(COVERAGE, Object.assign({mode: 'single'}, values));
+  assert.match(warn({account_id: '70', competence: '2026-09'}), /Em mês 2026-09, as taxas da maquininha já entram automaticamente/);
+  assert.equal(warn({account_id: '70', competence: '2026-10'}), '');
+  assert.equal(warn({account_id: '99', competence: '2026-09'}), '');
+  assert.match(warn({account_id: '71', mode: 'recurring'}), /A mensalidade da Stone já entra .* recorrente/);
+  assert.match(warn({account_id: '70', mode: 'installments', competence_mode: 'distributed', first_due: '2026-07-10', count: '3'}),
+    /Em mês 2026-08, mês 2026-09, as taxas/);
+  assert.equal(context.stoneDuplicateWarning(null, {account_id: '70', competence: '2026-09', mode: 'single'}), '');
+  assert.equal(context.stoneDuplicateWarning({accounts: COVERAGE.accounts, months: []}, {account_id: '70', competence: '2026-09', mode: 'single'}), '');
+});
+
+test('confirming "é outra cobrança" is sent with the expense, in every mode', () => {
+  const {context} = load();
+  const base = {description: 'Maquininha 2', account_id: '71', amount: '90,00', confirm_not_stone_duplicate: true};
+  const single = context.buildExpenseRequest(null, Object.assign({mode: 'single', competence: '2026-09', due_date: '2026-09-05'}, base));
+  assert.equal(single.body.confirm_not_stone_duplicate, true);
+  const recurring = context.buildExpenseRequest(null, Object.assign({mode: 'recurring', start_competence: '2026-10', due_day: '5'}, base));
+  assert.equal(recurring.body.confirm_not_stone_duplicate, true);
+  const plain = context.buildExpenseRequest(null, Object.assign({}, base, {mode: 'single', competence: '2026-09', due_date: '2026-09-05', confirm_not_stone_duplicate: false}));
+  assert.equal('confirm_not_stone_duplicate' in plain.body, false);
+});
+
+test('an enabled field wins over a disabled one with the same name (competence in Única vs Parcelada)', () => {
+  const {context} = load();
+  const field = (name, value, disabled) => ({name, value, disabled, type: 'text'});
+  const form = {elements: [
+    field('competence', '2026-10', false),   // Única, the one the partner changed
+    field('competence', '2026-08', true),    // Parcelada, hidden and disabled
+    field('description', 'Conta', false),
+  ]};
+  assert.equal(context.readFormValues(form).competence, '2026-10');
+  const reversed = {elements: [field('competence', '2026-08', true), field('competence', '2026-10', false)]};
+  assert.equal(context.readFormValues(reversed).competence, '2026-10');
+  // A form whose only copy of a field is locked still reports it.
+  assert.equal(context.readFormValues({elements: [field('amount', '10,00', true)]}).amount, '10,00');
+});
