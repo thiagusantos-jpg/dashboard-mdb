@@ -947,6 +947,8 @@ function cashOutlook(projection) {
 
 function outlookHtml(outlook) {
   if (!outlook) return '';
+  // Math.abs, não -x: JS tem zero negativo, e money(-0) imprime "-R$ 0,00" num período sem saídas.
+  const outflowCents = Math.abs(outlook.outgoing_cents);
   const figure = (label, value, extra) =>
     `<div class="outlook-figure${extra ? ` ${extra}` : ''}"><span>${label}</span><strong>${value}</strong></div>`;
   const warning = outlook.negative
@@ -959,7 +961,7 @@ function outlookHtml(outlook) {
         <span>${outlook.hasStone ? 'Inclui o que a Stone ainda vai depositar' : 'Sem recebíveis de cartão no período'}</span></div>
       <div class="outlook-grid">
         ${figure('Entra', money(outlook.incoming_cents))}
-        ${figure('Sai', money(-outlook.outgoing_cents))}
+        ${figure('Sai', money(outflowCents))}
         ${figure('Saldo no fim', money(outlook.final_cents), outlook.final_cents < 0 ? 'bad' : '')}
       </div>
       ${warning}

@@ -354,6 +354,8 @@ async function renderFluxoCaixa(token) {
     </tr>`).join('');
 
   const realized = cashflowRealizedTotals((historyData && historyData.days) || []);
+  // Math.abs, não -x: JS tem zero negativo, e money(-0) imprime "-R$ 0,00" num período sem saídas.
+  const outflowCents = Math.abs(realized.outgoing_cents);
   const groups = movementGroups(forecastData.days, tipo);
   const emptyMovements = `<div class="empty-state">Nenhuma movimentação${tipo !== 'todas' ? ' deste tipo' : ''} prevista.</div>`;
 
@@ -380,7 +382,7 @@ async function renderFluxoCaixa(token) {
     <div class="kpi-grid kpi-grid-4">
       ${kpi('Saldo consolidado', money(balance.balance_cents))}
       ${kpi(`Entradas realizadas (${CASHFLOW_HISTORY_DAYS} dias)`, money(realized.incoming_cents))}
-      ${kpi(`Saídas realizadas (${CASHFLOW_HISTORY_DAYS} dias)`, money(-realized.outgoing_cents))}
+      ${kpi(`Saídas realizadas (${CASHFLOW_HISTORY_DAYS} dias)`, money(outflowCents))}
       ${kpi('Contas de caixa', accounts.length)}
     </div>
     <h2 class="section-header">Saldo de caixa</h2>

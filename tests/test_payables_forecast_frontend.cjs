@@ -15,7 +15,13 @@ function loadFinance() {
     MONTHS: ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'],
     // dateBR não entra aqui: finance.js declara a sua própria (dd/mm/aaaa).
     esc: (s) => String(s == null ? '' : s), icon: () => '', dt: (s) => s,
-    money: (c) => (c == null ? 'Indisponível' : `R$ ${(c / 100).toFixed(2)}`),
+    // O sinal segue o Intl da produção (app.js), não o toFixed: Intl.format(-0) devolve
+    // "-0,00" e toFixed(-0) devolve "0.00", diferença que já escondeu um "Sai -R$ 0,00".
+    money: (c) => {
+      if (c == null) return 'Indisponível';
+      const sign = c < 0 || Object.is(c, -0) ? '-' : '';
+      return `${sign}R$ ${Math.abs(c / 100).toFixed(2)}`;
+    },
   });
   vm.runInContext(read('web/assets/finance.js'), context);
   return context;
@@ -65,6 +71,18 @@ test('the panel says on which day the cash runs out, not only the month-end bala
   const html = f.outlookHtml(broke);
   assert.match(html, /fica negativo em 20\/09\/2026/);
   assert.doesNotMatch(html, /style="/);
+});
+
+/* Visto em produção: um período sem nenhuma saída imprimia "Sai -R$ 0,00", porque JS tem
+ * zero negativo e o painel formatava -outgoing_cents. */
+test('a window with nothing going out reads zero, never minus zero', () => {
+  const f = loadFinance();
+  const html = f.outlookHtml(f.cashOutlook({
+    days: [{date: '2026-09-16', items: [{amount_cents: 1_000, source: 'stone_receivables'}], balance_cents: 1_000}],
+    lowest: {date: '2026-09-16', balance_cents: 1_000},
+  }));
+  assert.match(html, /Sai<\/span><strong>R\$ 0\.00<\/strong>/);
+  assert.doesNotMatch(html, /-R\$ 0\.00/);
 });
 
 test('without Stone in the window the panel says so instead of implying zero', () => {
