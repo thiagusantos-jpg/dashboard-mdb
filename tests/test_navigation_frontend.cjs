@@ -101,7 +101,7 @@ test('the menu shows a textual module switcher and only real links', () => {
     ['resumo', 'Resumo executivo'], ['precos', 'Preços e margens'], ['mapa', 'Mapa de produtos'],
     ['diagnostico', 'Desempenho de vendas'], ['sazonalidade', 'Sazonalidade e tendências'],
     ['visao', 'Projeções de vendas'], ['estoque', 'Produtos e estoque'],
-    ['financeiro', 'Resultado gerencial'], ['contas-pagar', 'Contas a pagar'], ['despesas', 'Custos e despesas'],
+    ['financeiro', 'Resultado gerencial'], ['contas-pagar', 'Contas a pagar'], ['despesas', 'Despesas do mês'],
     ['fluxo-caixa', 'Fluxo de caixa'], ['conciliacao', 'Conciliação bancária'],
   ]) {
     assert.match(html, new RegExp(`data-page="${page}"[^>]*>[\\s\\S]{0,1200}?${label}</a>`), `${page} → ${label}`);

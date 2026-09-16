@@ -297,7 +297,7 @@ function fixedSetupRowsHtml(rows, period) {
     </div>
     <p class="form-error" data-form-error role="alert"></p>
     <div class="btn-row"><button type="submit" class="btn-primary btn-wide">Salvar despesas fixas</button>
-      <a class="btn-link" href="${routeHash('despesas', period)}">Lançar outra despesa em Custos e despesas →</a></div>`;
+      <a class="btn-link" href="${routeHash('despesas', period)}">Lançar outra despesa →</a></div>`;
 }
 
 async function loadFixedSetup(period) {
@@ -309,7 +309,7 @@ async function loadFixedSetup(period) {
   } catch (e) {
     if (form.isConnected) {
       form.innerHTML = `<p class="muted">Não foi possível carregar as despesas típicas: ${esc(e.message)}.
-        <a href="${routeHash('despesas', period)}">Abrir Custos e despesas →</a></p>`;
+        <a href="${routeHash('despesas', period)}">Abrir Despesas do mês →</a></p>`;
     }
     return;
   }
@@ -455,7 +455,7 @@ async function renderFinanceiro(token) {
     ${hasNoExpenses(result) && forecasts ? `<div class="result-warning" role="note">${icon('triangle-alert')}
       <p><strong>${forecasts} ${forecasts === 1 ? 'despesa prevista aguarda' : 'despesas previstas aguardam'} confirmação em ${financePeriodLabel(period)}.</strong>
         Enquanto não forem confirmadas, o resultado gerencial fica igual ao lucro bruto.
-        <a href="${expensesHref}">Confirmar em Custos e despesas →</a></p></div>` : ''}
+        <a href="${expensesHref}">Confirmar em Despesas do mês →</a></p></div>` : ''}
     ${costNote ? `<div class="result-warning" role="note">${icon('triangle-alert')}
       <p>${esc(costNote)} <a href="${routeHash('estoque', period, new URLSearchParams({filtro: 'custo-zero'}))}">Ver produtos com custo zero →</a></p></div>` : ''}
     <div class="result-layout">
@@ -470,7 +470,7 @@ async function renderFinanceiro(token) {
       <thead><tr><th>Conta</th><th class="num">Realizado</th><th class="num">Orçado</th><th class="num">Variação</th><th>Origem</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>` : `<p class="accounts-empty">Nenhuma conta com lançamento ou orçamento em ${financePeriodLabel(period)}.
-      <a href="${expensesHref}">Abrir Custos e despesas →</a></p>`}`;
+      <a href="${expensesHref}">Abrir Despesas do mês →</a></p>`}`;
   // Bar lengths through the CSSOM: the CSP forbids inline style attributes.
   document.querySelectorAll('#content [data-w]').forEach((el) => { el.style.width = `${el.dataset.w}%`; });
   if (hasNoExpenses(result) && !forecasts) loadFixedSetup(period);
@@ -502,18 +502,125 @@ function expenseRowActions(entry) {
        aria-label="${label}: ${esc(entry.description)}">${label}</button>`).join('');
 }
 
+/* Uma despesa solta não responde nada; a categoria responde. Agrupa o que está visível e
+ * ordena pelo maior gasto, que é a primeira pergunta do sócio: para onde foi o dinheiro. */
+function expenseGroups(entries, accountsById) {
+  const groups = new Map();
+  entries.forEach((entry) => {
+    const key = String(entry.account_id || 'sem-categoria');
+    if (!groups.has(key)) {
+      const account = accountsById[String(entry.account_id)] || {};
+      groups.set(key, {key, name: account.name || 'Sem categoria', cents: 0, items: []});
+    }
+    const group = groups.get(key);
+    group.items.push(entry);
+    // Previsto e cancelado entram na lista, mas não no total: não são dinheiro gasto.
+    if (!['cancelled', 'reversed', 'forecast'].includes(entry.status)) group.cents += entry.amount_cents;
+  });
+  const list = Array.from(groups.values());
+  const total = list.reduce((sum, group) => sum + group.cents, 0);
+  list.forEach((group) => { group.share = total ? Math.round(group.cents * 1000 / total) / 10 : 0; });
+  return list.sort((a, b) => b.cents - a.cents || a.name.localeCompare(b.name, 'pt-BR'));
+}
+
+function expenseTotals(entries) {
+  const spent = entries.filter((entry) => !['forecast', 'cancelled', 'reversed'].includes(entry.status));
+  const forecast = entries.filter((entry) => entry.status === 'forecast');
+  return {
+    realized_cents: spent.reduce((sum, entry) => sum + entry.amount_cents, 0),
+    forecast_cents: forecast.reduce((sum, entry) => sum + entry.amount_cents, 0),
+    forecast_count: forecast.length,
+    count: entries.length,
+  };
+}
+
+/* R$ 8.000 é muito ou pouco? Sozinho o número não diz; o mês anterior diz. Em despesa,
+ * subir é ruim — por isso a comparação carrega o tom, e não só o sinal. */
+function expenseDelta(currentCents, previousCents) {
+  if (previousCents == null) return null;
+  if (!previousCents) return {tone: 'none', text: 'sem despesas no mês anterior'};
+  const diff = currentCents - previousCents;
+  if (!diff) return {tone: 'none', text: 'igual ao mês anterior'};
+  const pct = Math.round(Math.abs(diff) * 1000 / previousCents) / 10;
+  return {
+    tone: diff > 0 ? 'bad' : 'good',
+    text: `${diff > 0 ? '+' : '−'}${String(pct).replace('.', ',')}% vs mês anterior (${money(previousCents)})`,
+  };
+}
+
+function expensesCardsHtml(totals, delta, groups) {
+  const top = groups[0];
+  const card = (label, value, sub, tone) => `<div class="action-stat${tone ? ` ${tone}` : ''}">
+      <span class="action-stat-value">${value}</span><span class="action-stat-label">${label}</span>
+      <span class="action-stat-sub">${sub}</span></div>`;
+  return `<div class="actions-stats payables-cards">
+    ${card('Total na competência', money(totals.realized_cents),
+      delta ? delta.text : 'sem mês anterior para comparar', delta && delta.tone === 'bad' ? 'alert' : '')}
+    ${card('Previsto a confirmar', money(totals.forecast_cents),
+      totals.forecast_count ? `${totals.forecast_count} ${totals.forecast_count === 1 ? 'lançamento' : 'lançamentos'}` : 'nada pendente')}
+    ${top && top.cents
+      ? card('Maior categoria', esc(top.name), `${money(top.cents)} · ${String(top.share).replace('.', ',')}% do total`)
+      : card('Maior categoria', '—', 'nenhuma despesa na competência')}
+  </div>`;
+}
+
+/* O vencimento aparece para conferir o que foi digitado, sem tom de urgência: cobrar
+ * atraso é trabalho de Contas a pagar, e duas telas alarmando a mesma conta confundem. */
+function expenseRowHtml(entry, accountsById) {
+  const parcel = entry.installment_count ? ` · parcela ${entry.installment_number}/${entry.installment_count}` : '';
+  return `
+    <tr>
+      <td>${esc(entry.description)}<div class="muted">${esc((accountsById[String(entry.account_id)] || {}).name || '—')}${parcel}</div></td>
+      <td class="num">${money(entry.amount_cents)}</td>
+      <td>${dateBR(entry.due_date)}</td>
+      <td>${statusBadge(entry.status)}</td>
+      <td><div class="row-actions">${expenseRowActions(entry)}</div></td>
+    </tr>`;
+}
+
+/* A ponte entre as duas telas, dita em voz alta em vez de adivinhada: aqui se vê quanto o
+ * mês custou; o que ainda precisa sair do caixa se paga na outra. */
+function unpaidNotice(entries) {
+  const open = (entries || []).filter((entry) => ['open', 'overdue', 'partially_paid'].includes(entry.status));
+  if (!open.length) return null;
+  return {count: open.length, cents: open.reduce((sum, entry) => sum + entry.amount_cents, 0)};
+}
+
+function unpaidNoticeHtml(notice) {
+  if (!notice) return '';
+  const lead = notice.count === 1
+    ? 'Uma destas despesas ainda não foi paga'
+    : `${notice.count} destas despesas ainda não foram pagas`;
+  return `<p class="payables-coverage none" role="status">${icon('lightbulb')}
+      <span>${lead} (${money(notice.cents)}). Vencimento e pagamento ficam em Contas a pagar.</span>
+      <a href="${routeHash('contas-pagar')}">Abrir Contas a pagar →</a></p>`;
+}
+
+function expenseGroupsHtml(groups, accountsById) {
+  return `<div class="table-wrap"><table class="data-table payables-table">
+      <thead><tr><th>Descrição</th><th class="num">Valor</th><th>Vencimento</th><th>Status</th>
+        <th><span class="visually-hidden">Ações</span></th></tr></thead>
+      ${groups.map((group) => `<tbody class="payables-group">
+        <tr class="payables-group-row"><th colspan="5" scope="rowgroup">${esc(group.name)}
+          <span>${group.items.length} ${group.items.length === 1 ? 'lançamento' : 'lançamentos'} · ${money(group.cents)}${group.cents ? ` · ${String(group.share).replace('.', ',')}% do total` : ''}</span></th></tr>
+        ${group.items.map((entry) => expenseRowHtml(entry, accountsById)).join('')}</tbody>`).join('')}
+    </table></div>`;
+}
+
 async function renderDespesas(token) {
   token = token || beginPage();
-  const title = `${icon('dollar-sign', {class: 'title-icon'})}Custos e despesas`;
-  const subtitle = 'Lançamentos de despesas por competência.';
+  const title = `${icon('dollar-sign', {class: 'title-icon'})}Despesas do mês`;
+  const subtitle = `Para onde foi o dinheiro em ${financePeriodLabel(financeCompetence())}.`;
   financeLoading(title, subtitle, 'Carregando despesas');
   const base = `/api/companies/${APP.company}/finance`;
-  let accounts, counterparties, entries;
+  let accounts, counterparties, entries, previousEntries = null;
   try {
-    [accounts, counterparties, entries] = await Promise.all([
+    [accounts, counterparties, entries, previousEntries] = await Promise.all([
       api(`${base}/accounts`),
       api(`${base}/counterparties`),
       api(`${base}/entries?competence=${financeCompetence()}`),
+      // Só comparação: se falhar, a página perde a linha "vs mês anterior", nunca a lista.
+      api(`${base}/entries?competence=${monthShift(financeCompetence(), -1)}`).catch(() => null),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -521,25 +628,22 @@ async function renderDespesas(token) {
   }
   if (!APP.pageState.isCurrent(token)) return;
 
-  const filters = financeFilters('despesas', {status: 'active'});
+  const filters = financeFilters('despesas', {status: 'active', q: ''});
   const accountsById = Object.fromEntries(accounts.map((a) => [String(a.id), a]));
-  const expenseEntries = entries.filter((e) => {
-    const account = accountsById[String(e.account_id)];
+  const isExpense = (entry) => {
+    const account = accountsById[String(entry.account_id)];
     return !account || EXPENSE_NATURES.includes(account.nature);
-  });
-  const visible = expenseEntries.filter((DESPESAS_FILTERS[filters.status] || DESPESAS_FILTERS.active).match);
-  const realized = expenseEntries.filter((e) => !['forecast', 'cancelled', 'reversed'].includes(e.status))
-    .reduce((sum, e) => sum + e.amount_cents, 0);
-  const forecast = expenseEntries.filter((e) => e.status === 'forecast').reduce((sum, e) => sum + e.amount_cents, 0);
+  };
+  const expenseEntries = entries.filter(isExpense);
+  const term = String(filters.q || '').trim().toLowerCase();
+  const visible = expenseEntries
+    .filter((DESPESAS_FILTERS[filters.status] || DESPESAS_FILTERS.active).match)
+    .filter((entry) => !term
+      || `${entry.description} ${(accountsById[String(entry.account_id)] || {}).name || ''}`.toLowerCase().includes(term));
 
-  const rows = visible.map((e) => `
-    <tr>
-      <td>${esc(e.description)}<div class="muted">${esc((accountsById[String(e.account_id)] || {}).name || '—')}${e.installment_count ? ` · parcela ${e.installment_number}/${e.installment_count}` : ''}</div></td>
-      <td class="num">${money(e.amount_cents)}</td>
-      <td>${dateBR(e.due_date)}</td>
-      <td>${statusBadge(e.status)}</td>
-      <td><div class="row-actions">${expenseRowActions(e)}</div></td>
-    </tr>`).join('');
+  const totals = expenseTotals(expenseEntries);
+  const previousTotal = previousEntries ? expenseTotals(previousEntries.filter(isExpense)).realized_cents : null;
+  const delta = expenseDelta(totals.realized_cents, previousTotal);
   const filterOptions = Object.entries(DESPESAS_FILTERS)
     .map(([value, f]) => `<option value="${value}"${value === filters.status ? ' selected' : ''}>${f.label}</option>`).join('');
   const emptyMessage = expenseEntries.length
@@ -550,23 +654,19 @@ async function renderDespesas(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    <span class="periodo-badge">${icon('calendar')} Competência: ${financePeriodLabel(financeCompetence())}</span>
-    <div class="kpi-grid kpi-grid-3 mt-16">
-      ${kpi('Realizado na competência', money(realized))}
-      ${kpi('Previsto a confirmar', money(forecast))}
-      ${kpi('Lançamentos', expenseEntries.length)}
-    </div>
+    ${expensesCardsHtml(totals, delta, expenseGroups(expenseEntries, accountsById))}
+    ${unpaidNoticeHtml(unpaidNotice(expenseEntries))}
     <div class="page-toolbar">
       <div class="filters">
+        <div><label class="field-label" for="despesas-q">Buscar</label>
+          <input id="despesas-q" class="login-input" type="search" autocomplete="off"
+            placeholder="Descrição ou categoria" value="${esc(filters.q || '')}"></div>
         <div><label class="field-label" for="despesas-status">Mostrar</label>
           <select id="despesas-status" class="login-input">${filterOptions}</select></div>
       </div>
       <button type="button" class="btn-primary btn-wide" data-expense-new>Nova despesa</button>
     </div>
-    ${visible.length ? `<div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Descrição</th><th class="num">Valor</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>` : emptyMessage}`;
+    ${visible.length ? expenseGroupsHtml(expenseGroups(visible, accountsById), accountsById) : emptyMessage}`;
 
   const refresh = () => refreshKeepingScroll(() => renderDespesas());
   const lookups = {accounts, counterparties};
@@ -574,6 +674,20 @@ async function renderDespesas(token) {
   document.getElementById('despesas-status').addEventListener('change', (ev) => {
     filters.status = ev.target.value;
     refresh();
+  });
+  const search = document.getElementById('despesas-q');
+  if (filters.focusSearch) {
+    search.focus();
+    search.setSelectionRange(search.value.length, search.value.length);
+    filters.focusSearch = false;
+  }
+  let searchTimer;
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      Object.assign(filters, {q: search.value.trim(), focusSearch: true});
+      refresh();
+    }, 400);
   });
   content.querySelectorAll('[data-expense-new]').forEach((button) => button.addEventListener('click', () =>
     openExpenseForm(null, Object.assign({trigger: button, onSaved: refresh}, lookups))));
@@ -886,14 +1000,14 @@ function forecastsHtml(summary, today) {
           <button type="button" class="btn-secondary btn-compact" data-forecast-confirm="${esc(forecast.id)}" aria-label="Confirmar: ${esc(forecast.description)}">Confirmar</button></li>`).join('')}
       </ul>
       <p class="form-error" data-forecast-error role="alert"></p>
-      <p class="forecast-foot">Valor diferente este mês? <a href="${routeHash('despesas', today.slice(0, 7))}">Ajuste em Custos e despesas →</a></p>
+      <p class="forecast-foot">Valor diferente este mês? <a href="${routeHash('despesas', today.slice(0, 7))}">Ajuste em Despesas do mês →</a></p>
     </section>`;
 }
 
 async function renderContasPagar(token) {
   token = token || beginPage();
   const title = `${icon('calendar', {class: 'title-icon'})}Contas a pagar`;
-  const subtitle = 'O que precisa ser pago, do mais urgente ao mais distante.';
+  const subtitle = 'O que precisa ser pago, do mais urgente ao mais distante — de qualquer competência.';
   const routeKind = APP.routeParams && APP.routeParams.get('tipo') === 'emprestimo' ? 'loan_installment' : '';
   const filters = financeFilters('contas-pagar', {quick: 'todas', kind: routeKind, status: '', q: '', due_from: '', due_to: '',
     view: 'lista', month: localTodayISO().slice(0, 7)});
@@ -979,7 +1093,7 @@ async function renderContasPagar(token) {
     if (!items.length) {
       list.innerHTML = hasFilter
         ? '<div class="empty-state">Nenhuma conta com estes filtros.</div>'
-        : '<div class="empty-state">Nenhuma conta em aberto. Novas despesas entram aqui a partir de Custos e despesas.</div>';
+        : '<div class="empty-state">Nenhuma conta em aberto. Novas despesas entram aqui quando você as lança em Despesas do mês.</div>';
       return;
     }
     list.innerHTML = `
