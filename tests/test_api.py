@@ -213,3 +213,53 @@ def test_dashboard_alerts_carry_the_count_behind_each_message():
 
     unsynced = api.dashboard_alerts([], False, 0)
     assert [(a['type'], a['count']) for a in unsynced] == [('integracao', None)]
+
+
+def _sales_payload(period, start, end, days, revenue=100.0):
+    """A stored sales month whose window is `start`..`end` but whose receipts stop at
+    the last day in `days` — exactly what Mobne returns when a day has not been
+    exported yet (Set/2026: asked to 15/09, answered to 13/09)."""
+    receipts = [{'id': int(d.replace('-', '')), 'reference_id': 0, 'date': d, 'status': 'V',
+                 'species': 'CF', 'revenue': int(revenue * 100), 'aliases': [int(d.replace('-', ''))],
+                 'items': [{'id': 1, 'product_id': 501, 'quantity': '1', 'revenue': int(revenue * 100),
+                            'cost': 3000, 'unit_cost': '30', 'status': 'V'}]} for d in days]
+    return {'receipts': receipts, 'analysis': [], 'raw_count': len(receipts), 'start': start, 'end': end,
+            'reconciliation': {'receipt_revenue': sum(r['revenue'] for r in receipts), 'analysis_revenue': 0,
+                               'difference': 0, 'missing_documents': 0, 'additional_documents': 0,
+                               'additional_revenue': 0, 'exact_match': True, 'matched': True}}
+
+
+def test_dashboard_reports_the_last_day_mobne_actually_covered(isolated_db):
+    """The window asked of Mobne is not the window Mobne answered. Reporting the
+    requested end as coverage made Set/2026 read '1 a 15/09' over 13 days of data
+    (R$ 4.515,82 missing) and compared those 13 days against 15 days of August."""
+    db.initialize()
+    db.save_companies([{'EmpresaId': COMPANY, 'RazaoSocial': 'Loja Teste'}])
+    db.put_dataset(COMPANY, 'sales', '2026-01',
+                   _sales_payload('2026-01', '2026-01-01', '2026-01-31',
+                                  [f'2026-01-{d:02d}' for d in range(1, 16)]), documents=15)
+    db.put_dataset(COMPANY, 'sales', '2026-02',
+                   _sales_payload('2026-02', '2026-02-01', '2026-02-15',
+                                  [f'2026-02-{d:02d}' for d in range(1, 14)]), documents=13)
+
+    d = api.dashboard(COMPANY, '2026-02')
+
+    assert d['end'] == '2026-02-13'          # coverage, not the requested 15/02
+    assert d['requested_end'] == '2026-02-15'
+    # 13 days against 13 days: comparing them with January's 15 days invented a -13,3% fall.
+    assert d['comparison_mom']['totals']['receipts'] == 13
+    assert d['comparison_mom']['revenue_change'] == 0.0
+
+
+def test_dashboard_flags_sales_data_that_stopped_before_yesterday(isolated_db):
+    """Mobne silently behind is the failure the partner sees as 'o faturamento não bate'."""
+    db.initialize()
+    db.save_companies([{'EmpresaId': COMPANY, 'RazaoSocial': 'Loja Teste'}])
+    db.put_dataset(COMPANY, 'sales', '2026-02',
+                   _sales_payload('2026-02', '2026-02-01', '2026-02-15',
+                                  [f'2026-02-{d:02d}' for d in range(1, 14)]), documents=13)
+
+    d = api.dashboard(COMPANY, '2026-02')
+
+    assert d['data_gap_days'] >= 2
+    assert [a['type'] for a in d['alerts'] if a['type'] == 'cobertura'] == ['cobertura']

@@ -899,9 +899,19 @@ function headerBlock(data) {
   `;
 }
 
+// Why the Painel Gerencial do Mobne can still show more than this page: the panel is
+// built on Análise de Vendas, which carries documents (espécie NF) that /Cupom/consulta
+// never returns — 24 of them, R$ 331,14, in Set/2026. Revenue here is the Cupom's, by
+// decision (backend/models.py reconcile), so that gap is explained, never hidden.
+function panelNote(r) {
+  if (!r || !r.additional_documents) return '';
+  return ` O Painel Gerencial do Mobne soma ainda ${r.additional_documents} documento(s) `
+    + `(${money(r.additional_revenue)}) que vêm da Análise de Vendas e não do Cupom fiscal.`;
+}
+
 function reconciliationBanner(r) {
   if (r.exact_match) {
-    return `<div class="disclosure-banner">${icon('circle-check')} Reconciliado exatamente com a Análise Mobne — ${money(r.receipt_revenue)} conferido, sem divergência.</div>`;
+    return `<div class="disclosure-banner">${icon('circle-check')} Reconciliado exatamente com a Análise Mobne — ${money(r.receipt_revenue)} conferido, sem divergência.${esc(panelNote(r))}</div>`;
   }
   return `<div class="disclosure-banner warn">${icon('triangle-alert')} Diferença de ${money(r.difference)} entre Cupom e Análise Mobne
     (${r.missing_documents} documento${r.missing_documents === 1 ? '' : 's'}: ${r.missing_document_ids.join(', ')}).
@@ -1167,10 +1177,14 @@ function welcomeBlock(data) {
   const name = firstName(APP.userName);
   const [y, m] = data.period.split('-');
   const label = `${MONTHS[parseInt(m, 10) - 1]}/${y}`;
-  const partial = data.partial_month ? ` · parcial até ${esc(String(data.as_of).slice(8, 10))}/${esc(String(data.as_of).slice(5, 7))}` : '';
+  // "Parcial até" is the last day the Mobne data actually reaches (backend/api.py
+  // dashboard's covered end), never today: a period whose receipts stop earlier must
+  // not claim days it does not have — that is what made Set/2026 read "até 16/09"
+  // over 13 days of vendas and look R$ 4,5 mil below the Painel Gerencial do Mobne.
+  const partial = data.partial_month ? ` · parcial até ${esc(String(data.end).slice(8, 10))}/${esc(String(data.end).slice(5, 7))}` : '';
   const r = data.reconciliation;
   const recon = r.exact_match
-    ? `<span class="meta-pill ok" title="Reconciliado exatamente com a Análise Mobne: ${esc(money(r.receipt_revenue))} conferido.">${icon('circle-check')} Conferido com o Mobne</span>`
+    ? `<span class="meta-pill ok" title="Reconciliado exatamente com a Análise Mobne: ${esc(money(r.receipt_revenue))} conferido.${esc(panelNote(r))}">${icon('circle-check')} Conferido com o Mobne</span>`
     : `<span class="meta-pill warn">${icon('triangle-alert')} Diferença de ${money(r.difference)}</span>`;
   const today = new Intl.DateTimeFormat('pt-BR', {weekday: 'long', day: 'numeric', month: 'long'}).format(now);
   return `<section class="welcome" aria-labelledby="welcome-title">

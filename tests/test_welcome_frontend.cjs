@@ -193,3 +193,27 @@ test('typed Brazilian numbers keep dots as thousands and commas as decimals', ()
   assert.ok(Number.isNaN(app.parseDecimalBR('1,2,3')));
   assert.equal(app.formatDecimalBR(80000, 2), '80.000,00');
 });
+
+test('the partial-month pill names the last day with Mobne data, not today', () => {
+  const app = loadApp(memoryStorage());
+  app.icon = () => '';  // lives in web/assets/icons.js, not loaded in this vm
+  const data = {
+    period: '2026-09', end: '2026-09-13', requested_end: '2026-09-15', as_of: '2026-09-16',
+    partial_month: true, data_gap_days: 2, updated_at: '2026-09-15T06:45:39+00:00',
+    totals: {revenue: 2467349, margin: 52.12, zero_cost_ratio: 0.07},
+    reconciliation: {exact_match: true, receipt_revenue: 2467349, additional_documents: 24, additional_revenue: 33114},
+    comparison: null, comparison_mom: null,
+  };
+  const html = app.welcomeBlock(data);
+  assert.match(html, /parcial até 13\/09/);
+  assert.doesNotMatch(html, /parcial até 16\/09/);
+});
+
+test('the reconciliation pill explains the documents the Mobne panel adds on top', () => {
+  const app = loadApp(memoryStorage());
+  const note = app.panelNote({additional_documents: 24, additional_revenue: 33114});
+  assert.match(note, /24 documento\(s\)/);
+  assert.match(note, /R\$\s331,14/);
+  assert.match(note, /Análise de Vendas/);
+  assert.equal(app.panelNote({additional_documents: 0, additional_revenue: 0}), '');
+});

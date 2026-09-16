@@ -331,10 +331,21 @@ def product_map_payload(company,end,catalog,conn):
         'previous':{'start':prev_start,'end':prev_end,'available':bool(prev_receipts)},
         'changes':{'lost_star':order(lost_star),'became_low':order(became_low)}}
 
-def dashboard_alerts(inventory,stock_synced,unknown_items):
+def dashboard_alerts(inventory,stock_synced,unknown_items,coverage=None):
     """Resumo attention points. `count` is the number behind each message, so an action
-    created from it can later say how the problem moved (Central de Ações)."""
+    created from it can later say how the problem moved (Central de Ações).
+
+    `coverage` is (last day with sales, day asked of Mobne, missing days) — see
+    dashboard(): a period whose receipts stop before the window we asked for is the
+    difference the partner reads as "o faturamento não bate com o Mobne"."""
     alerts=[]
+    if coverage and coverage[2]>=2:
+        covered,requested,missing=coverage
+        alerts.append({'severity':'high','type':'cobertura','count':missing,
+            'message':f'O Mobne não devolveu vendas de {missing} dia(s) deste período: a última venda carregada é de '
+                      f'{covered[8:]}/{covered[5:7]} e a sincronização pediu até {requested[8:]}/{requested[5:7]}. '
+                      'O faturamento abaixo cobre só até essa data e fica menor que o Painel Gerencial do Mobne; '
+                      'sincronize novamente quando o Mobne publicar os dias que faltam.'})
     low_stock=[p for p in inventory if p['abc']=='A' and p['stock'] is not None and p['stock']<=0]
     if not stock_synced:
         alerts.append({'severity':'medium','type':'integracao','count':None,
@@ -368,12 +379,20 @@ def dashboard(company:int,period:str):
         products=db.dataset(company,'products',db=conn)
         catalog={r['id']:r for r in products['payload']} if products else {}
         data=models.summarize(sales['payload']['receipts'],catalog,sales['payload']['analysis'])
+        # The window we asked Mobne for is not always the window Mobne answered: a day
+        # is missing from /Cupom/consulta until Mobne exports it, and the sync stores the
+        # requested end either way. Coverage is therefore the last day that actually has
+        # sales — reporting the requested end instead made Set/2026 announce "1 a 15/09"
+        # over 13 days of receipts and compare them against 15 days of Agosto.
+        requested_end=sales['payload']['end']
+        covered_end=data['daily'][-1]['date'] if data['daily'] else sales['payload']['start']
+        missing_days=(date.fromisoformat(requested_end)-date.fromisoformat(covered_end)).days
         def comparison_for(other_period):
             other=db.dataset(company,'sales',other_period,conn)
             if not other or not other['payload'].get('raw_count'):
                 return None  # Mobne has no data for this period (e.g. before onboarding); not a same-store comparison
             # Match elapsed days when the selected period is not a closed month.
-            last_day=int(sales['payload']['end'][-2:])
+            last_day=int(covered_end[-2:])
             docs=[r for r in other['payload']['receipts'] if int(r['date'][-2:])<=last_day]
             previous=models.summarize(docs)['totals']
             t=data['totals']
@@ -413,8 +432,10 @@ def dashboard(company:int,period:str):
     # None when the period has any unknown-cost item, same as simulated_net below — a break-even
     # point built on a partially-unknown margin would be worse than none at all.
     break_even_cents=round(fixed/(margin/100)) if margin else None
-    alerts=dashboard_alerts(inventory,stock is not None,data['totals']['unknown'])
-    return {**data,'period':period,'start':sales['payload']['start'],'end':sales['payload']['end'],
+    alerts=dashboard_alerts(inventory,stock is not None,data['totals']['unknown'],
+        coverage=(covered_end,requested_end,missing_days))
+    return {**data,'period':period,'start':sales['payload']['start'],'end':covered_end,
+        'requested_end':requested_end,'data_gap_days':missing_days,
         'updated_at':sales['updated_at'],'version':sales['version'],'comparison':comparison,'comparison_mom':comparison_mom,
         'reconciliation':sales['payload']['reconciliation'],'raw_count':sales['payload']['raw_count'],
         'inventory':inventory,'product_map':product_map,'stock_updated_at':stock['updated_at'] if stock else None,
@@ -424,7 +445,9 @@ def dashboard(company:int,period:str):
         'margin_goal_pct':accounts.resolve_parameter(company,'goal:margin',today),
         'revenue_goal':current_goal_progress(company,date.today()),
         'alerts':alerts,
-        'partial_month':sales['payload']['end']<__import__('backend.sync',fromlist=['month_end']).month_end(period).isoformat(),
+        # Still the window's question — "is this month over?" — and not coverage: a closed
+        # month whose last day happened to sell nothing must not read as in progress.
+        'partial_month':requested_end<__import__('backend.sync',fromlist=['month_end']).month_end(period).isoformat(),
         'as_of':today,'scope':'Vendas PDV válidas; referências fiscais e não fiscais deduplicadas.'}
 
 WEB=settings.ROOT/'web'
