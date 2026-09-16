@@ -143,3 +143,10 @@ def test_stone_daily_check_validates_the_period(client):
     default = client.get("/api/companies/1/finance/reconciliation/stone-daily")
     assert default.status_code == 200
     assert default.json()["days"] == []
+
+
+def test_the_reserve_account_is_not_listed_as_a_source_to_import(client):
+    client.post("/api/companies/1/finance/cash-accounts", json={"name": "Conta Stone", "kind": "payment"})
+    client.post("/api/companies/1/finance/cash-accounts", json={"name": "Reserva Stone", "kind": "bank"})
+    names = [item["name"] for item in client.get("/api/companies/1/finance/reconciliation/sources").json()]
+    assert names == ["Conta Stone"]

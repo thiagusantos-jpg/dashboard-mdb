@@ -36,6 +36,27 @@ PROVIDER_BANK_FILE = "bank_file"
 # so dates should already be very close.
 CANDIDATE_WINDOW_DAYS = 3
 
+# "Reserva Stone" is a daily-liquidity investment inside the Conta Stone.
+# Moving money there is neither income nor spending, so those statement lines
+# become transfers to a "Reserva Stone" cash account (created on first use).
+RESERVE_ACCOUNT_NAME = "Reserva Stone"
+RESERVE_DECISION = "transfer:reserve"
+_RESERVE_LINE = re.compile(r"reserva\s+stone", re.IGNORECASE)
+
+
+def is_reserve_move(description: str) -> bool:
+    return bool(_RESERVE_LINE.search(description or ""))
+
+
+def _reserve_account_id(conn, company: int) -> int:
+    row = conn.execute(
+        "SELECT id FROM cash_accounts WHERE company=? AND name=? AND archived=0 ORDER BY created_at LIMIT 1",
+        (company, RESERVE_ACCOUNT_NAME),
+    ).fetchone()
+    if row:
+        return row["id"]
+    return ledger.create_account(company, RESERVE_ACCOUNT_NAME, "bank", conn=conn)["id"]
+
 
 class BankFileError(ValueError):
     pass
@@ -327,6 +348,19 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
                 "candidate_cash_event_ids": [],
                 "decision": "new",
                 "already_imported": True,
+                "internal_transfer": False,
+            })
+            continue
+        if is_reserve_move(tx.description):
+            items.append({
+                "external_id": tx.external_id,
+                "date": tx.date,
+                "amount_cents": tx.amount_cents,
+                "description": tx.description,
+                "candidate_cash_event_ids": [],
+                "decision": RESERVE_DECISION,
+                "already_imported": False,
+                "internal_transfer": True,
             })
             continue
         candidates = _candidate_cash_events(
@@ -347,6 +381,7 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
             "candidate_cash_event_ids": [str(c) for c in candidates],
             "decision": decision,
             "already_imported": False,
+            "internal_transfer": False,
         })
     return items
 
@@ -392,6 +427,7 @@ def preview_bank_import(company: int, cash_account_id: int, filename: str, conte
         "end": max(dates) if dates else None,
         "total_cents": sum(t.amount_cents for t in transactions),
         "already_imported": sum(1 for item in items if item["already_imported"]),
+        "internal_transfers": sum(1 for item in items if item["internal_transfer"]),
         "items": items,
     }
 
@@ -450,6 +486,7 @@ def commit_bank_import(
     imported = 0
     duplicates = 0
     linked = 0
+    transferred = 0
     with db.connection() as conn:
         for tx in transactions:
             version = "1"
@@ -462,6 +499,38 @@ def commit_bank_import(
                 conn=conn,
             )
             raw_decision = decisions.get(tx.external_id, "new")
+            if raw_decision == RESERVE_DECISION:
+                if not is_reserve_move(tx.description):
+                    raise BankFileError(f"{tx.external_id!r} não é uma movimentação da Reserva Stone.")
+                if already_seen:
+                    duplicates += 1
+                    continue
+                reserve_id = _reserve_account_id(conn, company)
+                if reserve_id == cash_account_id:
+                    raise BankFileError("O extrato da própria Reserva Stone não tem transferências para ela mesma.")
+                outgoing = tx.amount_cents < 0
+                moved = ledger.transfer(
+                    company,
+                    cash_account_id if outgoing else reserve_id,
+                    reserve_id if outgoing else cash_account_id,
+                    abs(tx.amount_cents), date.fromisoformat(tx.date),
+                    description=tx.description or RESERVE_ACCOUNT_NAME,
+                    conn=conn,
+                )
+                own_leg = next(e for e in moved["events"] if e["cash_account_id"] == cash_account_id)
+                conn.execute(
+                    """
+                    INSERT INTO bank_cash_links(
+                        id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
+                        own_leg["id"], db.now(),
+                    ),
+                )
+                transferred += 1
+                continue
             candidate_cash_event_id = _parse_decision(raw_decision, tx.external_id)
 
             if candidate_cash_event_id is None:
@@ -566,4 +635,5 @@ def commit_bank_import(
         "imported": imported,
         "duplicates": duplicates,
         "linked": linked,
+        "transferred": transferred,
     }

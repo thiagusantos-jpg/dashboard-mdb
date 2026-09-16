@@ -344,7 +344,7 @@ def test_reviewing_the_same_statement_again_marks_lines_as_already_imported(cash
     assert item["candidate_cash_event_ids"] == []
     assert item["decision"] == "new"
     assert preview["already_imported"] == 1
-    assert result == {"total": 1, "imported": 0, "duplicates": 1, "linked": 0}
+    assert result == {"total": 1, "imported": 0, "duplicates": 1, "linked": 0, "transferred": 0}
     assert ledger.account_balance(cash_account["id"]) == -15_000
 
 

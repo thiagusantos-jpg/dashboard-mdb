@@ -83,6 +83,31 @@ test('the bank review opens only the lines that need a decision', () => {
   assert.match(html, /Importar 2 linha\(s\) nova\(s\)/);
 });
 
+test('reserve lines are shown as internal transfers the partner can still override', () => {
+  const context = loadReconciliation();
+  const html = context.bankPreviewBody({
+    count: 3, start: '2026-08-05', end: '2026-08-06', total_cents: 0, preview_hash: 'h', already_imported: 0, internal_transfers: 2,
+    items: [
+      {external_id: 'r1', date: '2026-08-05', amount_cents: -100000, description: 'LOJA - Reserva Stone', candidate_cash_event_ids: [], decision: 'transfer:reserve', already_imported: false, internal_transfer: true},
+      {external_id: 'r2', date: '2026-08-06', amount_cents: 25000, description: 'LOJA - Reserva Stone', candidate_cash_event_ids: [], decision: 'transfer:reserve', already_imported: false, internal_transfer: true},
+      {external_id: 'p1', date: '2026-08-06', amount_cents: 4000, description: 'Pix', candidate_cash_event_ids: [], decision: 'new', already_imported: false, internal_transfer: false},
+    ],
+  }, {});
+  assert.match(html, /<strong>1<\/strong> nova\(s\)/);
+  assert.match(html, /<strong>2<\/strong> da Reserva Stone \(transferência interna\)/);
+  assert.match(html, /<option value="transfer:reserve" selected>Transferência para a Reserva Stone<\/option>/);
+  assert.match(html, /<option value="transfer:reserve" selected>Resgate da Reserva Stone<\/option>/);
+  assert.match(html, /<option value="new">Movimento comum \(entrada\/saída\)<\/option>/);
+  assert.match(html, /aplicação de liquidez diária/);
+  const folded = html.slice(html.lastIndexOf('<details'));
+  assert.doesNotMatch(folded, /Reserva Stone<\/td>/, 'reserve lines are not repeated in the generic list');
+});
+
+test('transfers and reversals are not offered for matching', () => {
+  const source = fs.readFileSync(path.join(root, 'web/assets/reconciliation.js'), 'utf8');
+  assert.match(source, /\(e\.kind \|\| 'entry'\) === 'entry'/);
+});
+
 test('a statement already imported says there is nothing new', () => {
   const context = loadReconciliation();
   const items = Array.from({length: 400}, (_, i) => ({external_id: `x${i}`, date: '2026-08-01', amount_cents: 1,

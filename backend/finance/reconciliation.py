@@ -269,6 +269,9 @@ def list_groups(company: int, *, status: Optional[str] = None) -> list:
         return [_row_to_group(conn, row["id"]) for row in rows]
 
 
+RESERVE_ACCOUNT_NAME = "Reserva Stone"  # same as integrations.bank_files.RESERVE_ACCOUNT_NAME
+
+
 def data_sources(company: int) -> list:
     """What has been imported into each active cash account: Stone sales
     (conciliation XML) and bank statements (OFX/CSV). Feeds the checklist at
@@ -281,6 +284,10 @@ def data_sources(company: int) -> list:
         ).fetchall()
         result = []
         for account in accounts:
+            if account["name"] == RESERVE_ACCOUNT_NAME:
+                # Fed by transfers from the Conta Stone statement; it has no
+                # statement of its own to import.
+                continue
             stone = conn.execute(
                 """
                 SELECT COUNT(*) AS count,MAX(created_at) AS last_import_at,

@@ -45,7 +45,8 @@ async function renderConciliacao(token) {
   const matches = (e) => (!filters.account || String(e.cash_account_id) === filters.account)
     && (!filters.from || e.occurred_at >= filters.from) && (!filters.to || e.occurred_at <= filters.to);
   const eventsById = Object.fromEntries(events.map((e) => [String(e.id), e]));
-  const pending = events.filter((e) => !linkedEventIds.has(String(e.id))).filter(matches);
+  // Transfers (e.g. Reserva Stone) and reversals are not income or spending: nothing to match.
+  const pending = events.filter((e) => (e.kind || 'entry') === 'entry' && !linkedEventIds.has(String(e.id))).filter(matches);
   const visibleGroups = groups.filter((g) => {
     const anchor = g.links.find((l) => l.item_type === 'cash_event');
     const event = anchor && eventsById[String(anchor.item_id)];
@@ -460,7 +461,9 @@ function reconciliationCandidateLabel(eventId, eventsById) {
 const BANK_PREVIEW_ALL_LIMIT = 300;
 
 function bankPreviewRow(item, index, eventsById) {
-  const options = [{value: 'new', label: 'Novo movimento'}].concat(
+  const reserveLabel = item.amount_cents < 0 ? 'Transferência para a Reserva Stone' : 'Resgate da Reserva Stone';
+  const options = (item.internal_transfer ? [{value: 'transfer:reserve', label: reserveLabel}] : []).concat(
+    [{value: 'new', label: item.internal_transfer ? 'Movimento comum (entrada/saída)' : 'Novo movimento'}],
     item.candidate_cash_event_ids.map((id) => ({value: `link:${id}`, label: reconciliationCandidateLabel(id, eventsById)})));
   const control = item.already_imported ? '<span class="badge-muted">Já importada</span>'
     : options.length === 1 ? '<span class="badge-muted">Novo movimento</span>'
@@ -489,24 +492,32 @@ function bankPreviewBody(preview, eventsById) {
   const items = preview.items;
   const indexed = items.map((item, index) => ({item, index}));
   const review = indexed.filter(({item}) => !item.already_imported && item.candidate_cash_event_ids.length);
+  const transfers = indexed.filter(({item}) => item.internal_transfer && !item.already_imported);
   const already = items.filter((i) => i.already_imported).length;
   const fresh = items.length - already;
+  const opened = new Set(review.concat(transfers).map(({index}) => index));
   const recent = indexed.slice().sort((x, y) => (x.item.date < y.item.date ? 1 : -1)).slice(0, BANK_PREVIEW_ALL_LIMIT);
   const submitLabel = fresh ? `Importar ${fresh} linha(s) nova(s)` : 'Confirmar (nada novo)';
   return `<form class="drawer-form" novalidate>
       <p class="recon-preview-summary"><strong>${preview.count} linha(s)</strong> de ${dateBR(preview.start)} a ${dateBR(preview.end)} · saldo do período ${money(preview.total_cents)}</p>
       <ul class="recon-preview-counts">
-        <li><strong>${fresh - review.length}</strong> nova(s)</li>
+        <li><strong>${fresh - review.length - transfers.length}</strong> nova(s)</li>
         <li><strong>${review.length}</strong> para revisar</li>
+        ${transfers.length ? `<li><strong>${transfers.length}</strong> da Reserva Stone (transferência interna)</li>` : ''}
         <li><strong>${already}</strong> já importada(s) antes, serão ignoradas</li>
       </ul>
       ${review.length ? `<h3>Revise: parecem movimentos que já estão no painel</h3>
         <p class="field-help">Ex.: um pagamento registrado em Contas a pagar. Deixe "Já lançado" para não contar em dobro.</p>
         ${bankPreviewTable(review.map(({item, index}) => bankPreviewRow(item, index, eventsById)).join(''))}`
         : '<p class="field-help">Nenhuma linha precisa de revisão.</p>'}
+      ${transfers.length ? `<details class="recon-preview-all">
+        <summary>Reserva Stone: ${transfers.length} transferência(s) interna(s)</summary>
+        <p class="field-help">A Reserva Stone é uma aplicação de liquidez diária: guardar ou resgatar dinheiro nela não é despesa nem receita. O painel registra como transferência para a conta "Reserva Stone", e o saldo total da empresa não muda.</p>
+        ${bankPreviewTable(transfers.slice(0, BANK_PREVIEW_ALL_LIMIT).map(({item, index}) => bankPreviewRow(item, index, eventsById)).join(''))}
+      </details>` : ''}
       <details class="recon-preview-all">
         <summary>Ver as linhas do arquivo${items.length > BANK_PREVIEW_ALL_LIMIT ? ` (as ${BANK_PREVIEW_ALL_LIMIT} mais recentes)` : ''}</summary>
-        ${bankPreviewTable(recent.filter(({item}) => item.already_imported || !item.candidate_cash_event_ids.length)
+        ${bankPreviewTable(recent.filter(({index}) => !opened.has(index))
           .map(({item, index}) => bankPreviewRow(item, index, eventsById)).join('') || '<tr><td colspan="4">O arquivo não tem movimentos.</td></tr>')}
       </details>
       ${formActions(submitLabel)}
@@ -565,7 +576,7 @@ function bindBankCommit(drawer, picked, preview, ctx) {
       const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/bank-imports`, data);
       clearDirty();
       drawer.setBody(`<p role="status"><strong>Extrato importado.</strong></p>
-        <p>${result.imported} movimento(s) novo(s) · ${result.linked} ligado(s) a lançamentos existentes · ${result.duplicates} já importado(s) antes (ignorados).</p>
+        <p>${result.imported} movimento(s) novo(s) · ${result.linked} ligado(s) a lançamentos existentes${result.transferred ? ` · ${result.transferred} transferência(s) da Reserva Stone` : ''} · ${result.duplicates} já importado(s) antes (ignorados).</p>
         <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Conferir movimentos</button></div>`);
       if (ctx.onSaved) ctx.onSaved(result);
     } catch (e) {

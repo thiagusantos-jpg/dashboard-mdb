@@ -14,7 +14,11 @@ def _new_id() -> int:
     return secrets.randbits(63) or 1
 
 
-def create_account(company: int, name: str, kind: str, *, store: Optional[int] = None) -> dict:
+def create_account(
+    company: int, name: str, kind: str, *, store: Optional[int] = None, conn=None,
+) -> dict:
+    """When `conn` is given, the account is created on the caller's
+    transaction (bank imports create the "Reserva Stone" account mid-import)."""
     if kind not in VALID_KINDS:
         raise ValueError("Tipo de conta inválido.")
     clean_name = name.strip()
@@ -22,16 +26,21 @@ def create_account(company: int, name: str, kind: str, *, store: Optional[int] =
         raise ValueError("Informe o nome da conta.")
     account_id = _new_id()
     timestamp = db.now()
-    with db.connection() as conn:
-        conn.execute(
+
+    def _write(c) -> dict:
+        c.execute(
             """
             INSERT INTO cash_accounts(id,company,store,name,kind,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?)
             """,
             (account_id, company, store, clean_name, kind, timestamp, timestamp),
         )
-        row = conn.execute("SELECT * FROM cash_accounts WHERE id=?", (account_id,)).fetchone()
-    return dict(row)
+        return dict(c.execute("SELECT * FROM cash_accounts WHERE id=?", (account_id,)).fetchone())
+
+    if conn is not None:
+        return _write(conn)
+    with db.connection() as own_conn:
+        return _write(own_conn)
 
 
 def list_accounts(company: int, include_archived: bool = False) -> list:
@@ -109,7 +118,10 @@ def transfer(
     *,
     description: str = "Transferência entre contas",
     created_by: Optional[int] = None,
+    conn=None,
 ) -> dict:
+    """Two mirrored kind='transfer' rows. When `conn` is given, writes happen
+    on the caller's transaction (same contract as post_cash_event)."""
     if amount_cents <= 0:
         raise ValueError("O valor da transferência deve ser maior que zero.")
     if from_account_id == to_account_id:
@@ -117,11 +129,12 @@ def transfer(
     group_id = _new_id()
     timestamp = db.now()
     clean_description = description.strip()
-    with db.connection() as conn:
-        _require_account(conn, company, from_account_id)
-        _require_account(conn, company, to_account_id)
+
+    def _write(c) -> dict:
+        _require_account(c, company, from_account_id)
+        _require_account(c, company, to_account_id)
         for account_id, signed_amount in ((from_account_id, -amount_cents), (to_account_id, amount_cents)):
-            conn.execute(
+            c.execute(
                 """
                 INSERT INTO cash_events(
                     id,company,cash_account_id,amount_cents,occurred_at,description,
@@ -133,10 +146,15 @@ def transfer(
                     clean_description, "transfer", group_id, created_by, timestamp,
                 ),
             )
-        rows = conn.execute(
+        rows = c.execute(
             "SELECT * FROM cash_events WHERE transfer_group=?", (group_id,)
         ).fetchall()
-    return {"transfer_group": group_id, "events": [dict(row) for row in rows]}
+        return {"transfer_group": group_id, "events": [dict(row) for row in rows]}
+
+    if conn is not None:
+        return _write(conn)
+    with db.connection() as own_conn:
+        return _write(own_conn)
 
 
 def reverse_event(
