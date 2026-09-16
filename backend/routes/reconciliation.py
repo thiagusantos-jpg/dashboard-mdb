@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,6 +52,35 @@ def list_reconciliation_groups(company: int, status: Optional[str] = None):
 def list_data_sources(company: int):
     _require_company(company)
     return reconciliation.data_sources(company)
+
+
+@router.get(
+    "/reconciliation/stone-daily",
+    dependencies=[Depends(permissions.require_permission("finance.read"))],
+)
+def get_stone_daily_check(
+    company: int,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+    cash_account_id: Optional[int] = None,
+    tolerance_cents: int = reconciliation.STONE_DEFAULT_TOLERANCE_CENTS,
+):
+    """Stone's expected deposit per day vs. the credit that reached the bank.
+    Defaults to the last 30 days plus the coming week."""
+    _require_company(company)
+    today = date.today()
+    start = start or today - timedelta(days=30)
+    end = end or today + timedelta(days=7)
+    if end < start:
+        raise HTTPException(422, "A data final deve ser depois da inicial.")
+    if (end - start).days > 400:
+        raise HTTPException(422, "Escolha um período de até 400 dias.")
+    if tolerance_cents < 0:
+        raise HTTPException(422, "A tolerância não pode ser negativa.")
+    return reconciliation.stone_daily_check(
+        company, start, end, today=today,
+        cash_account_id=cash_account_id, tolerance_cents=tolerance_cents,
+    )
 
 
 @router.post(

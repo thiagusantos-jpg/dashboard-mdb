@@ -35,6 +35,7 @@ function loadReconciliation() {
   context.dateBR = (iso) => (iso ? String(iso).slice(0, 10) : '—');
   context.financeBasePath = () => '/api/companies/1/finance';
   context.formActions = (label) => `<button type="submit">${label}</button>`;
+  context.kpi = (title, value, subtitle, subCls, valueCls) => `<div class="kpi ${valueCls || ''}">${title}|${value}|${subtitle || ''}</div>`;
   vm.runInContext(fs.readFileSync(path.join(root, 'web/assets/reconciliation.js'), 'utf8'), context);
   return context;
 }
@@ -106,4 +107,71 @@ test('committing sends the reviewed decisions with the preview hash', async () =
   assert.deepEqual(JSON.parse(appended.decisions), {a: 'new', b: 'new'}, 'the user override wins over the pre-selection');
   assert.match(body, /Extrato importado/);
   assert.ok(saved);
+});
+
+function stoneCheck(days, summary) {
+  return {
+    start: '2026-08-17', end: '2026-09-23', tolerance_cents: 100,
+    summary: Object.assign({expected_cents: 0, received_cents: 0, difference_cents: 0, due_days: 0, ok_days: 0,
+      divergent_days: 0, missing_days: 0, upcoming_days: 0, upcoming_cents: 0, ok_pct: null}, summary),
+    days,
+  };
+}
+
+const stoneDay = (over) => Object.assign({
+  cash_account_id: '11', account_name: 'Stone', settlement_date: '2026-09-10', sales: 3,
+  expected_cents: 1000, received_cents: null, credit: null, difference_cents: null, status: 'ok',
+}, over);
+
+const sourcesFor = (bankCount) => [{cash_account_id: '11', name: 'Stone', stone: {count: 3}, bank: {count: bankCount}}];
+
+test('the Stone check opens on pending days and explains each one', () => {
+  const context = loadReconciliation();
+  const html = context.reconciliationStoneSection(stoneCheck([
+    stoneDay({status: 'ok', credit: {amount_cents: 1000, occurred_at: '2026-09-10', description: 'Repasse'}, received_cents: 1000, difference_cents: 0}),
+    stoneDay({settlement_date: '2026-09-11', status: 'divergent', credit: {amount_cents: 700, occurred_at: '2026-09-11', description: 'Crédito'}, received_cents: 700, difference_cents: -300}),
+    stoneDay({settlement_date: '2026-09-05', status: 'missing', difference_cents: -1000}),
+    stoneDay({settlement_date: '2026-09-20', status: 'upcoming'}),
+  ], {expected_cents: 3000, received_cents: 1700, difference_cents: -1300, due_days: 3, ok_days: 1, ok_pct: 33}), sourcesFor(4));
+  assert.equal(vm.runInContext("RECONCILIATION_STATE.stoneTab", context), 'pending');
+  assert.match(html, /data-stone-tab-button="pending" aria-pressed="true">Pendências <span class="tab-count">2<\/span>/);
+  assert.match(html, /Valor diferente/);
+  assert.match(html, /Não caiu no banco<\/span><div class="cell-note">Nenhum crédito até 2026-09-08/);
+  assert.match(html, /R\$700<div class="cell-note">2026-09-11 · Crédito/);
+  assert.match(html, /value-negative">−R\$300/);
+  assert.match(html, /kpi kpi-negative">Diferença\|−R\$1300/);
+  assert.match(html, /1 de 3 · 2 dia\(s\) para verificar/);
+  assert.doesNotMatch(html, /<th>Conta<\/th>/, 'a single account needs no account column');
+});
+
+test('a missing deposit on an account without statement asks for the statement, not blames Stone', () => {
+  const context = loadReconciliation();
+  const html = context.reconciliationStoneSection(stoneCheck([
+    stoneDay({settlement_date: '2026-09-05', status: 'missing', difference_cents: -1000}),
+  ], {expected_cents: 1000, difference_cents: -1000, due_days: 1, ok_pct: 0}), sourcesFor(0));
+  assert.match(html, /Falta o extrato/);
+  assert.doesNotMatch(html, /Não caiu no banco/);
+  assert.match(html, /1 dia\(s\) sem extrato importado/);
+});
+
+test('with nothing pending the check opens on every day and says all arrived', () => {
+  const context = loadReconciliation();
+  const html = context.reconciliationStoneSection(stoneCheck([
+    stoneDay({status: 'ok', credit: {amount_cents: 1000, occurred_at: '2026-09-10', description: 'x'}, received_cents: 1000, difference_cents: 0}),
+  ], {expected_cents: 1000, received_cents: 1000, due_days: 1, ok_days: 1, ok_pct: 100}), sourcesFor(1));
+  assert.equal(vm.runInContext("RECONCILIATION_STATE.stoneTab", context), 'all');
+  assert.match(html, /Tudo o que a Stone devia caiu no banco/);
+});
+
+test('an empty period points to the Stone import', () => {
+  const context = loadReconciliation();
+  const html = context.reconciliationStoneSection(stoneCheck([], {}), []);
+  assert.match(html, /Nenhuma venda Stone com repasse neste período/);
+  assert.match(html, /17\/08|2026-08-17 a 2026-09-23/);
+});
+
+test('the page asks the Stone check for the filtered period and account', () => {
+  const source = fs.readFileSync(path.join(root, 'web/assets/reconciliation.js'), 'utf8');
+  assert.match(source, /reconciliation\/stone-daily\?\$\{stoneParams\}/);
+  assert.match(source, /stoneParams\.set\('cash_account_id', filters\.account\)/);
 });

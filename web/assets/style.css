@@ -1703,3 +1703,16 @@ div.action-stat { cursor: default; }
 .recon-preview-summary + .field-help { margin: 0 0 12px; }
 .section-header .section-hint { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-left: 8px; }
 .recon-sources td .btn-link { text-align: left; }
+
+/* Conciliação → Repasses da Stone */
+.recon-filter { padding: 12px 0; border-bottom: 1px solid var(--divider); }
+.recon-stone .kpi-grid { margin-bottom: 12px; }
+.recon-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.recon-tabs .btn-secondary { min-height: 40px; }
+.recon-tabs .btn-secondary[aria-pressed="true"] { background: var(--dark); color: #fff; }
+.recon-tabs .tab-count { display: inline-block; min-width: 20px; margin-left: 4px; padding: 0 6px; border-radius: 10px; background: rgba(0, 0, 0, 0.08); font-size: 12px; }
+.recon-tabs .btn-secondary[aria-pressed="true"] .tab-count { background: rgba(255, 255, 255, 0.2); }
+.data-table .cell-note { margin-top: 2px; font-size: 11px; color: var(--text-muted); font-weight: 400; white-space: normal; }
+.data-table .num.value-negative { color: var(--negative); font-weight: 700; }
+.recon-tab-empty { color: var(--text-muted); padding: 8px 12px; }
+:root[data-theme="dark"] .recon-tabs .btn-secondary[aria-pressed="true"] { background: var(--yellow); color: #1a1a1a; }

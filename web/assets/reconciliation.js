@@ -6,7 +6,7 @@
  * and cashflow.js's openCashAccountForm(). */
 'use strict';
 
-const RECONCILIATION_STATE = {groups: []};
+const RECONCILIATION_STATE = {groups: [], stoneTab: null};
 
 const RECONCILIATION_STATUS_LABELS = {
   unmatched: 'Sem correspondência', suggested: 'Sugestão pendente', auto_matched: 'Conciliado automaticamente',
@@ -18,13 +18,20 @@ async function renderConciliacao(token) {
   const title = `${icon('circle-check', {class: 'title-icon'})}Conciliação bancária`;
   const subtitle = 'Importe as vendas Stone e o extrato do banco e confira se cada movimento bate com o que foi lançado.';
   financeLoading(title, subtitle, 'Carregando conciliação');
-  let events, groups, cashAccounts, sources;
+  // Interval and account filters apply to the Stone check, the cash movements and the groups anchored on them.
+  const filters = financeFilters('conciliacao', {account: '', from: '', to: ''});
+  const stoneParams = new URLSearchParams();
+  if (filters.from) stoneParams.set('start', filters.from);
+  if (filters.to) stoneParams.set('end', filters.to);
+  if (filters.account) stoneParams.set('cash_account_id', filters.account);
+  let events, groups, cashAccounts, sources, stoneCheck;
   try {
-    [events, groups, cashAccounts, sources] = await Promise.all([
+    [events, groups, cashAccounts, sources, stoneCheck] = await Promise.all([
       api(`/api/companies/${APP.company}/finance/cash-events`),
       api(`/api/companies/${APP.company}/finance/reconciliation`),
       api(`/api/companies/${APP.company}/finance/cash-accounts`),
       api(`/api/companies/${APP.company}/finance/reconciliation/sources`),
+      api(`/api/companies/${APP.company}/finance/reconciliation/stone-daily?${stoneParams}`),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -35,8 +42,6 @@ async function renderConciliacao(token) {
   const linkedEventIds = new Set(
     groups.flatMap((g) => g.links.filter((l) => l.item_type === 'cash_event').map((l) => String(l.item_id)))
   );
-  // Interval and account filters apply to the cash movements and to the groups anchored on them.
-  const filters = financeFilters('conciliacao', {account: '', from: '', to: ''});
   const matches = (e) => (!filters.account || String(e.cash_account_id) === filters.account)
     && (!filters.from || e.occurred_at >= filters.from) && (!filters.to || e.occurred_at <= filters.to);
   const eventsById = Object.fromEntries(events.map((e) => [String(e.id), e]));
@@ -78,8 +83,7 @@ async function renderConciliacao(token) {
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
     ${reconciliationSourcesSection(sources)}
-    <h2 class="section-header">Conferir movimentos</h2>
-    <form id="reconciliation-filter" class="page-toolbar">
+    <form id="reconciliation-filter" class="page-toolbar recon-filter" aria-label="Período e conta conferidos">
       <div class="filters">
         <div><label class="field-label" for="reconciliation-account">Conta</label>
           <select id="reconciliation-account" name="account" class="login-input">
@@ -91,8 +95,11 @@ async function renderConciliacao(token) {
         <div><label class="field-label" for="reconciliation-to">Até</label>
           <input id="reconciliation-to" name="to" type="date" class="login-input" value="${esc(filters.to)}"></div>
       </div>
-      <button type="submit" class="btn-secondary">Filtrar</button>
+      <button type="submit" class="btn-secondary">Aplicar</button>
     </form>
+    ${reconciliationStoneSection(stoneCheck, sources)}
+    <h2 class="section-header">Outros movimentos do banco</h2>
+    <p class="page-subtitle">Pagamentos, tarifas e créditos que não são repasse da Stone: case cada um com o lançamento correspondente.</p>
     <div class="settings-block">
       <h3>Sugerir conciliação</h3>
       <form id="reconciliation-suggest-form" class="inline-form">
@@ -113,6 +120,7 @@ async function renderConciliacao(token) {
 
   RECONCILIATION_STATE.groups = groups;
   bindReconciliationSources(cashAccounts, eventsById);
+  bindReconciliationStoneTabs();
   document.getElementById('reconciliation-filter').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const form = ev.currentTarget;
@@ -200,6 +208,120 @@ async function onUndoReconciliation(event) {
     status.textContent = 'Não foi possível desfazer: ' + e.message;
     button.disabled = false;
   }
+}
+
+/* ---------------------------------------------------------------- repasses da Stone */
+
+const STONE_STATUS = {
+  ok: {label: 'Conferido', badge: 'badge-success', tab: 'ok'},
+  divergent: {label: 'Valor diferente', badge: 'badge-error', tab: 'pending'},
+  missing: {label: 'Não caiu no banco', badge: 'badge-error', tab: 'pending'},
+  no_statement: {label: 'Falta o extrato', badge: 'badge-warning', tab: 'pending'},
+  upcoming: {label: 'A receber', badge: 'badge-muted', tab: 'upcoming'},
+};
+
+const STONE_TABS = [['pending', 'Pendências'], ['upcoming', 'A receber'], ['ok', 'Conferidos'], ['all', 'Todos']];
+
+/* A day "missing" from an account whose statement was never imported is not
+ * Stone's fault: say what is actually missing. */
+function stoneDayStatus(day, bankImported) {
+  if (day.status === 'missing' && !bankImported[String(day.cash_account_id)]) return 'no_statement';
+  return day.status;
+}
+
+function stoneSignedMoney(cents) {
+  if (!cents) return money(0);
+  return `${cents > 0 ? '+' : '−'}${money(Math.abs(cents))}`;
+}
+
+function stoneDayRow(day, status, showAccount) {
+  const meta = STONE_STATUS[status];
+  const credit = day.credit;
+  const received = credit
+    ? `${money(credit.amount_cents)}<div class="cell-note">${dateBR(credit.occurred_at)} · ${esc(credit.description)}</div>`
+    : '—';
+  const hint = status === 'missing' ? `<div class="cell-note">Nenhum crédito até ${dateBR(stoneAddDays(day.settlement_date, 3))}. Confira no portal Stone.</div>`
+    : status === 'no_statement' ? '<div class="cell-note">Importe o extrato desta conta para conferir.</div>'
+    : status === 'divergent' ? '<div class="cell-note">Compare as vendas do dia em Recebíveis.</div>' : '';
+  const diff = day.difference_cents == null || status === 'no_statement' ? '—' : stoneSignedMoney(day.difference_cents);
+  return `<tr data-stone-tab="${meta.tab}">
+    <td>${dateBR(day.settlement_date)}</td>
+    ${showAccount ? `<td>${esc(day.account_name)}</td>` : ''}
+    <td class="num">${money(day.expected_cents)}<div class="cell-note">${day.sales} venda(s)</div></td>
+    <td class="num">${received}</td>
+    <td class="num${day.difference_cents && status !== 'ok' && status !== 'no_statement' ? ' value-negative' : ''}">${diff}</td>
+    <td><span class="${meta.badge}">${meta.label}</span>${hint}</td>
+  </tr>`;
+}
+
+function stoneAddDays(iso, days) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function reconciliationStoneSection(check, sources) {
+  const bankImported = Object.fromEntries(sources.map((s) => [String(s.cash_account_id), s.bank.count > 0]));
+  const days = check.days.map((day) => ({day, status: stoneDayStatus(day, bankImported)}));
+  const counts = {pending: 0, upcoming: 0, ok: 0, all: days.length};
+  days.forEach(({status}) => { counts[STONE_STATUS[status].tab] += 1; });
+  const tab = RECONCILIATION_STATE.stoneTab && counts[RECONCILIATION_STATE.stoneTab] != null
+    ? RECONCILIATION_STATE.stoneTab : (counts.pending ? 'pending' : 'all');
+  RECONCILIATION_STATE.stoneTab = tab;
+  const sum = check.summary;
+  const noStatement = days.filter((d) => d.status === 'no_statement').length;
+  const showAccount = new Set(check.days.map((d) => String(d.cash_account_id))).size > 1;
+  const period = `${dateBR(check.start)} a ${dateBR(check.end)} · tolerância ${money(check.tolerance_cents)}`;
+  const header = `<h2 class="section-header">Repasses da Stone <span class="section-hint">${period}</span></h2>`;
+  if (!days.length) {
+    return `<section class="recon-stone">${header}
+      <div class="empty-state"><p>Nenhuma venda Stone com repasse neste período. Importe o XML da Stone em Fontes de dados ou ajuste o período.</p></div>
+    </section>`;
+  }
+  const diffCls = sum.difference_cents < 0 ? 'kpi-negative' : '';
+  const verdict = !sum.due_days ? 'Nenhum repasse venceu ainda.'
+    : sum.ok_days === sum.due_days ? 'Tudo o que a Stone devia caiu no banco.'
+    : noStatement ? `${noStatement} dia(s) sem extrato importado.` : `${sum.due_days - sum.ok_days} dia(s) para verificar.`;
+  const rows = days.map(({day, status}) => stoneDayRow(day, status, showAccount)).join('');
+  return `<section class="recon-stone" aria-labelledby="recon-stone-title">
+    ${header.replace('<h2 ', '<h2 id="recon-stone-title" ')}
+    <div class="kpi-grid kpi-grid-4">
+      ${kpi('Stone previu', money(sum.expected_cents), `Repasses vencidos no período · mais ${money(sum.upcoming_cents)} a receber`)}
+      ${kpi('Caiu no banco', money(sum.received_cents), 'Créditos casados com os repasses')}
+      ${kpi('Diferença', stoneSignedMoney(sum.difference_cents), sum.difference_cents < 0 ? 'Faltou dinheiro' : 'Sem falta', null, diffCls)}
+      ${kpi('Dias conferidos', sum.ok_pct == null ? '—' : `${sum.ok_pct}%`, `${sum.ok_days} de ${sum.due_days} · ${verdict}`)}
+    </div>
+    <div class="recon-tabs" role="group" aria-label="Filtrar dias">
+      ${STONE_TABS.map(([key, label]) => `<button type="button" class="btn-secondary" data-stone-tab-button="${key}" aria-pressed="${key === tab}">${label} <span class="tab-count">${counts[key]}</span></button>`).join('')}
+    </div>
+    <div class="table-wrap"><table class="data-table" id="recon-stone-table">
+      <thead><tr><th>Dia do repasse</th>${showAccount ? '<th>Conta</th>' : ''}<th class="num">Stone previu</th><th class="num">Banco recebeu</th><th class="num">Diferença</th><th>Situação</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <p class="recon-tab-empty" id="recon-stone-empty" hidden>Nada nesta aba.</p>
+  </section>`;
+}
+
+function applyStoneTab(tab) {
+  RECONCILIATION_STATE.stoneTab = tab;
+  let visible = 0;
+  document.querySelectorAll('#recon-stone-table tbody tr').forEach((row) => {
+    const show = tab === 'all' || row.dataset.stoneTab === tab;
+    row.hidden = !show;
+    if (show) visible += 1;
+  });
+  document.querySelectorAll('[data-stone-tab-button]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.stoneTabButton === tab));
+  });
+  const empty = document.getElementById('recon-stone-empty');
+  if (empty) empty.hidden = visible > 0;
+}
+
+function bindReconciliationStoneTabs() {
+  const buttons = document.querySelectorAll('[data-stone-tab-button]');
+  if (!buttons.length) return;
+  buttons.forEach((button) => button.addEventListener('click', () => applyStoneTab(button.dataset.stoneTabButton)));
+  applyStoneTab(RECONCILIATION_STATE.stoneTab);
 }
 
 /* ---------------------------------------------------------------- fontes de dados */

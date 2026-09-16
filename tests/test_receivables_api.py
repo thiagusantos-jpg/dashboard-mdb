@@ -102,3 +102,44 @@ def test_reconciliation_sources_report_what_each_account_has_imported(client):
     assert by_name["Stone"]["bank"]["count"] == 0
     assert by_name["Banco"]["stone"] == {"count": 0, "last_import_at": None, "last_settlement_date": None}
     assert str(by_name["Banco"]["cash_account_id"]) == str(bank["id"])
+
+
+def test_stone_daily_check_compares_the_xml_with_bank_credits(client):
+    stone = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Stone", "kind": "payment"}
+    ).json()
+    content = (FIXTURES / "stone-conciliation-sample.xml").read_bytes()
+    client.post(
+        f"/api/companies/1/finance/cash-accounts/{stone['id']}/receivables-import",
+        files={"file": ("stone-conciliation-sample.xml", content, "application/xml")},
+    )
+    expected = client.get(
+        "/api/companies/1/finance/receivables/expected-settlements",
+        params={"start": "2026-01-01", "end": "2026-12-31"},
+    ).json()
+    first = expected[0]
+    client.post(
+        "/api/companies/1/finance/cash-events",
+        json={"cash_account_id": stone["id"], "amount_cents": first["net_cents"],
+              "occurred_at": first["settlement_date"], "description": "Repasse Stone"},
+    )
+
+    response = client.get(
+        "/api/companies/1/finance/reconciliation/stone-daily",
+        params={"start": "2026-01-01", "end": "2026-12-31", "cash_account_id": stone["id"]},
+    )
+    assert response.status_code == 200, response.text
+    days = {d["settlement_date"]: d for d in response.json()["days"]}
+    assert days[first["settlement_date"]]["status"] == "ok"
+    assert len(days) == len(expected)
+
+
+def test_stone_daily_check_validates_the_period(client):
+    backwards = client.get(
+        "/api/companies/1/finance/reconciliation/stone-daily",
+        params={"start": "2026-09-10", "end": "2026-09-01"},
+    )
+    assert backwards.status_code == 422
+    default = client.get("/api/companies/1/finance/reconciliation/stone-daily")
+    assert default.status_code == 200
+    assert default.json()["days"] == []
