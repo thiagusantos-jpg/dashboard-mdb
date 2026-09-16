@@ -1563,6 +1563,10 @@ h2.section-header { line-height: 1.3; }
     letter-spacing: 0.3px; text-align: left; text-transform: uppercase; }
 .payables-table .payables-group-row th span { margin-left: 6px; color: var(--text-muted); font-weight: 600; letter-spacing: 0; text-transform: none; }
 .payables-group.overdue .payables-group-row th { color: var(--negative); }
+/* Fluxo de caixa: dia agrupado marcado como "hoje" (âmbar) ou saldo negativo (vermelho,
+ * sobrepõe "hoje" quando os dois se aplicam ao mesmo dia — a informação mais grave vence). */
+.payables-group.today .payables-group-row th { color: var(--amber); }
+.payables-group.negative .payables-group-row th { color: var(--negative); }
 .payables-desc { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-weight: 600; }
 .payables-tag { padding: 0 7px; border-radius: 10px; background: var(--surface-muted); color: var(--text-muted); font-size: 11.5px; font-weight: 700; }
 .due-late { color: var(--negative); font-weight: 700; }
