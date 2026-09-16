@@ -1694,3 +1694,38 @@ div.action-stat { cursor: default; }
     border-radius: 8px; background: var(--action-good-bg); color: var(--action-good-text); font-size: 12.5px; font-weight: 600; }
 .suggestion-note .btn-link { margin: 0; color: inherit; text-decoration: underline; }
 [data-late-fee] .field-help { color: var(--action-warn-text); }
+
+/* Conciliação → Fontes de dados */
+.recon-sources .source-detail { color: var(--text-muted); font-size: 12px; }
+.recon-sources .data-table td { vertical-align: top; }
+.recon-sources > .btn-link { margin-bottom: 8px; }
+.recon-preview-summary { margin: 0 0 8px; line-height: 1.5; }
+.recon-preview-summary + .field-help { margin: 0 0 12px; }
+.section-header .section-hint { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-left: 8px; }
+.recon-sources td .btn-link { text-align: left; }
+
+/* Conciliação → Repasses da Stone */
+.recon-filter { padding: 12px 0; border-bottom: 1px solid var(--divider); }
+.recon-stone .kpi-grid { margin-bottom: 12px; }
+.recon-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.recon-tabs .btn-secondary { min-height: 40px; }
+.recon-tabs .btn-secondary[aria-pressed="true"] { background: var(--dark); color: #fff; }
+.recon-tabs .tab-count { display: inline-block; min-width: 20px; margin-left: 4px; padding: 0 6px; border-radius: 10px; background: rgba(0, 0, 0, 0.08); font-size: 12px; }
+.recon-tabs .btn-secondary[aria-pressed="true"] .tab-count { background: rgba(255, 255, 255, 0.2); }
+.data-table .cell-note { margin-top: 2px; font-size: 11px; color: var(--text-muted); font-weight: 400; white-space: normal; }
+.data-table .num.value-negative { color: var(--negative); font-weight: 700; }
+.recon-tab-empty { color: var(--text-muted); padding: 8px 12px; }
+:root[data-theme="dark"] .recon-tabs .btn-secondary[aria-pressed="true"] { background: var(--yellow); color: #1a1a1a; }
+.recon-preview-counts { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 12px; padding: 0; list-style: none; font-size: 13px; }
+.recon-preview-all { margin: 12px 0; }
+.recon-preview-all summary { cursor: pointer; font-weight: 600; min-height: 32px; }
+.dre-row.plus .dre-bar i { background: var(--positive); }
+
+/* Atualizar saldo da Reserva */
+.btn-primary.btn-inline { width: auto; padding: 8px 14px; font-size: 13px; }
+.checkbox-row { display: flex; gap: 10px; align-items: flex-start; margin: 4px 0 12px; font-size: 13px; line-height: 1.45; cursor: pointer; }
+.checkbox-row input { width: 18px; height: 18px; margin-top: 1px; flex: none; }
+.reserve-panel-balance { margin: 0 0 12px; }
+.reserve-outcome { min-height: 20px; margin: 0 0 8px; padding: 0; font-size: 13px; }
+.reserve-outcome:not(:empty) { padding: 10px 12px; border-radius: 8px; background: var(--surface-muted); }
+.recon-reserve { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 4px 0 12px; font-size: 13px; }

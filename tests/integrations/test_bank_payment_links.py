@@ -317,3 +317,66 @@ def test_link_decision_revalidates_candidate_scope_and_amount(cash_account):
             decisions={"BANK-0001": f"link:{payment['cash_event_id']}"},
             preview_hash=preview["preview_hash"],
         )
+
+
+def _preview_and_commit(cash_account, name, statement):
+    preview = bank_files.preview_bank_import(COMPANY, cash_account["id"], name, statement)
+    result = bank_files.commit_bank_import(
+        COMPANY, cash_account["id"], name, statement,
+        decisions={item["external_id"]: item["decision"] for item in preview["items"]},
+        preview_hash=preview["preview_hash"],
+    )
+    return preview, result
+
+
+def test_reviewing_the_same_statement_again_marks_lines_as_already_imported(cash_account):
+    statement = _csv_statement(
+        external_id="BANK-0100", iso_date="2026-09-12", amount_cents=-15_000,
+        description="Pix fornecedor",
+    )
+    _preview_and_commit(cash_account, "extrato.csv", statement)
+
+    # Before the fix the second review offered the movement the first import
+    # created as "já lançado", and confirming that suggestion was refused.
+    preview, result = _preview_and_commit(cash_account, "extrato.csv", statement)
+    item = preview["items"][0]
+    assert item["already_imported"] is True
+    assert item["candidate_cash_event_ids"] == []
+    assert item["decision"] == "new"
+    assert preview["already_imported"] == 1
+    assert result == {"total": 1, "imported": 0, "duplicates": 1, "linked": 0, "transferred": 0}
+    assert ledger.account_balance(cash_account["id"]) == -15_000
+
+
+def test_overlapping_statements_never_link_a_new_line_to_another_imported_line(cash_account):
+    # Two different R$ 10 Pix on the same day, one in each file (monthly
+    # statements overlap). The second must not be offered as the first.
+    first = _csv_statement(external_id="PIX-A", iso_date="2026-09-12", amount_cents=1_000, description="Pix A")
+    second = (
+        "Data,Descricao,Valor,FITID\n"
+        "2026-09-12,Pix A,10.00,PIX-A\n"
+        "2026-09-12,Pix B,10.00,PIX-B\n"
+    ).encode("utf-8")
+    _preview_and_commit(cash_account, "setembro-1.csv", first)
+
+    preview, result = _preview_and_commit(cash_account, "setembro-2.csv", second)
+    by_id = {item["external_id"]: item for item in preview["items"]}
+    assert by_id["PIX-A"]["already_imported"] is True
+    assert by_id["PIX-B"]["already_imported"] is False
+    assert by_id["PIX-B"]["candidate_cash_event_ids"] == []
+    assert result["imported"] == 1 and result["duplicates"] == 1
+    assert ledger.account_balance(cash_account["id"]) == 2_000
+
+
+def test_a_payment_recorded_in_the_panel_is_still_offered_after_other_imports(cash_account):
+    other = _csv_statement(external_id="X-1", iso_date="2026-09-12", amount_cents=-40_000, description="Outro")
+    _preview_and_commit(cash_account, "a.csv", other)
+    entry = expense_entry(40_000)
+    payment = record_payment(
+        COMPANY, "entry", entry["id"], amount_cents=40_000, paid_at=date(2026, 9, 12),
+        expected_version=1, idempotency_key="pay-overlap", cash_account_id=cash_account["id"],
+    )
+    statement = _csv_statement(external_id="X-2", iso_date="2026-09-12", amount_cents=-40_000, description="Aluguel")
+
+    preview = bank_files.preview_bank_import(COMPANY, cash_account["id"], "b.csv", statement)
+    assert preview["items"][0]["candidate_cash_event_ids"] == [str(payment["cash_event_id"])]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import secrets
 from datetime import date, timedelta
 from typing import Optional
@@ -22,7 +23,7 @@ def _linked_item_ids(conn, item_type: str) -> set:
     }
 
 
-_INFLOW_NATURES = {"revenue", "financing_inflow"}
+_INFLOW_NATURES = {"revenue", "financing_inflow", "financial_income"}
 
 
 def _candidate_entries(conn, company: int, around: date, window_days: int) -> list:
@@ -266,3 +267,236 @@ def list_groups(company: int, *, status: Optional[str] = None) -> list:
             params,
         ).fetchall()
         return [_row_to_group(conn, row["id"]) for row in rows]
+
+
+RESERVE_ACCOUNT_NAME = "Reserva Stone"  # same as integrations.bank_files.RESERVE_ACCOUNT_NAME
+
+
+def data_sources(company: int) -> list:
+    """What has been imported into each active cash account: Stone sales
+    (conciliation XML) and bank statements (OFX/CSV). Feeds the checklist at
+    the top of Conciliação, so the partner sees what is missing before
+    trying to reconcile anything."""
+    with db.connection() as conn:
+        accounts = conn.execute(
+            "SELECT id,name,kind FROM cash_accounts WHERE company=? AND archived=0 ORDER BY name",
+            (company,),
+        ).fetchall()
+        result = []
+        for account in accounts:
+            if account["name"] == RESERVE_ACCOUNT_NAME:
+                # Fed by transfers from the Conta Stone statement; it has no
+                # statement of its own to import.
+                continue
+            stone = conn.execute(
+                """
+                SELECT COUNT(*) AS count,MAX(created_at) AS last_import_at,
+                       MAX(settlement_date) AS last_settlement_date
+                FROM stone_receivables WHERE company=? AND cash_account_id=?
+                """,
+                (company, account["id"]),
+            ).fetchone()
+            bank = conn.execute(
+                """
+                SELECT COUNT(*) AS count,MAX(updated_at) AS last_import_at
+                FROM external_records WHERE company=? AND source='bank_file' AND account_id=?
+                """,
+                (company, str(account["id"])),
+            ).fetchone()
+            result.append({
+                "cash_account_id": account["id"],
+                "name": account["name"],
+                "kind": account["kind"],
+                "stone": {
+                    "count": int(stone["count"] or 0),
+                    "last_import_at": stone["last_import_at"],
+                    "last_settlement_date": stone["last_settlement_date"],
+                },
+                "bank": {
+                    "count": int(bank["count"] or 0),
+                    "last_import_at": bank["last_import_at"],
+                },
+            })
+    return result
+
+
+# --- Conferência diária dos repasses Stone -----------------------------------
+# The conciliation XML says how much Stone will deposit on each day (sum of the
+# net installments); the bank statement says what actually arrived. Comparing
+# the two per day answers the partner's real question — "did Stone pay what it
+# owed?" — without matching dozens of individual sales. Read-only: nothing is
+# linked or stored, so it can never conflict with manual reconciliation.
+
+# A deposit may land a day early or after a weekend/holiday.
+STONE_DAYS_BEFORE = 1
+STONE_DAYS_AFTER = 3
+STONE_DEFAULT_TOLERANCE_CENTS = 100
+
+# The Conta Stone statement pays card sales as one credit per brand per day
+# ("Elo | Débito", "Antecipação | Crédito"), mixed with instant Pix from the
+# terminal and moves to/from "Reserva Stone". Another bank shows one deposit
+# from Stone. Either way the day's card credits are summed and compared with
+# the XML; Pix, transfers and the reserve are not card settlements.
+_CARD_SETTLEMENT = re.compile(r"\|\s*(d[ée]bito|cr[ée]dito)\s*$|antecipa", re.IGNORECASE)
+_NOT_SETTLEMENT = re.compile(r"reserva stone|\bpix\b|transfer[êe]ncia|devolu[çc][ãa]o", re.IGNORECASE)
+_STONE_DEPOSIT = re.compile(r"stone", re.IGNORECASE)
+
+
+def _is_card_settlement(description: str) -> bool:
+    text = description or ""
+    if _CARD_SETTLEMENT.search(text):
+        return True
+    return bool(_STONE_DEPOSIT.search(text)) and not _NOT_SETTLEMENT.search(text)
+
+
+def _settlement_units(credits: list) -> list:
+    """Per account: the day's card credits summed into one unit. An account
+    with no recognizable card credit (a bank that labels deposits oddly)
+    falls back to its individual credits."""
+    by_account = {}
+    for credit in credits:
+        by_account.setdefault(credit["cash_account_id"], []).append(credit)
+    units = []
+    for account_id, rows in by_account.items():
+        card = [c for c in rows if _is_card_settlement(c["description"])]
+        if not card:
+            units.extend(
+                dict(c, unit=f"event:{c['id']}", count=1) for c in rows
+            )
+            continue
+        days = {}
+        for c in card:
+            days.setdefault(c["occurred_at"][:10], []).append(c)
+        for day, members in days.items():
+            kinds = sorted({m["description"].rsplit(" - ", 1)[-1].strip() for m in members})
+            units.append({
+                "unit": f"day:{account_id}:{day}",
+                "cash_account_id": account_id,
+                "occurred_at": day,
+                "amount_cents": sum(m["amount_cents"] for m in members),
+                "count": len(members),
+                "description": (
+                    members[0]["description"] if len(members) == 1
+                    else f"{len(members)} créditos de cartão ({', '.join(kinds[:3])}{'…' if len(kinds) > 3 else ''})"
+                ),
+            })
+    return units
+
+
+def stone_daily_check(
+    company: int,
+    start: date,
+    end: date,
+    *,
+    today: date,
+    cash_account_id: Optional[int] = None,
+    tolerance_cents: int = STONE_DEFAULT_TOLERANCE_CENTS,
+) -> dict:
+    account_filter = " AND cash_account_id=?" if cash_account_id else ""
+    account_params = (cash_account_id,) if cash_account_id else ()
+    credit_start = (start - timedelta(days=STONE_DAYS_BEFORE)).isoformat()
+    credit_end = (end + timedelta(days=STONE_DAYS_AFTER)).isoformat()
+    with db.connection() as conn:
+        expected_rows = conn.execute(
+            f"""
+            SELECT cash_account_id,settlement_date,COUNT(*) AS sales,SUM(net_cents) AS net_cents
+            FROM stone_receivables
+            WHERE company=? AND settlement_date BETWEEN ? AND ?{account_filter}
+            GROUP BY cash_account_id,settlement_date
+            ORDER BY settlement_date,cash_account_id
+            """,
+            (company, start.isoformat(), end.isoformat(), *account_params),
+        ).fetchall()
+        credit_rows = conn.execute(
+            f"""
+            SELECT id,cash_account_id,occurred_at,amount_cents,description FROM cash_events
+            WHERE company=? AND kind='entry' AND amount_cents>0
+              AND reversed_event_id IS NULL
+              AND id NOT IN (SELECT reversed_event_id FROM cash_events WHERE reversed_event_id IS NOT NULL)
+              AND occurred_at BETWEEN ? AND ?{account_filter}
+            ORDER BY occurred_at,id
+            """,
+            (company, credit_start, credit_end, *account_params),
+        ).fetchall()
+        names = {
+            row["id"]: row["name"]
+            for row in conn.execute("SELECT id,name FROM cash_accounts WHERE company=?", (company,))
+        }
+
+    credits = _settlement_units([dict(row) for row in credit_rows])
+    used = set()
+
+    def window(settlement: date, account_id) -> list:
+        lo = (settlement - timedelta(days=STONE_DAYS_BEFORE)).isoformat()
+        hi = (settlement + timedelta(days=STONE_DAYS_AFTER)).isoformat()
+        return [
+            c for c in credits
+            if c["unit"] not in used and c["cash_account_id"] == account_id and lo <= c["occurred_at"][:10] <= hi
+        ]
+
+    def distance(credit: dict, settlement: date) -> int:
+        return abs((date.fromisoformat(credit["occurred_at"][:10]) - settlement).days)
+
+    days = []
+    # Exact-enough matches first, so a close-but-wrong credit never steals the
+    # deposit that belongs to another day.
+    pending = []
+    for row in expected_rows:
+        settlement = date.fromisoformat(row["settlement_date"])
+        expected = int(row["net_cents"] or 0)
+        candidates = [c for c in window(settlement, row["cash_account_id"])
+                      if abs(c["amount_cents"] - expected) <= tolerance_cents]
+        day = {
+            "cash_account_id": row["cash_account_id"],
+            "account_name": names.get(row["cash_account_id"], ""),
+            "settlement_date": row["settlement_date"],
+            "sales": int(row["sales"]),
+            "expected_cents": expected,
+            "received_cents": None,
+            "credit": None,
+            "difference_cents": None,
+            "status": None,
+        }
+        if candidates:
+            best = min(candidates, key=lambda c: (abs(c["amount_cents"] - expected), distance(c, settlement)))
+            used.add(best["unit"])
+            day.update(status="ok", credit=best, received_cents=best["amount_cents"],
+                       difference_cents=best["amount_cents"] - expected)
+        else:
+            pending.append((day, settlement))
+        days.append(day)
+
+    for day, settlement in pending:
+        nearby = window(settlement, day["cash_account_id"])
+        if nearby:
+            best = min(nearby, key=lambda c: (distance(c, settlement), abs(c["amount_cents"] - day["expected_cents"])))
+            used.add(best["unit"])
+            day.update(status="divergent", credit=best, received_cents=best["amount_cents"],
+                       difference_cents=best["amount_cents"] - day["expected_cents"])
+        elif settlement + timedelta(days=STONE_DAYS_AFTER) < today:
+            day.update(status="missing", difference_cents=-day["expected_cents"])
+        else:
+            day["status"] = "upcoming"
+
+    due = [d for d in days if d["status"] != "upcoming"]
+    ok = [d for d in due if d["status"] == "ok"]
+    expected_due = sum(d["expected_cents"] for d in due)
+    received_due = sum(d["received_cents"] or 0 for d in due)
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "tolerance_cents": tolerance_cents,
+        "summary": {
+            "expected_cents": expected_due,
+            "received_cents": received_due,
+            "difference_cents": received_due - expected_due,
+            "due_days": len(due),
+            "ok_days": len(ok),
+            "divergent_days": sum(1 for d in due if d["status"] == "divergent"),
+            "missing_days": sum(1 for d in due if d["status"] == "missing"),
+            "upcoming_days": len(days) - len(due),
+            "upcoming_cents": sum(d["expected_cents"] for d in days if d["status"] == "upcoming"),
+            "ok_pct": round(len(ok) / len(due) * 100) if due else None,
+        },
+        "days": days,
+    }

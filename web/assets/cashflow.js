@@ -347,6 +347,7 @@ async function renderFluxoCaixa(token) {
       <td>${esc(CASHFLOW_KIND_LABELS[a.kind] || a.kind)}</td>
       <td class="num">${money(a.balance_cents)}</td>
       <td><div class="row-actions">
+        ${isReserveAccount(a) ? `<button type="button" class="btn-primary btn-inline" data-reserve-balance="${esc(a.id)}">Atualizar saldo da Reserva</button>` : ''}
         <button type="button" class="btn-secondary" data-cash-statement="${esc(a.id)}" aria-label="Extrato de ${esc(a.name)}">Extrato</button>
         <button type="button" class="btn-secondary" data-cash-rename="${esc(a.id)}" aria-label="Renomear ${esc(a.name)}">Renomear</button>
         <button type="button" class="btn-secondary" data-cash-archive="${esc(a.id)}" aria-label="Arquivar ${esc(a.name)}">Arquivar</button>
@@ -420,6 +421,8 @@ async function renderFluxoCaixa(token) {
     openCashAccountForm({trigger: ev.currentTarget, onSaved: refresh}));
 
   const byId = Object.fromEntries(accounts.map((a) => [String(a.id), a]));
+  content.querySelectorAll('[data-reserve-balance]').forEach((button) => button.addEventListener('click', () =>
+    openReserveBalanceForm(byId[button.dataset.reserveBalance], {trigger: button, onSaved: refresh})));
   content.querySelectorAll('[data-cash-statement]').forEach((button) => button.addEventListener('click', () =>
     openCashStatement(byId[button.dataset.cashStatement], {trigger: button})));
   content.querySelectorAll('[data-cash-rename]').forEach((button) => button.addEventListener('click', () =>
@@ -444,5 +447,88 @@ async function renderFluxoCaixa(token) {
     hlines: [{value: 0, color: t.bad, dash: '2 4', label: 'Saldo zero'}],
     yFmt: brlShort, yTitle: 'Saldo (R$)',
     empty: 'Sem dados suficientes para o gráfico.',
+  });
+}
+
+/* ---------------------------------------------------------------- Reserva Stone */
+
+// Same name the bank import gives the account it creates (backend/integrations/bank_files.py).
+const RESERVE_ACCOUNT_NAME = 'Reserva Stone';
+
+function isReserveAccount(account) {
+  return !!account && account.name === RESERVE_ACCOUNT_NAME;
+}
+
+function buildReserveBalanceRequest(accountId, values) {
+  const errors = {};
+  const cents = parseMoneyToCents(values.real_balance);
+  if (cents == null || cents < 0) errors.real_balance = 'Informe o saldo que aparece no app da Stone (ex.: 3.127,45).';
+  if (cashBlank(values.as_of)) errors.as_of = 'Informe a data do saldo.';
+  else if (values.as_of > todayISO()) errors.as_of = 'Use a data de hoje ou uma data passada.';
+  if (Object.keys(errors).length) return {errors};
+  return {
+    method: 'POST', path: `${financeBasePath()}/cash-accounts/${accountId}/reserve-balance`,
+    body: {real_balance_cents: cents, as_of: values.as_of, opening: values.opening === true},
+  };
+}
+
+/* What will be booked, in words, before anything is sent. */
+function reserveBalanceOutcome(panelCents, realCents, opening) {
+  if (realCents == null) return '';
+  const diff = realCents - panelCents;
+  if (diff === 0) return 'O saldo do painel já está igual ao da Stone: nada será lançado.';
+  const amount = money(Math.abs(diff));
+  if (opening) return `${diff > 0 ? '+' : '−'}${amount} entra como <strong>saldo inicial</strong>, com data anterior aos extratos importados. Não conta como rendimento.`;
+  return diff > 0
+    ? `+${amount} entra como <strong>rendimento da Reserva</strong> (receita financeira no resultado gerencial).`
+    : `−${amount} entra como <strong>ajuste negativo</strong> (IR/IOF, despesa financeira no resultado gerencial).`;
+}
+
+async function openReserveBalanceForm(account, ctx) {
+  ctx = ctx || {};
+  const drawer = openDrawer({
+    title: 'Atualizar saldo da Reserva', trigger: ctx.trigger,
+    body: '<div class="skeleton-block" aria-label="Carregando saldo da Reserva"></div>',
+  });
+  let status;
+  try {
+    status = await api(`${financeBasePath()}/cash-accounts/${account.id}/reserve-balance`);
+  } catch (e) {
+    return drawerLoadError(drawer, e, () => { drawer.close(); openReserveBalanceForm(account, ctx); });
+  }
+  if (!drawer.dialog.isConnected) return;
+  drawer.setBody(`
+    <form class="drawer-form" novalidate>
+      <p class="field-help">A Reserva Stone rende dentro da Stone e esse rendimento não aparece no extrato da Conta Stone.
+        Abra o app da Stone, veja o saldo da Reserva e informe aqui: o painel lança a diferença.</p>
+      <p class="reserve-panel-balance">Saldo no painel: <strong>${money(status.panel_balance_cents)}</strong>${status.last_update_date ? ` · última atualização em ${dateBR(status.last_update_date)}` : ''}</p>
+      <div class="form-grid">
+        ${formField('real_balance', 'Saldo no app da Stone (R$)', moneyInput(''))}
+        ${formField('as_of', 'Data desse saldo', dateInput(todayISO()))}
+      </div>
+      ${status.has_opening ? '' : `<label class="checkbox-row"><input type="checkbox" name="opening"${status.suggest_opening ? ' checked' : ''}>
+        É a primeira atualização: a diferença é o dinheiro que já estava na Reserva antes dos extratos importados (saldo inicial, não rendimento).</label>`}
+      <p class="reserve-outcome" data-reserve-outcome aria-live="polite"></p>
+      ${formActions('Atualizar saldo')}
+    </form>`);
+  const form = drawer.dialog.querySelector('form');
+  const outcome = form.querySelector('[data-reserve-outcome]');
+  const preview = () => {
+    const values = readFormValues(form);
+    outcome.innerHTML = reserveBalanceOutcome(status.panel_balance_cents, parseMoneyToCents(values.real_balance), values.opening === true);
+  };
+  form.addEventListener('input', preview);
+  form.addEventListener('change', preview);
+  bindDrawerForm(drawer, (values) => buildReserveBalanceRequest(account.id, values), (result) => {
+    const booked = {
+      none: 'Nada a lançar: o saldo já batia.',
+      opening: `Saldo inicial de ${money(result.difference_cents)} lançado em ${dateBR(result.date)}.`,
+      income: `Rendimento de ${money(result.difference_cents)} lançado em ${dateBR(result.date)}.`,
+      expense: `Ajuste negativo de ${money(Math.abs(result.difference_cents))} lançado em ${dateBR(result.date)}.`,
+    }[result.booked];
+    drawer.setBody(`<p role="status"><strong>Saldo da Reserva atualizado.</strong></p>
+      <p>${booked} A Reserva agora mostra ${money(result.real_balance_cents)}.</p>
+      <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Fechar</button></div>`);
+    if (ctx.onSaved) ctx.onSaved(result);
   });
 }

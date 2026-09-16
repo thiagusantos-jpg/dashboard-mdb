@@ -10,12 +10,15 @@ test('receivables navigation and page exist', () => {
   const html = fs.readFileSync(path.join(root, 'web/index.html'), 'utf8');
   const app = fs.readFileSync(path.join(root, 'web/assets/app.js'), 'utf8');
   const receivables = fs.readFileSync(path.join(root, 'web/assets/receivables.js'), 'utf8');
+  const reconciliation = fs.readFileSync(path.join(root, 'web/assets/reconciliation.js'), 'utf8');
 
   assert.match(html, /data-page="recebiveis"/);
   assert.match(html, /assets\/receivables\.js/);
   assert.match(app, /['"]recebiveis['"]/);
-  assert.match(receivables, /receivables-import/);
   assert.match(receivables, /function renderRecebiveis/);
+  // The Stone XML upload lives with the other data sources, in Conciliação.
+  assert.match(reconciliation, /receivables-import/);
+  assert.match(receivables, /openStoneImportForm/);
 });
 
 /* ---------------------------------------------------------------------------
@@ -44,7 +47,7 @@ function loadReceivables() {
   const context = vm.createContext({
     console,
     document: {
-      getElementById(id) { return id === 'receivables-import-form' ? formElement(id) : element(id); },
+      getElementById(id) { return id === 'receivables-rate-edit' ? formElement(id) : (elements[id] || (id === 'content' ? element(id) : null)); },
     },
   });
   vm.runInContext(pageStateSource, context);
@@ -61,8 +64,11 @@ function loadReceivables() {
   context.esc = (s) => String(s == null ? '' : s);
   context.money = (cents) => cents == null ? 'Indisponível' : String(cents);
   context.dateBR = (iso) => iso || '—';
-  context.kpi = (title, value) => `<div>${title}:${value}</div>`;
+  context.kpi = (title, value, subtitle) => `<div class="kpi-title">${title}</div><div class="kpi-value ">${value}</div>${subtitle || ''}`;
   context.addMonthsISO = (iso) => iso;
+  context.todayISO = () => '2026-09-16';
+  context.icon = () => '';
+  context.financeBasePath = () => '/api/companies/1/finance';
   context.financeError = (title, subtitle, error, retry) => { context.__financeError = {title, subtitle, error, retry}; };
   vm.runInContext(receivablesSource, context);
   return {context, elements, listeners};
@@ -97,34 +103,49 @@ test('a stale receivables response never overwrites a newer page once the user h
   assert.equal(elements.content.innerHTML, contentAfterSecond, 'the stale (first) response must not repaint #content');
 });
 
-test('the import form is wrapped with watchForm so an in-progress selection marks the page dirty', async () => {
-  const {context, elements, listeners} = loadReceivables();
-  context.api = async () => [[], [], {effective_rate_pct: null, contracted_rate_pct: null, variance_pct: null}];
-
+test('the agenda uses the styled table, a heading and past days as well as upcoming ones', async () => {
+  const {context, elements} = loadReceivables();
+  const calls = [];
+  context.api = async (url) => {
+    calls.push(url);
+    if (url.endsWith('/cash-accounts')) return [{id: '7', name: 'Stone'}];
+    if (url.includes('expected-settlements')) {
+      return [
+        {settlement_date: '2026-09-01', count: 2, gross_cents: 1000, fee_cents: 20, net_cents: 980},
+        {settlement_date: '2026-10-01', count: 1, gross_cents: 500, fee_cents: 10, net_cents: 490},
+      ];
+    }
+    return {effective_rate_pct: 2, contracted_rate_pct: null, variance_pct: null};
+  };
   await context.renderRecebiveis();
-
-  assert.ok(listeners['receivables-import-form'], 'the import form must have listeners attached');
-  assert.equal(context.APP.pageState.isDirty(), false);
-  listeners['receivables-import-form'].change(); // simulate the user picking a file / account
-  assert.equal(context.APP.pageState.isDirty(), true, 'watchForm() must mark the page dirty on change');
-  assert.equal(context.APP.pageState.canRefresh(), false, 'a dirty import form must block a background refresh');
+  const html = elements.content.innerHTML;
+  assert.match(html, /<h1 class="page-title">/);
+  assert.match(html, /<table class="data-table">/);
+  assert.ok(calls.some((url) => url.includes('expected-settlements?start=2026-08-17&end=')), 'the window starts 30 days before today');
+  assert.match(html, /Já deveria ter caído/);
+  assert.match(html, /A receber/);
+  assert.match(html, /A receber \(próximos 60 dias\)<\/div><div class="kpi-value ">490/, 'only upcoming net amounts count as to receive');
+  assert.match(html, /Informar taxa contratada/);
+  assert.match(html, /receivables-import-open/);
+  assert.doesNotMatch(html, /receivables-create-account/);
 });
 
-test('a successful import clears the dirty flag before re-rendering', async () => {
+test('without a cash account the page offers to create one instead of a dead select', async () => {
   const {context, elements} = loadReceivables();
-  context.api = async () => [[], [], {effective_rate_pct: null, contracted_rate_pct: null, variance_pct: null}];
+  context.api = async (url) => (url.includes('effective-fee-report')
+    ? {effective_rate_pct: null, contracted_rate_pct: null, variance_pct: null} : []);
   await context.renderRecebiveis();
-  context.APP.pageState.markDirty(true);
+  assert.match(elements.content.innerHTML, /receivables-create-account/);
+  assert.match(elements.content.innerHTML, /Criar conta de caixa/);
+});
 
-  elements['receivables-account'] = {value: 'acc-1'};
-  elements['receivables-file'] = {files: [{name: 'conciliacao.xml'}]};
-  context.FormData = function () { this.append = () => {}; };
-  context.fetch = async () => ({
-    ok: true,
-    json: async () => ({imported: 2, duplicates: 1}),
-  });
-
-  await context.onImportReceivables({preventDefault() {}});
-
-  assert.equal(context.APP.pageState.isDirty(), false, 'clearDirty() must run after a successful import');
+test('the contracted rate accepts Brazilian decimals and rejects nonsense', () => {
+  const {context} = loadReceivables();
+  const ok = context.buildContractedRateRequest({rate_pct: '1,49%', effective_from: '2026-09-16'});
+  assert.equal(ok.method, 'PUT');
+  assert.equal(ok.path, '/api/companies/1/finance/receivables/contracted-rate');
+  assert.deepEqual({...ok.body}, {rate_pct: 1.49, effective_from: '2026-09-16'});
+  assert.ok(context.buildContractedRateRequest({rate_pct: 'abc', effective_from: '2026-09-16'}).errors.rate_pct);
+  assert.ok(context.buildContractedRateRequest({rate_pct: '35', effective_from: '2026-09-16'}).errors.rate_pct);
+  assert.ok(context.buildContractedRateRequest({rate_pct: '1', effective_from: ''}).errors.effective_from);
 });

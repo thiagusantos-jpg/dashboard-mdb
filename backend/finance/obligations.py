@@ -28,7 +28,7 @@ _OPEN_ENTRY_STATUSES = ("open", "overdue", "partially_paid")
 # filters OUT these same two natures. Without this filter, a manual entry
 # booked against a revenue-nature account (e.g. the `sales` system account)
 # would surface here as a "payable", which it is not.
-_NON_PAYABLE_NATURES = ("revenue", "financing_inflow")
+_NON_PAYABLE_NATURES = ("revenue", "financing_inflow", "financial_income")
 
 # `financial_entries.source` marker owned exclusively by the loan machinery.
 # Grep confirms only three writers use it, and none of them is an

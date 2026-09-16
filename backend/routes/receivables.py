@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
 from .. import database as db, permissions
-from ..finance import receivables
+from ..finance import accounts, receivables
 from ..integrations.stone_receivables import ReceivablesFileError
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
+
+
+class ContractedRate(BaseModel):
+    rate_pct: float = Field(ge=0, le=20)
+    effective_from: Optional[date] = None
 
 
 def _require_company(company: int) -> None:
@@ -53,3 +60,15 @@ def get_expected_settlements(company: int, start: date, end: date):
 def get_effective_fee_report(company: int, start: date, end: date):
     _require_company(company)
     return receivables.effective_fee_report(company, start, end)
+
+
+@router.put(
+    "/receivables/contracted-rate",
+    dependencies=[Depends(permissions.require_permission("settings.manage"))],
+)
+def put_contracted_rate(company: int, body: ContractedRate):
+    """The MDR agreed with Stone, in percent — what the effective rate is compared against."""
+    _require_company(company)
+    effective_from = (body.effective_from or date.today()).isoformat()
+    accounts.set_parameter(company, "contracted_mdr_rate", body.rate_pct, effective_from)
+    return {"rate_pct": body.rate_pct, "effective_from": effective_from}

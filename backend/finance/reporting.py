@@ -149,6 +149,7 @@ def management_result(
         exclude_key="owner_compensation",
     ) - amount({"operating_expense"}, key="owner_compensation_taxes")
     financial_expenses = amount({"financial_expense"})
+    financial_income = amount({"financial_income"})
     distributions = amount({"profit_distribution"})
     operating_result = (
         gross_profit - operating_expenses - owner_compensation
@@ -156,13 +157,13 @@ def management_result(
         else None
     )
     managerial_result = (
-        operating_result - financial_expenses
+        operating_result - financial_expenses + financial_income
         if operating_result is not None
         else None
     )
     break_even = _break_even(account_lines, revenue, cogs, sales_available, restricted, period)
     if restricted:
-        operating_expenses = owner_compensation = financial_expenses = None
+        operating_expenses = owner_compensation = financial_expenses = financial_income = None
         distributions = operating_result = managerial_result = None
 
     reasons = []
@@ -192,6 +193,7 @@ def management_result(
         "owner_compensation_cents": owner_compensation,
         "operating_result_cents": operating_result,
         "financial_expenses_cents": financial_expenses,
+        "financial_income_cents": financial_income,
         "managerial_result_cents": managerial_result,
         "profit_distribution_cents": distributions,
         "accounts": account_lines,
