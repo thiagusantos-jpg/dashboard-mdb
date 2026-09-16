@@ -25,7 +25,10 @@ const APP = {
   statusTimer: null,  // background status/dashboard refresh (see STATUS_POLL_MS)
   syncPending: null,  // sync mode just clicked, until the status poll sees its job row
   pollTimer: null,    // 4s polling while a sync job is queued/running
-  estoque: {q: '', sort: 'revenue', dir: 'desc'},  // Produtos & Estoque search/sort (filter lives in the route)
+  // Produtos & Estoque search/sort. Filter, search and category also ride in the route
+  // (syncEstoqueRoute), so a filtered view can be saved and reopened as it was.
+  estoque: {q: '', cat: '', sort: 'revenue', dir: 'desc', limit: 200},
+  estoqueCache: null,  // enriched catalog (coverage, idle value), keyed by payload
   // Page-load coordinator (page-state.js, loaded before this file): tells a
   // render whether its response still belongs to the page on screen, and
   // whether a background refresh may repaint over a form being edited.
@@ -243,6 +246,8 @@ function onDelegatedClick(ev) {
   if (filter) return setEstoqueFilter(filter.dataset.estoqueFilter);
   const sort = ev.target.closest('[data-sort]');
   if (sort) return sortEstoque(sort.dataset.sort);
+  if (ev.target.closest('[data-estoque-more]')) return showMoreEstoque();
+  if (ev.target.closest('[data-estoque-export]')) return exportEstoqueCsv();
   const explainBtn = ev.target.closest('[data-explain]');
   if (explainBtn) return explainBtn.nextElementSibling.classList.toggle('open');
   const tab = ev.target.closest('[data-tab]');
@@ -1429,105 +1434,304 @@ function renderResumo(data) {
 
 /* ---------------------------------------------------------------- Produtos & Estoque */
 
+// A partner opens this page with three questions: what has to be bought, where the money is
+// sitting still, and where the margin is leaking. Every filter, column and summary number
+// below answers one of them — the 11-thousand-product catalog is the page's floor, not the
+// first thing it shows.
+
 // 'ruptura', 'abaixo-custo' and 'sem-custo' must stay identical to the predicates behind the
-// Resumo alerts (backend/api.py dashboard()), so "Ver produtos" lists exactly what was counted.
+// Resumo alerts (backend/api.py dashboard_alerts()), so "Ver produtos" lists exactly what was
+// counted; 'custo-zero' is the deep link from Preços e margens (insights.js).
+const ESTOQUE_COVER_DAYS = 7;   // "runs out this week" — one purchase cycle of the store
+const ESTOQUE_PAGE = 200;       // rows drawn at a time (see renderEstoqueTable)
+
 const ESTOQUE_FILTERS = [
-  {key: '', label: 'Todos', test: () => true},
-  {key: 'curva-a', label: 'Curva A', test: (p) => p.abc === 'A'},
-  {key: 'ruptura', label: 'Curva A sem estoque', test: (p) => p.abc === 'A' && p.stock != null && p.stock <= 0},
-  {key: 'estoque-zerado', label: 'Estoque ≤ 0', test: (p) => p.stock != null && p.stock <= 0},
-  {key: 'abaixo-custo', label: 'Preço abaixo do custo',
+  {key: '', label: 'Todos', group: 'lente', test: () => true},
+  {key: 'ruptura', label: 'Curva A sem estoque', group: 'acao', urgent: true,
+    test: (p) => p.abc === 'A' && p.stock != null && p.stock <= 0},
+  {key: 'acabando', label: `Acaba em ${ESTOQUE_COVER_DAYS} dias`, group: 'acao', urgent: true,
+    test: (p) => p.coverage_days != null && p.coverage_days <= ESTOQUE_COVER_DAYS},
+  {key: 'abaixo-custo', label: 'Preço abaixo do custo', group: 'acao', urgent: true,
     test: (p) => p.current_price != null && p.current_cost != null && p.current_price < p.current_cost},
-  {key: 'sem-custo', label: 'Vendido sem custo', test: (p) => p.unknown > 0},
+  {key: 'parado', label: 'Parado (sem venda)', group: 'acao',
+    test: (p) => p.stock != null && p.stock > 0 && p.revenue === 0},
+  {key: 'estoque-zerado', label: 'Sem estoque', group: 'acao', test: (p) => p.stock === 0},
+  {key: 'curva-a', label: 'Curva A', group: 'lente', test: (p) => p.abc === 'A'},
+  // Data, not operation: Mobne reports negative stock when an incoming invoice was never
+  // entered. Folding that into "sem estoque" filled one filter with two thirds of the catalog
+  // and left the ruptura list with no practical use.
+  {key: 'estoque-negativo', label: 'Estoque negativo', group: 'dados',
+    test: (p) => p.stock != null && p.stock < 0},
+  {key: 'sem-custo', label: 'Vendido sem custo', group: 'dados', test: (p) => p.unknown > 0},
   // Same rule the Mapa de produtos uses to keep a product out of the groups (fake 100% margin).
-  {key: 'custo-zero', label: 'Custo zero', test: (p) => p.cost === 0 && p.revenue > 0},
+  {key: 'custo-zero', label: 'Custo zero', group: 'dados', test: (p) => p.cost === 0 && p.revenue > 0},
+];
+
+const ESTOQUE_GROUPS = [
+  {key: 'lente', label: 'Ver'},
+  {key: 'acao', label: 'Precisa de ação'},
+  {key: 'dados', label: 'Conferir no Mobne'},
 ];
 
 const ESTOQUE_COLS = [
-  {key: 'name', label: 'Produto'}, {key: 'category', label: 'Categoria'},
-  {key: 'stock', label: 'Estoque atual', num: true}, {key: 'current_price', label: 'Preço atual', num: true},
-  {key: 'current_cost', label: 'Custo atual', num: true}, {key: 'revenue', label: 'Receita no período', num: true},
-  {key: 'margin', label: 'Margem', num: true}, {key: 'abc', label: 'ABC'},
+  {key: 'name', label: 'Produto'},
+  {key: 'stock', label: 'Estoque', num: true},
+  {key: 'coverage_days', label: 'Cobertura', num: true, hint: 'Dias que o estoque atual aguenta no ritmo de venda do período'},
+  {key: 'stock_value', label: 'Valor parado', num: true, hint: 'Estoque atual × custo atual'},
+  {key: 'quantity_sold', label: 'Vendido', num: true, hint: 'Quantidade vendida no período'},
+  {key: 'current_price', label: 'Preço', num: true},
+  {key: 'current_cost', label: 'Custo', num: true},
+  {key: 'revenue', label: 'Receita', num: true},
+  {key: 'margin', label: 'Margem', num: true},
+  {key: 'abc', label: 'ABC'},
 ];
 
-const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-const estoqueFilter = () => ESTOQUE_FILTERS.find((f) => f.key === (APP.routeParams.get('filtro') || '')) || ESTOQUE_FILTERS[0];
+const fold = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const estoqueFilterBy = (key) => ESTOQUE_FILTERS.find((f) => f.key === (key || '')) || ESTOQUE_FILTERS[0];
+const estoqueFilter = () => estoqueFilterBy(APP.routeParams.get('filtro'));
+
+// Mobne stock comes fractional (KG). num() prints 456,799 for 456.8 kg, and next to 1.049
+// units that reads as four hundred thousand: one decimal place settles the ambiguity.
+const qty = (v) => v == null ? '—' : new Intl.NumberFormat('pt-BR', {maximumFractionDigits: 1}).format(v);
+// money() says "Indisponível" for a missing value, which in a numeric column shoves the whole
+// table sideways; here a dash is enough and the column stays aligned.
+const cash = (cents) => cents == null ? '—' : money(cents);
+
+// Sales days the period actually covers: the backend sends `end` as the last day with a
+// receipt (not the day the sync asked for), so demand is not diluted by days Mobne has not
+// exported yet.
+function periodSalesDays(data) {
+  const days = (data.daily || []).length;
+  if (days) return days;
+  const start = Date.parse(`${data.start || ''}T00:00:00`), end = Date.parse(`${data.end || ''}T00:00:00`);
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? Math.round((end - start) / 86400000) + 1 : 0;
+}
+
+// Coverage is the number this page exists for: how many days the current stock lasts at the
+// period's selling pace. It only means anything with positive stock and sales in the period —
+// with no sales a product does not "run out", it sits still, and the Parado filter owns it.
+function enrichInventory(inventory, salesDays) {
+  return (inventory || []).map((p) => {
+    const demand = salesDays > 0 ? (p.quantity_sold || 0) / salesDays : 0;
+    return Object.assign({}, p, {
+      daily_demand: demand,
+      coverage_days: p.stock != null && p.stock > 0 && demand > 0 ? p.stock / demand : null,
+      stock_value: p.stock != null && p.stock > 0 && p.current_cost != null ? Math.round(p.stock * p.current_cost) : null,
+    });
+  });
+}
+
+// One pass over the catalog, cached by payload identity: the filters, the sort and the summary
+// all read the same derived fields, and recomputing them on every keystroke over 11 thousand
+// products is what made the search box stutter.
+function estoqueRows(data) {
+  if (APP.estoqueCache && APP.estoqueCache.source === data.inventory) return APP.estoqueCache.rows;
+  const rows = enrichInventory(data.inventory, periodSalesDays(data));
+  APP.estoqueCache = {source: data.inventory, rows};
+  return rows;
+}
+
+// The four numbers a partner checks before opening the list itself.
+function estoqueSummary(rows) {
+  const sum = (list) => list.reduce((total, p) => total + (p.stock_value || 0), 0);
+  const idle = rows.filter(estoqueFilterBy('parado').test);
+  const ending = rows.filter(estoqueFilterBy('acabando').test);
+  return {
+    value: sum(rows),
+    items: rows.filter((p) => p.stock != null && p.stock > 0).length,
+    idleCount: idle.length, idleValue: sum(idle),
+    endingCount: ending.length,
+    rupturaCount: rows.filter(estoqueFilterBy('ruptura').test).length,
+    negativeCount: rows.filter(estoqueFilterBy('estoque-negativo').test).length,
+  };
+}
+
+// Coverage band: color and word together — the color alone tells nothing to anyone who can't
+// tell red from green (the word rides in the cell's hidden text).
+function coverBand(days) {
+  if (days == null) return {cls: '', text: '—', word: ''};
+  const text = days >= 999 ? '999+ d' : `${days.toFixed(days < 10 ? 1 : 0).replace('.', ',')} d`;
+  if (days <= 3) return {cls: 'cover-critical', text, word: 'cobertura crítica'};
+  if (days <= ESTOQUE_COVER_DAYS) return {cls: 'cover-low', text, word: 'cobertura baixa'};
+  if (days > 60) return {cls: 'cover-high', text, word: 'estoque em excesso'};
+  return {cls: '', text, word: 'cobertura confortável'};
+}
+
+// A single definition of the visible list, shared by the table and by the export — duplicating
+// it is exactly how a CSV ends up holding something other than what is on screen.
+function estoqueView(data) {
+  const filter = estoqueFilter();
+  const q = fold(APP.estoque.q).trim();
+  const cat = APP.estoque.cat;
+  const col = ESTOQUE_COLS.find((c) => c.key === APP.estoque.sort) || ESTOQUE_COLS.find((c) => c.key === 'revenue');
+  const dir = APP.estoque.dir;
+  const rows = estoqueRows(data)
+    .filter(filter.test)
+    .filter((p) => !cat || p.category === cat)
+    .filter((p) => !q || fold(p.name).includes(q) || fold(p.category).includes(q) || fold(p.id).includes(q))
+    .sort((a, b) => {
+      const va = a[col.key], vb = b[col.key];
+      if (va == null || vb == null) return va == null ? (vb == null ? 0 : 1) : -1;  // vazios por último, nos dois sentidos
+      const c = col.num ? va - vb : String(va).localeCompare(String(vb), 'pt-BR');
+      return dir === 'asc' ? c : -c;
+    });
+  return {rows, filter, col, dir, q, cat};
+}
 
 function renderEstoque(data) {
-  const inv = data.inventory || [];
+  // A filtered view kept in the bookmarks (or pasted into a conversation) has to reopen the
+  // same: on entering the page the route is the source of filter, search and category.
+  APP.estoque.q = APP.routeParams.get('busca') || '';
+  APP.estoque.cat = APP.routeParams.get('categoria') || '';
+  APP.estoque.limit = ESTOQUE_PAGE;
+  const rows = estoqueRows(data);
   const active = estoqueFilter().key;
+  const s = estoqueSummary(rows);
+  const categories = Array.from(new Set(rows.map((p) => p.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  const chip = (f) => `<button type="button" class="chip ${f.key === active ? 'active' : ''}" aria-pressed="${f.key === active}" data-estoque-filter="${f.key}">
+    ${esc(f.label)}<span class="chip-count ${f.urgent && rows.filter(f.test).length ? 'chip-count-urgent' : ''}">${num(rows.filter(f.test).length)}</span></button>`;
+
   document.getElementById('content').innerHTML = `
     <div class="page-title">${icon('package')} Produtos e estoque</div>
     <div class="page-subtitle">Estoque e preço são o retrato ATUAL do Mobne — não representam o histórico do período selecionado.</div>
     <span class="periodo-badge muted">Estoque: ${dt(data.stock_updated_at)}</span>
     <span class="periodo-badge muted">Preços: ${dt(data.prices_updated_at)}</span>
+
+    <div class="kpi-grid kpi-grid-4 mt-16">
+      ${kpiCard('Dinheiro parado em estoque', money(s.value), '', '',
+        `${num(s.items)} produtos com estoque positivo`)}
+      ${kpiCard('Precisa comprar', num(s.endingCount), s.endingCount ? 'kpi-negative' : '', '',
+        `Acabam em até ${ESTOQUE_COVER_DAYS} dias no ritmo atual`)}
+      ${kpiCard('Curva A sem estoque', num(s.rupturaCount), s.rupturaCount ? 'kpi-negative' : '', '',
+        'Campeões de venda com estoque zerado ou negativo')}
+      ${kpiCard('Parado sem vender', money(s.idleValue), '', '',
+        `${num(s.idleCount)} produtos com estoque e nenhuma venda no período`)}
+    </div>
+
+    ${s.negativeCount ? `<div class="story-box mt-16">${icon('triangle-alert')} ${num(s.negativeCount)} produtos estão com estoque
+      <strong>negativo</strong> no Mobne — normalmente é uma entrada de nota que não foi lançada, não uma falta real.
+      Enquanto não for corrigido, eles inflam a conta de ruptura.
+      <button type="button" class="btn-link" data-estoque-filter="estoque-negativo">Ver a lista para conferir →</button></div>` : ''}
+
     <div class="estoque-toolbar">
-      <label class="field-label" for="estoque-search">Buscar produto ou categoria</label>
-      <input type="search" id="estoque-search" class="search-input" placeholder="Ex.: banana, cerveja…" autocomplete="off" value="${esc(APP.estoque.q)}">
-      <div class="filter-chips" role="group" aria-label="Filtros rápidos">
-        ${ESTOQUE_FILTERS.map((f) => `<button type="button" class="chip ${f.key === active ? 'active' : ''}" aria-pressed="${f.key === active}" data-estoque-filter="${f.key}">
-          ${esc(f.label)}<span class="chip-count">${num(inv.filter(f.test).length)}</span></button>`).join('')}
+      <div class="estoque-controls">
+        <div class="estoque-control">
+          <label class="field-label" for="estoque-search">Buscar produto, categoria ou código</label>
+          <input type="search" id="estoque-search" class="search-input" placeholder="Ex.: banana, cerveja, 7891…" autocomplete="off" value="${esc(APP.estoque.q)}">
+        </div>
+        <div class="estoque-control">
+          <label class="field-label" for="estoque-cat">Categoria</label>
+          <select id="estoque-cat" class="search-input">
+            <option value="">Todas as categorias</option>
+            ${categories.map((c) => `<option value="${esc(c)}" ${c === APP.estoque.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+          </select>
+        </div>
+        <button type="button" class="btn-secondary estoque-export" data-estoque-export>${icon('download')} Baixar lista (CSV)</button>
       </div>
+      ${ESTOQUE_GROUPS.map((g) => {
+        const group = ESTOQUE_FILTERS.filter((f) => f.group === g.key);
+        return `<div class="chip-group">
+          <span class="chip-group-label" id="chip-group-${g.key}">${esc(g.label)}</span>
+          <div class="filter-chips" role="group" aria-labelledby="chip-group-${g.key}">${group.map(chip).join('')}</div>
+        </div>`;
+      }).join('')}
     </div>
     <div id="estoque-count" class="result-count" role="status" aria-live="polite"></div>
-    <div class="data-table-container table-scroll-tall"><table class="data-table" id="estoque-table"></table></div>
+    <div class="data-table-container table-scroll-tall"><table class="data-table data-table-wide" id="estoque-table"></table></div>
+    <div id="estoque-more" class="estoque-more"></div>
   `;
   const input = document.getElementById('estoque-search');
   let timer = null;
   input.addEventListener('input', () => {
     clearTimeout(timer);
-    timer = setTimeout(() => { APP.estoque.q = input.value; renderEstoqueTable(); }, 150);
+    timer = setTimeout(() => {
+      APP.estoque.q = input.value;
+      APP.estoque.limit = ESTOQUE_PAGE;  // a new search starts at the top of the new list
+      syncEstoqueRoute();
+      renderEstoqueTable();
+    }, 150);
+  });
+  document.getElementById('estoque-cat').addEventListener('change', (ev) => {
+    APP.estoque.cat = ev.target.value;
+    APP.estoque.limit = ESTOQUE_PAGE;
+    syncEstoqueRoute();
+    renderEstoqueTable();
   });
   renderEstoqueTable();
 }
 
-// Redraws only the table + count, so the search box keeps focus while typing.
+// Redraws only the table + count, so the search box keeps focus while typing. Draws at most
+// ESTOQUE_PAGE rows: a broad filter reaches 7 thousand products, and dropping all of them into
+// the DOM on every keystroke froze the page for seconds. The list arrives sorted, so what
+// matters is at the top; the CSV carries the whole list.
 function renderEstoqueTable() {
   const data = APP.dashboard;
   const table = document.getElementById('estoque-table');
   if (!data || !table) return;
-  const inv = data.inventory || [];
-  const filter = estoqueFilter();
-  const q = fold(APP.estoque.q).trim();
-  const {sort, dir} = APP.estoque;
-  const col = ESTOQUE_COLS.find((c) => c.key === sort) || ESTOQUE_COLS[5];
-  const rows = inv.filter(filter.test)
-    .filter((p) => !q || fold(p.name).includes(q) || fold(p.category).includes(q))
-    .sort((a, b) => {
-      const va = a[col.key], vb = b[col.key];
-      if (va == null || vb == null) return va == null ? (vb == null ? 0 : 1) : -1;  // blanks last, either direction
-      const c = col.num ? va - vb : String(va).localeCompare(String(vb), 'pt-BR');
-      return dir === 'asc' ? c : -c;
-    });
+  const {rows, filter, col, dir, q, cat} = estoqueView(data);
+  const limit = APP.estoque.limit || ESTOQUE_PAGE;
+  const page = rows.slice(0, limit);
 
   const head = ESTOQUE_COLS.map((c) => {
     const sorted = c.key === col.key ? (dir === 'asc' ? 'ascending' : 'descending') : 'none';
-    return `<th class="${c.num ? 'num' : ''}" aria-sort="${sorted}"><button type="button" class="th-sort" data-sort="${c.key}">${esc(c.label)}</button></th>`;
+    return `<th class="${c.num ? 'num' : ''}" aria-sort="${sorted}"><button type="button" class="th-sort" data-sort="${c.key}"${c.hint ? ` title="${esc(c.hint)}"` : ''}>${esc(c.label)}</button></th>`;
   }).join('');
-  const body = rows.map((p) => {
+  const body = page.map((p) => {
     const noStock = p.stock != null && p.stock <= 0;
     const underCost = p.current_price != null && p.current_cost != null && p.current_price < p.current_cost;
-    return `<tr><td><a href="#/produto/${esc(APP.period)}?id=${esc(p.id)}">${esc(p.name)}</a></td><td>${esc(p.category)}</td>
-      <td class="num ${noStock ? 'cell-alert' : ''}">${p.stock == null ? '—' : num(p.stock)}</td>
-      <td class="num ${underCost ? 'cell-alert' : ''}">${money(p.current_price)}</td>
-      <td class="num">${money(p.current_cost)}</td><td class="num">${money(p.revenue)}</td>
-      <td class="num">${pct(p.margin)}</td><td>${esc(p.abc)}</td></tr>`;
-  }).join('') || `<tr><td colspan="${ESTOQUE_COLS.length}">Nenhum produto encontrado com esse filtro e busca.</td></tr>`;
+    const cover = coverBand(p.coverage_days);
+    return `<tr><td class="cell-product"><a href="#/produto/${esc(APP.period)}?id=${esc(p.id)}">${esc(p.name)}</a>
+      <span class="cell-sub">${esc(p.category)}</span></td>
+      <td class="num ${noStock ? 'cell-alert' : ''}">${qty(p.stock)}</td>
+      <td class="num cell-cover ${cover.cls}">${cover.text}${cover.word ? `<span class="visually-hidden">, ${cover.word}</span>` : ''}</td>
+      <td class="num">${cash(p.stock_value)}</td>
+      <td class="num">${qty(p.quantity_sold)}</td>
+      <td class="num ${underCost ? 'cell-alert' : ''}">${cash(p.current_price)}</td>
+      <td class="num">${cash(p.current_cost)}</td><td class="num">${cash(p.revenue)}</td>
+      <td class="num">${pct(p.margin)}</td><td>${esc(p.abc || '—')}</td></tr>`;
+  }).join('') || `<tr><td colspan="${ESTOQUE_COLS.length}" class="table-empty">Nenhum produto com esse filtro e busca.
+    <button type="button" class="btn-link" data-estoque-filter="">Limpar filtros</button></td></tr>`;
   table.innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body}</tbody>`;
+
   document.getElementById('estoque-count').textContent =
-    `Mostrando ${num(rows.length)} de ${num(inv.length)} produtos${filter.key ? ` · filtro: ${filter.label}` : ''}${q ? ` · busca: “${APP.estoque.q.trim()}”` : ''}`;
+    `Mostrando ${num(page.length)} de ${num(rows.length)} produtos` +
+    `${filter.key ? ` · filtro: ${filter.label}` : ''}${cat ? ` · categoria: ${cat}` : ''}${q ? ` · busca: “${APP.estoque.q.trim()}”` : ''}`;
+  const more = document.getElementById('estoque-more');
+  if (more) {
+    const left = rows.length - page.length;
+    more.innerHTML = left > 0
+      ? `<button type="button" class="btn-secondary" data-estoque-more>Mostrar mais ${num(Math.min(left, ESTOQUE_PAGE))} (faltam ${num(left)})</button>
+         <span class="estoque-more-hint">A lista completa sai no botão “Baixar lista (CSV)”.</span>`
+      : '';
+  }
 }
 
-// Filter chips update the route in place (replaceState, no hashchange) so focus stays on the chip.
-function setEstoqueFilter(key) {
+function showMoreEstoque() {
+  APP.estoque.limit = (APP.estoque.limit || ESTOQUE_PAGE) + ESTOQUE_PAGE;
+  renderEstoqueTable();
+  const btn = document.querySelector('[data-estoque-more]');
+  if (btn) btn.focus();  // the button was redrawn; keep keyboard users where they were
+}
+
+// Filters update the route in place (replaceState, no hashchange) so focus stays on the chip —
+// and so a filtered view can be bookmarked or handed over ready to open.
+function syncEstoqueRoute(key) {
   const params = new URLSearchParams(APP.routeParams);
-  if (key) params.set('filtro', key); else params.delete('filtro');
+  if (key !== undefined) { if (key) params.set('filtro', key); else params.delete('filtro'); }
+  const q = APP.estoque.q.trim();
+  if (q) params.set('busca', q); else params.delete('busca');
+  if (APP.estoque.cat) params.set('categoria', APP.estoque.cat); else params.delete('categoria');
   APP.routeParams = params;
   history.replaceState(null, '', routeHash('estoque', APP.period, params));
+}
+
+function setEstoqueFilter(key) {
+  syncEstoqueRoute(key);
+  APP.estoque.limit = ESTOQUE_PAGE;
   document.querySelectorAll('[data-estoque-filter]').forEach((b) => {
     const on = b.dataset.estoqueFilter === key;
     b.classList.toggle('active', on);
-    b.setAttribute('aria-pressed', String(on));
+    if (b.classList.contains('chip')) b.setAttribute('aria-pressed', String(on));
   });
   renderEstoqueTable();
 }
@@ -1537,9 +1741,46 @@ function sortEstoque(key) {
   if (!col) return;
   if (APP.estoque.sort === key) APP.estoque.dir = APP.estoque.dir === 'asc' ? 'desc' : 'asc';
   else Object.assign(APP.estoque, {sort: key, dir: col.num ? 'desc' : 'asc'});
+  APP.estoque.limit = ESTOQUE_PAGE;  // sorting changes who is at the top: the window goes back to it
   renderEstoqueTable();
   const btn = document.querySelector(`#estoque-table [data-sort="${key}"]`);
   if (btn) btn.focus();  // the header was redrawn; keep keyboard users where they were
+}
+
+/* ---- export ---- */
+
+// Excel in pt-BR reads ';' as the separator and ',' as the decimal point; the BOM keeps the
+// accents readable when the partner opens the file straight from the downloads folder.
+const csvCell = (v) => {
+  const s = v == null ? '' : String(v);
+  return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+function estoqueCsv(rows) {
+  const dec = (v, places) => v == null ? '' : v.toFixed(places).replace('.', ',');
+  const head = ['Produto', 'Categoria', 'Codigo', 'Estoque', 'Cobertura (dias)', 'Valor parado (R$)',
+    'Vendido no periodo', 'Preco (R$)', 'Custo (R$)', 'Receita (R$)', 'Margem (%)', 'ABC'];
+  const body = rows.map((p) => [p.name, p.category, p.id, dec(p.stock, 3), dec(p.coverage_days, 1),
+    dec(p.stock_value == null ? null : p.stock_value / 100, 2), dec(p.quantity_sold, 3),
+    dec(p.current_price == null ? null : p.current_price / 100, 2),
+    dec(p.current_cost == null ? null : p.current_cost / 100, 2),
+    dec(p.revenue == null ? null : p.revenue / 100, 2), dec(p.margin, 2), p.abc || ''].map(csvCell).join(';'));
+  return '﻿' + [head.join(';')].concat(body).join('\r\n');
+}
+
+function exportEstoqueCsv() {
+  const data = APP.dashboard;
+  if (!data) return;
+  const {rows, filter} = estoqueView(data);
+  const blob = new Blob([estoqueCsv(rows)], {type: 'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `produtos-estoque-${APP.period}-${filter.key || 'todos'}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /* ---------------------------------------------------------------- sync trigger */
