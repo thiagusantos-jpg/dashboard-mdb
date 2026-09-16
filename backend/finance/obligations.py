@@ -58,6 +58,23 @@ _NON_PAYABLE_NATURES = ("revenue", "financing_inflow")
 # independently payable obligation" surface drops them.
 _LOAN_ENTRY_SOURCE = "loan"
 
+# `financial_entries.source` da taxa de adquirente, criada por
+# backend/finance/receivables.py::sync_receivables a cada recebível importado do XML da
+# Stone. É uma despesa de verdade — entra no resultado e no break-even como qualquer
+# outra — mas nunca há o que pagar: a Stone já desconta a taxa na liquidação e deposita o
+# líquido. Sem esta exclusão, cada importação despejava uma "conta" por transação em
+# Contas a pagar, todas vencendo na data da liquidação e ficando vencidas para sempre,
+# com direito a botão "Pagar" — que lançaria uma saída de caixa que nunca existiu.
+#
+# Fica em aberto de propósito: backend/finance/forecast.py conta a taxa como saída no dia
+# da liquidação, e é por isso que a projeção soma o BRUTO do recebível (bruto − taxa =
+# líquido, o que de fato cai na conta). Ver
+# docs/superpowers/plans/2026-09-15-contas-a-pagar-bloco3.md.
+_STONE_FEE_ENTRY_SOURCE = "stone_receivable"
+
+# Origens que existem no resultado, mas nunca na fila de contas a pagar.
+_NON_PAYABLE_SOURCES = (_LOAN_ENTRY_SOURCE, _STONE_FEE_ENTRY_SOURCE)
+
 # Fields an item's `allowed_actions` can carry that only make sense for a
 # caller with write access. The route layer (backend/routes/obligations.py)
 # strips these out for a read-only caller; this module always computes the
@@ -174,6 +191,7 @@ def _installment_allowed_actions(open_cents: int, *, schedule_active: bool) -> l
 def _entry_rows(company: int) -> list:
     placeholders = ",".join("?" for _ in _OPEN_ENTRY_STATUSES)
     nature_placeholders = ",".join("?" for _ in _NON_PAYABLE_NATURES)
+    source_placeholders = ",".join("?" for _ in _NON_PAYABLE_SOURCES)
     with db.connection() as conn:
         rows = conn.execute(
             f"""
@@ -189,7 +207,7 @@ def _entry_rows(company: int) -> list:
             LEFT JOIN financial_events ev ON ev.entry_id=e.id
             WHERE e.company=? AND e.status IN ({placeholders})
               AND a.nature NOT IN ({nature_placeholders})
-              AND e.source<>?
+              AND e.source NOT IN ({source_placeholders})
             -- Final-review I1: every non-aggregated selected column is listed,
             -- the joined a.sensitive included. `GROUP BY e.id` alone is valid
             -- on SQLite only; PostgreSQL's functional-dependency relaxation
@@ -199,7 +217,7 @@ def _entry_rows(company: int) -> list:
                      e.amount_cents,e.status,e.source,e.payment_method,
                      e.installment_number,e.installment_count,a.sensitive
             """,
-            (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES, _LOAN_ENTRY_SOURCE),
+            (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES, *_NON_PAYABLE_SOURCES),
         ).fetchall()
     items = []
     for row in rows:
@@ -434,6 +452,7 @@ def get_obligation(
     """
     if kind == "entry":
         nature_placeholders = ",".join("?" for _ in _NON_PAYABLE_NATURES)
+        source_placeholders = ",".join("?" for _ in _NON_PAYABLE_SOURCES)
         with db.connection() as conn:
             row = conn.execute(
                 f"""
@@ -449,14 +468,18 @@ def get_obligation(
                 LEFT JOIN financial_events ev ON ev.entry_id=e.id
                 WHERE e.id=? AND e.company=?
                   AND a.nature NOT IN ({nature_placeholders})
-                  -- Same exclusion as _entry_rows (see _LOAN_ENTRY_SOURCE):
-                  -- a loan-owned entry is not an independent obligation, so
-                  -- GET /obligations/entry/{id} on one reports not-found —
-                  -- expressed exactly like the nature-based exclusion above,
-                  -- i.e. the row simply doesn't come back and the caller
-                  -- returns None (-> HTTP 404). History remains available
-                  -- through GET /entries/{id}/history.
-                  AND e.source<>?
+                  -- Same exclusion as _entry_rows (see _NON_PAYABLE_SOURCES):
+                  -- neither a loan-owned entry nor an acquiring fee is an
+                  -- independent obligation, so GET /obligations/entry/{id} on
+                  -- one reports not-found — expressed exactly like the
+                  -- nature-based exclusion above, i.e. the row simply doesn't
+                  -- come back and the caller returns None (-> HTTP 404).
+                  -- History remains available through GET /entries/{id}/history.
+                  --
+                  -- This is what keeps the fee unpayable, not just hidden: without
+                  -- it a hand-typed URL still reached the fee and offered to pay
+                  -- it, posting a cash outflow for money Stone had already netted.
+                  AND e.source NOT IN ({source_placeholders})
                 -- Final-review I1: see _entry_rows above — every
                 -- non-aggregated selected column must be listed for
                 -- PostgreSQL, joined columns included.
@@ -464,7 +487,7 @@ def get_obligation(
                          e.amount_cents,e.status,e.source,e.payment_method,
                          e.installment_number,e.installment_count,a.sensitive
                 """,
-                (item_id, company, *_NON_PAYABLE_NATURES, _LOAN_ENTRY_SOURCE),
+                (item_id, company, *_NON_PAYABLE_NATURES, *_NON_PAYABLE_SOURCES),
             ).fetchone()
         if not row:
             return None

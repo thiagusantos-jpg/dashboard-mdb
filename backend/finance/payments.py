@@ -33,6 +33,9 @@ _KINDS = ("entry", "loan_installment")
 # against it" guard here can never drift apart. See that module's
 # _LOAN_ENTRY_SOURCE for the full rationale.
 _LOAN_ENTRY_SOURCE = obligations._LOAN_ENTRY_SOURCE
+# Taxa de adquirente importada do XML da Stone. Ver obligations.py
+# ::_STONE_FEE_ENTRY_SOURCE: a Stone já desconta a taxa na liquidação.
+_STONE_FEE_ENTRY_SOURCE = obligations._STONE_FEE_ENTRY_SOURCE
 
 # Message required verbatim by the task brief for a legacy payment call
 # (POST /entries/{id}/settlements, POST /loans/installments/{id}/payments)
@@ -503,6 +506,19 @@ def record_payment(
                         "Os juros de uma parcela de empréstimo são pagos pela "
                         "própria parcela (kind='loan_installment'), não por "
                         "este lançamento.",
+                        fields=["obligation_id"],
+                    )
+                # Mesma defesa em profundidade para a taxa de adquirente. O
+                # dinheiro já saiu: a Stone desconta a taxa na liquidação e
+                # deposita o líquido. Pagá-la lançaria uma SEGUNDA saída de
+                # caixa por um valor que nunca mais voltaria. Como no caso
+                # acima, tirá-la de obligations.py só a some da lista — o id
+                # continua descobrível pelo histórico do lançamento, então o
+                # POST endereçado por id precisa recusar estruturalmente.
+                if entry["source"] == _STONE_FEE_ENTRY_SOURCE:
+                    raise PaymentValidationError(
+                        "A taxa de adquirente já foi descontada pela Stone na "
+                        "liquidação: não há pagamento a registrar.",
                         fields=["obligation_id"],
                     )
                 if entry["status"] in {"cancelled", "reversed"}:
