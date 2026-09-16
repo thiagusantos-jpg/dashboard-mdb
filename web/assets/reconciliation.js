@@ -1,7 +1,9 @@
-/* Conciliação: sugere e confirma o casamento entre lançamentos de caixa e
+/* Conciliação: ponto único de entrada dos dados externos (vendas Stone em XML e
+ * extrato bancário em OFX/CSV) e o casamento entre lançamentos de caixa e
  * lançamentos financeiros (um crédito pode fechar várias vendas e taxas).
  * Loaded before app.js and uses its shared api(), esc(), money(), APP globals
- * plus finance.js's dateBR()/financeError(). */
+ * plus finance.js's dateBR()/financeError(), finance-forms.js's drawer helpers
+ * and cashflow.js's openCashAccountForm(). */
 'use strict';
 
 const RECONCILIATION_STATE = {groups: []};
@@ -14,14 +16,15 @@ const RECONCILIATION_STATUS_LABELS = {
 async function renderConciliacao(token) {
   token = token || beginPage();
   const title = `${icon('circle-check', {class: 'title-icon'})}Conciliação bancária`;
-  const subtitle = 'Casa lançamentos de caixa com lançamentos financeiros — um crédito pode fechar várias vendas.';
+  const subtitle = 'Importe as vendas Stone e o extrato do banco e confira se cada movimento bate com o que foi lançado.';
   financeLoading(title, subtitle, 'Carregando conciliação');
-  let events, groups, cashAccounts;
+  let events, groups, cashAccounts, sources;
   try {
-    [events, groups, cashAccounts] = await Promise.all([
+    [events, groups, cashAccounts, sources] = await Promise.all([
       api(`/api/companies/${APP.company}/finance/cash-events`),
       api(`/api/companies/${APP.company}/finance/reconciliation`),
       api(`/api/companies/${APP.company}/finance/cash-accounts`),
+      api(`/api/companies/${APP.company}/finance/reconciliation/sources`),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -74,6 +77,8 @@ async function renderConciliacao(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
+    ${reconciliationSourcesSection(sources)}
+    <h2 class="section-header">Conferir movimentos</h2>
     <form id="reconciliation-filter" class="page-toolbar">
       <div class="filters">
         <div><label class="field-label" for="reconciliation-account">Conta</label>
@@ -89,24 +94,25 @@ async function renderConciliacao(token) {
       <button type="submit" class="btn-secondary">Filtrar</button>
     </form>
     <div class="settings-block">
-      <h2>Sugerir conciliação</h2>
+      <h3>Sugerir conciliação</h3>
       <form id="reconciliation-suggest-form" class="inline-form">
         <div><label class="field-label" for="reconciliation-search">Buscar movimento</label>
           <input id="reconciliation-search" type="search" class="login-input" autocomplete="off" placeholder="Descrição, data ou valor"></div>
         <div><label class="field-label" for="reconciliation-event">Movimento de caixa</label>
-          <select id="reconciliation-event" class="login-input" required>${pendingOptions || '<option value="">Nenhum lançamento pendente</option>'}</select></div>
+          <select id="reconciliation-event" class="login-input" required>${pendingOptions || '<option value="">Nenhum movimento pendente — importe um extrato em Fontes de dados</option>'}</select></div>
         <button type="submit" class="btn-primary">Sugerir</button>
         <span id="reconciliation-suggest-status" class="sim-status" role="status" aria-live="polite"></span>
       </form>
     </div>
     <div id="reconciliation-action-status" class="form-error" role="alert"></div>
-    <h2 class="section-header">Grupos de conciliação</h2>
+    <h2 class="section-header">Conciliações feitas</h2>
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Lançamento de caixa</th><th>Lançamentos financeiros</th><th>Diferença</th><th>Status</th><th></th></tr></thead>
       <tbody>${groupRows || '<tr><td colspan="5">Nenhuma conciliação registrada.</td></tr>'}</tbody>
     </table></div>`;
 
   RECONCILIATION_STATE.groups = groups;
+  bindReconciliationSources(cashAccounts, eventsById);
   document.getElementById('reconciliation-filter').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const form = ev.currentTarget;
@@ -194,4 +200,230 @@ async function onUndoReconciliation(event) {
     status.textContent = 'Não foi possível desfazer: ' + e.message;
     button.disabled = false;
   }
+}
+
+/* ---------------------------------------------------------------- fontes de dados */
+
+function reconciliationSourceStatus(done, text) {
+  return `<span class="${done ? 'badge-success' : 'badge-warning'}">${done ? 'Em dia' : 'Falta'}</span> <span class="source-detail">${text}</span>`;
+}
+
+function reconciliationSourcesSection(sources) {
+  if (!sources.length) {
+    return `<section class="recon-sources" aria-labelledby="recon-sources-title">
+      <h2 id="recon-sources-title" class="section-header">Fontes de dados</h2>
+      <div class="empty-state">
+        <p><strong>Comece cadastrando a conta de caixa.</strong> É nela que entram as vendas Stone e o extrato do banco.</p>
+        <button type="button" class="btn-primary" data-source-action="create-account">Criar conta de caixa</button>
+      </div>
+    </section>`;
+  }
+  const rows = sources.map((src) => {
+    const stone = src.stone.count
+      ? reconciliationSourceStatus(true, `Vendas até ${dateBR(src.stone.last_settlement_date)} · importado em ${dateBR(src.stone.last_import_at)}`)
+      : reconciliationSourceStatus(false, 'Nunca importado');
+    const bank = src.bank.count
+      ? reconciliationSourceStatus(true, `${src.bank.count} movimento(s) · importado em ${dateBR(src.bank.last_import_at)}`)
+      : reconciliationSourceStatus(false, 'Nunca importado');
+    const id = esc(src.cash_account_id);
+    return `<tr>
+      <td><strong>${esc(src.name)}</strong></td>
+      <td>${stone}<br><button type="button" class="btn-link" data-source-action="stone" data-account="${id}">Importar XML da Stone</button></td>
+      <td>${bank}<br><button type="button" class="btn-link" data-source-action="bank" data-account="${id}">Importar extrato (OFX/CSV)</button></td>
+    </tr>`;
+  }).join('');
+  return `<section class="recon-sources" aria-labelledby="recon-sources-title">
+    <h2 id="recon-sources-title" class="section-header">Fontes de dados</h2>
+    <p class="page-subtitle">Mantenha as duas fontes em dia: as vendas Stone dizem quanto deveria cair; o extrato diz quanto caiu.</p>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Conta</th><th>Vendas Stone (XML)</th><th>Extrato bancário</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <button type="button" class="btn-link" data-source-action="create-account">+ Nova conta de caixa</button>
+  </section>`;
+}
+
+function bindReconciliationSources(cashAccounts, eventsById) {
+  const refresh = () => renderConciliacao();
+  document.querySelectorAll('[data-source-action]').forEach((button) => button.addEventListener('click', (ev) => {
+    const trigger = ev.currentTarget;
+    const action = trigger.dataset.sourceAction;
+    const ctx = {trigger, onSaved: refresh, accountId: trigger.dataset.account, eventsById};
+    if (action === 'create-account') openCashAccountForm(ctx);
+    else if (action === 'stone') openStoneImportForm(cashAccounts, ctx);
+    else if (action === 'bank') openBankImportForm(cashAccounts, ctx);
+  }));
+}
+
+/* Multipart upload: api() always sends JSON, so files go through fetch directly
+ * with the same credentials and CSRF header. */
+async function reconciliationUpload(path, formData) {
+  const res = await fetch(path, {
+    method: 'POST', credentials: 'same-origin',
+    headers: {'x-csrf-token': APP.csrf || ''},
+    body: formData,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = body && body.detail;
+    const message = typeof detail === 'string' ? detail : (detail && detail.message) || 'Não foi possível enviar o arquivo.';
+    const err = new Error(message);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+function reconciliationAccountOptions(cashAccounts) {
+  return cashAccounts.map((a) => ({value: a.id, label: a.name}));
+}
+
+function importFormBody(cashAccounts, ctx, accept, fileLabel, help, submitLabel) {
+  return `<form class="drawer-form" novalidate>
+      <div class="form-grid">
+        ${formField('cash_account_id', 'Conta de caixa', selectControl(reconciliationAccountOptions(cashAccounts),
+          ctx.accountId || (cashAccounts.length === 1 ? cashAccounts[0].id : ''), 'Escolha…'))}
+        ${formField('file', fileLabel, `<input type="file" class="login-input" accept="${accept}">`, help)}
+      </div>
+      ${formActions(submitLabel)}
+    </form>`;
+}
+
+/* Reads the account + file of an import drawer; returns null after showing the error. */
+function readImportForm(form, ui) {
+  const accountId = form.elements.namedItem('cash_account_id').value;
+  const fileInput = form.elements.namedItem('file');
+  const file = fileInput.files && fileInput.files[0];
+  if (!accountId) { ui.showError('Escolha a conta de caixa.', ['cash_account_id']); return null; }
+  if (!file) { ui.showError('Escolha o arquivo.', ['file']); return null; }
+  return {accountId, file};
+}
+
+function openStoneImportForm(cashAccounts, ctx) {
+  ctx = ctx || {};
+  const drawer = openDrawer({title: 'Importar vendas Stone', trigger: ctx.trigger, body: importFormBody(
+    cashAccounts, ctx, '.xml', 'Arquivo XML', 'No portal Stone: Conciliação → baixar arquivo, layout 2.4 (XML). Reimportar o mesmo arquivo não duplica nada.',
+    'Importar vendas')});
+  const form = drawer.dialog.querySelector('form');
+  const ui = formUiFor(form);
+  watchForm(form);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    ui.clearError();
+    const picked = readImportForm(form, ui);
+    if (!picked) return;
+    const data = new FormData();
+    data.append('file', picked.file);
+    ui.setBusy(true);
+    try {
+      const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/receivables-import`, data);
+      clearDirty();
+      drawer.setBody(`<p role="status"><strong>Importação concluída.</strong></p>
+        <p>${result.imported} venda(s) nova(s) · ${result.duplicates} já existiam.</p>
+        <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Fechar</button></div>`);
+      if (ctx.onSaved) ctx.onSaved(result);
+    } catch (e) {
+      ui.showError(e.message, ['file']);
+    } finally {
+      if (form.isConnected) ui.setBusy(false);
+    }
+  });
+}
+
+function reconciliationCandidateLabel(eventId, eventsById) {
+  const event = eventsById && eventsById[String(eventId)];
+  return event ? `Já lançado: ${dateBR(event.occurred_at)} ${event.description}` : `Já lançado (movimento ${eventId})`;
+}
+
+function bankPreviewBody(preview, eventsById) {
+  const items = preview.items;
+  const linkable = items.filter((i) => i.candidate_cash_event_ids.length).length;
+  const rows = items.map((item, index) => {
+    const options = [{value: 'new', label: 'Novo movimento'}].concat(
+      item.candidate_cash_event_ids.map((id) => ({value: `link:${id}`, label: reconciliationCandidateLabel(id, eventsById)})));
+    const control = options.length === 1 ? '<span class="badge-muted">Novo movimento</span>'
+      : `<label class="visually-hidden" for="bank-decision-${index}">O que é esta linha</label>
+        <select id="bank-decision-${index}" class="login-input" data-external-id="${esc(item.external_id)}">
+          ${options.map((o) => `<option value="${esc(o.value)}"${o.value === item.decision ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
+        </select>`;
+    return `<tr>
+      <td>${dateBR(item.date)}</td>
+      <td>${esc(item.description || '—')}</td>
+      <td class="num">${money(item.amount_cents)}</td>
+      <td>${control}</td>
+    </tr>`;
+  }).join('');
+  return `<form class="drawer-form" novalidate>
+      <p class="recon-preview-summary"><strong>${preview.count} linha(s)</strong> de ${dateBR(preview.start)} a ${dateBR(preview.end)} · saldo do período ${money(preview.total_cents)}</p>
+      <p class="field-help">${linkable
+        ? `${linkable} linha(s) parecem ser movimentos que já estão no painel (ex.: um pagamento registrado). Confira a coluna "O que é" para não lançar em dobro.`
+        : 'Nenhuma linha coincide com movimentos já lançados: todas entram como novas.'}</p>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Data</th><th>Descrição</th><th class="num">Valor</th><th>O que é</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4">O arquivo não tem movimentos.</td></tr>'}</tbody>
+      </table></div>
+      ${formActions(`Importar ${preview.count} linha(s)`)}
+    </form>`;
+}
+
+/* Two steps in one drawer: pick account + file → review each line (new vs.
+ * already recorded) → commit with the preview hash, so a different file can
+ * never be committed against this review. */
+function openBankImportForm(cashAccounts, ctx) {
+  ctx = ctx || {};
+  const drawer = openDrawer({title: 'Importar extrato bancário', trigger: ctx.trigger, body: importFormBody(
+    cashAccounts, ctx, '.ofx,.csv', 'Arquivo OFX ou CSV', 'Baixe o extrato no internet banking. Antes de gravar, você revisa cada linha.',
+    'Revisar linhas')});
+  const form = drawer.dialog.querySelector('form');
+  const ui = formUiFor(form);
+  watchForm(form);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    ui.clearError();
+    const picked = readImportForm(form, ui);
+    if (!picked) return;
+    const data = new FormData();
+    data.append('file', picked.file);
+    ui.setBusy(true);
+    let preview;
+    try {
+      preview = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/bank-imports/preview`, data);
+    } catch (e) {
+      ui.showError(e.message, ['file']);
+      ui.setBusy(false);
+      return;
+    }
+    drawer.setBody(bankPreviewBody(preview, ctx.eventsById));
+    bindBankCommit(drawer, picked, preview, ctx);
+  });
+}
+
+function bindBankCommit(drawer, picked, preview, ctx) {
+  const form = drawer.dialog.querySelector('form');
+  const ui = formUiFor(form);
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) submit.focus();
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    ui.clearError();
+    const decisions = {};
+    preview.items.forEach((item) => { decisions[item.external_id] = item.decision; });
+    form.querySelectorAll('select[data-external-id]').forEach((select) => { decisions[select.dataset.externalId] = select.value; });
+    const data = new FormData();
+    data.append('file', picked.file);
+    data.append('preview_hash', preview.preview_hash);
+    data.append('decisions', JSON.stringify(decisions));
+    ui.setBusy(true);
+    try {
+      const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/bank-imports`, data);
+      clearDirty();
+      drawer.setBody(`<p role="status"><strong>Extrato importado.</strong></p>
+        <p>${result.imported} movimento(s) novo(s) · ${result.linked} ligado(s) a lançamentos existentes · ${result.duplicates} já importado(s) antes.</p>
+        <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Conferir movimentos</button></div>`);
+      if (ctx.onSaved) ctx.onSaved(result);
+    } catch (e) {
+      ui.showError(e.status === 409 ? `${e.message} Feche e importe o arquivo de novo.` : e.message);
+      ui.setBusy(false);
+    }
+  });
 }

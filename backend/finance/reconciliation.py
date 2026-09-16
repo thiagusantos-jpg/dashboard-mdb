@@ -266,3 +266,47 @@ def list_groups(company: int, *, status: Optional[str] = None) -> list:
             params,
         ).fetchall()
         return [_row_to_group(conn, row["id"]) for row in rows]
+
+
+def data_sources(company: int) -> list:
+    """What has been imported into each active cash account: Stone sales
+    (conciliation XML) and bank statements (OFX/CSV). Feeds the checklist at
+    the top of Conciliação, so the partner sees what is missing before
+    trying to reconcile anything."""
+    with db.connection() as conn:
+        accounts = conn.execute(
+            "SELECT id,name,kind FROM cash_accounts WHERE company=? AND archived=0 ORDER BY name",
+            (company,),
+        ).fetchall()
+        result = []
+        for account in accounts:
+            stone = conn.execute(
+                """
+                SELECT COUNT(*) AS count,MAX(created_at) AS last_import_at,
+                       MAX(settlement_date) AS last_settlement_date
+                FROM stone_receivables WHERE company=? AND cash_account_id=?
+                """,
+                (company, account["id"]),
+            ).fetchone()
+            bank = conn.execute(
+                """
+                SELECT COUNT(*) AS count,MAX(updated_at) AS last_import_at
+                FROM external_records WHERE company=? AND source='bank_file' AND account_id=?
+                """,
+                (company, str(account["id"])),
+            ).fetchone()
+            result.append({
+                "cash_account_id": account["id"],
+                "name": account["name"],
+                "kind": account["kind"],
+                "stone": {
+                    "count": int(stone["count"] or 0),
+                    "last_import_at": stone["last_import_at"],
+                    "last_settlement_date": stone["last_settlement_date"],
+                },
+                "bank": {
+                    "count": int(bank["count"] or 0),
+                    "last_import_at": bank["last_import_at"],
+                },
+            })
+    return result

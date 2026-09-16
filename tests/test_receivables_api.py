@@ -57,3 +57,48 @@ def test_import_receivables_then_query_expected_settlements(client):
     )
     assert report.status_code == 200
     assert report.json()["gross_cents"] == 1_000_00 + 300_00 + 300_00
+
+
+def test_contracted_rate_feeds_the_fee_variance(client):
+    saved = client.put(
+        "/api/companies/1/finance/receivables/contracted-rate",
+        json={"rate_pct": 1.5, "effective_from": "2026-01-01"},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json() == {"rate_pct": 1.5, "effective_from": "2026-01-01"}
+
+    report = client.get(
+        "/api/companies/1/finance/receivables/effective-fee-report",
+        params={"start": "2026-09-01", "end": "2026-12-31"},
+    ).json()
+    assert report["contracted_rate_pct"] == 1.5
+
+
+def test_contracted_rate_rejects_out_of_range_values(client):
+    response = client.put(
+        "/api/companies/1/finance/receivables/contracted-rate", json={"rate_pct": 45},
+    )
+    assert response.status_code == 422
+
+
+def test_reconciliation_sources_report_what_each_account_has_imported(client):
+    stone = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Stone", "kind": "payment"}
+    ).json()
+    bank = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Banco", "kind": "bank"}
+    ).json()
+    content = (FIXTURES / "stone-conciliation-sample.xml").read_bytes()
+    client.post(
+        f"/api/companies/1/finance/cash-accounts/{stone['id']}/receivables-import",
+        files={"file": ("stone-conciliation-sample.xml", content, "application/xml")},
+    )
+
+    sources = client.get("/api/companies/1/finance/reconciliation/sources")
+    assert sources.status_code == 200, sources.text
+    by_name = {item["name"]: item for item in sources.json()}
+    assert by_name["Stone"]["stone"]["count"] == 3
+    assert by_name["Stone"]["stone"]["last_import_at"]
+    assert by_name["Stone"]["bank"]["count"] == 0
+    assert by_name["Banco"]["stone"] == {"count": 0, "last_import_at": None, "last_settlement_date": None}
+    assert str(by_name["Banco"]["cash_account_id"]) == str(bank["id"])

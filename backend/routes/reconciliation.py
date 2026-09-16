@@ -44,6 +44,15 @@ def list_reconciliation_groups(company: int, status: Optional[str] = None):
     return reconciliation.list_groups(company, status=status)
 
 
+@router.get(
+    "/reconciliation/sources",
+    dependencies=[Depends(permissions.require_permission("finance.read"))],
+)
+def list_data_sources(company: int):
+    _require_company(company)
+    return reconciliation.data_sources(company)
+
+
 @router.post(
     "/reconciliation/suggest",
     status_code=201,

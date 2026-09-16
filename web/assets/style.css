@@ -1694,3 +1694,12 @@ div.action-stat { cursor: default; }
     border-radius: 8px; background: var(--action-good-bg); color: var(--action-good-text); font-size: 12.5px; font-weight: 600; }
 .suggestion-note .btn-link { margin: 0; color: inherit; text-decoration: underline; }
 [data-late-fee] .field-help { color: var(--action-warn-text); }
+
+/* Conciliação → Fontes de dados */
+.recon-sources .source-detail { color: var(--text-muted); font-size: 12px; }
+.recon-sources .data-table td { vertical-align: top; }
+.recon-sources > .btn-link { margin-bottom: 8px; }
+.recon-preview-summary { margin: 0 0 8px; line-height: 1.5; }
+.recon-preview-summary + .field-help { margin: 0 0 12px; }
+.section-header .section-hint { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-left: 8px; }
+.recon-sources td .btn-link { text-align: left; }
