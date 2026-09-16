@@ -61,20 +61,37 @@ test('the checklist shows, per account, which source is missing and how to fill 
   assert.match(html, /data-source-action="bank" data-account="9007199254740993"/);
 });
 
-test('the bank review names the already-recorded movement and keeps the backend pre-selection', () => {
+test('the bank review opens only the lines that need a decision', () => {
   const context = loadReconciliation();
   const html = context.bankPreviewBody({
-    count: 2, start: '2026-09-01', end: '2026-09-02', total_cents: -500, preview_hash: 'h',
+    count: 3, start: '2026-09-01', end: '2026-09-02', total_cents: -500, preview_hash: 'h', already_imported: 1,
     items: [
-      {external_id: 'a', date: '2026-09-01', amount_cents: -850, description: 'PIX Hortifruti', candidate_cash_event_ids: ['55'], decision: 'link:55'},
-      {external_id: 'b', date: '2026-09-02', amount_cents: 350, description: 'TED', candidate_cash_event_ids: [], decision: 'new'},
+      {external_id: 'a', date: '2026-09-01', amount_cents: -850, description: 'PIX Hortifruti', candidate_cash_event_ids: ['55'], decision: 'link:55', already_imported: false},
+      {external_id: 'b', date: '2026-09-02', amount_cents: 350, description: 'TED', candidate_cash_event_ids: [], decision: 'new', already_imported: false},
+      {external_id: 'c', date: '2026-08-30', amount_cents: 100, description: 'Pix antigo', candidate_cash_event_ids: [], decision: 'new', already_imported: true},
     ],
   }, {'55': {occurred_at: '2026-08-31', description: 'Pagamento Hortifruti'}});
-  assert.match(html, /1 linha\(s\) parecem ser movimentos que já estão no painel/);
+  assert.match(html, /<strong>1<\/strong> nova\(s\)/);
+  assert.match(html, /<strong>1<\/strong> para revisar/);
+  assert.match(html, /<strong>1<\/strong> já importada\(s\) antes/);
   assert.match(html, /<option value="link:55" selected>Já lançado: 2026-08-31 Pagamento Hortifruti<\/option>/);
-  assert.match(html, /data-external-id="a"/);
-  assert.doesNotMatch(html, /data-external-id="b"/, 'a line with nothing to choose shows a badge, not a select');
-  assert.match(html, /Importar 2 linha\(s\)/);
+  assert.equal((html.match(/data-external-id=/g) || []).length, 1, 'only the ambiguous line gets a select');
+  const folded = html.slice(html.indexOf('<details'));
+  assert.match(folded, /TED/);
+  assert.match(folded, /Já importada/);
+  assert.doesNotMatch(folded, /PIX Hortifruti/, 'a line under review is not repeated in the folded list');
+  assert.match(html, /Importar 2 linha\(s\) nova\(s\)/);
+});
+
+test('a statement already imported says there is nothing new', () => {
+  const context = loadReconciliation();
+  const items = Array.from({length: 400}, (_, i) => ({external_id: `x${i}`, date: '2026-08-01', amount_cents: 1,
+    description: 'x', candidate_cash_event_ids: [], decision: 'new', already_imported: true}));
+  const html = context.bankPreviewBody({count: 400, start: '2026-08-01', end: '2026-08-01', total_cents: 400, preview_hash: 'h', already_imported: 400, items}, {});
+  assert.match(html, /Confirmar \(nada novo\)/);
+  assert.match(html, /Nenhuma linha precisa de revisão/);
+  assert.match(html, /as 300 mais recentes/);
+  assert.equal((html.match(/<tr>/g) || []).length, 301, 'header plus the 300 capped rows');
 });
 
 test('committing sends the reviewed decisions with the preview hash', async () => {

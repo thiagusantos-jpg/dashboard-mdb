@@ -457,34 +457,59 @@ function reconciliationCandidateLabel(eventId, eventsById) {
   return event ? `Já lançado: ${dateBR(event.occurred_at)} ${event.description}` : `Já lançado (movimento ${eventId})`;
 }
 
+const BANK_PREVIEW_ALL_LIMIT = 300;
+
+function bankPreviewRow(item, index, eventsById) {
+  const options = [{value: 'new', label: 'Novo movimento'}].concat(
+    item.candidate_cash_event_ids.map((id) => ({value: `link:${id}`, label: reconciliationCandidateLabel(id, eventsById)})));
+  const control = item.already_imported ? '<span class="badge-muted">Já importada</span>'
+    : options.length === 1 ? '<span class="badge-muted">Novo movimento</span>'
+    : `<label class="visually-hidden" for="bank-decision-${index}">O que é esta linha</label>
+      <select id="bank-decision-${index}" class="login-input" data-external-id="${esc(item.external_id)}">
+        ${options.map((o) => `<option value="${esc(o.value)}"${o.value === item.decision ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
+      </select>`;
+  return `<tr>
+    <td>${dateBR(item.date)}</td>
+    <td>${esc(item.description || '—')}</td>
+    <td class="num">${money(item.amount_cents)}</td>
+    <td>${control}</td>
+  </tr>`;
+}
+
+function bankPreviewTable(rows) {
+  return `<div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Data</th><th>Descrição</th><th class="num">Valor</th><th>O que é</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+/* Only the lines that need a decision are open; a 3-month Stone statement has
+ * thousands of lines, so the rest stay folded (and capped) for reference. */
 function bankPreviewBody(preview, eventsById) {
   const items = preview.items;
-  const linkable = items.filter((i) => i.candidate_cash_event_ids.length).length;
-  const rows = items.map((item, index) => {
-    const options = [{value: 'new', label: 'Novo movimento'}].concat(
-      item.candidate_cash_event_ids.map((id) => ({value: `link:${id}`, label: reconciliationCandidateLabel(id, eventsById)})));
-    const control = options.length === 1 ? '<span class="badge-muted">Novo movimento</span>'
-      : `<label class="visually-hidden" for="bank-decision-${index}">O que é esta linha</label>
-        <select id="bank-decision-${index}" class="login-input" data-external-id="${esc(item.external_id)}">
-          ${options.map((o) => `<option value="${esc(o.value)}"${o.value === item.decision ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
-        </select>`;
-    return `<tr>
-      <td>${dateBR(item.date)}</td>
-      <td>${esc(item.description || '—')}</td>
-      <td class="num">${money(item.amount_cents)}</td>
-      <td>${control}</td>
-    </tr>`;
-  }).join('');
+  const indexed = items.map((item, index) => ({item, index}));
+  const review = indexed.filter(({item}) => !item.already_imported && item.candidate_cash_event_ids.length);
+  const already = items.filter((i) => i.already_imported).length;
+  const fresh = items.length - already;
+  const recent = indexed.slice().sort((x, y) => (x.item.date < y.item.date ? 1 : -1)).slice(0, BANK_PREVIEW_ALL_LIMIT);
+  const submitLabel = fresh ? `Importar ${fresh} linha(s) nova(s)` : 'Confirmar (nada novo)';
   return `<form class="drawer-form" novalidate>
       <p class="recon-preview-summary"><strong>${preview.count} linha(s)</strong> de ${dateBR(preview.start)} a ${dateBR(preview.end)} · saldo do período ${money(preview.total_cents)}</p>
-      <p class="field-help">${linkable
-        ? `${linkable} linha(s) parecem ser movimentos que já estão no painel (ex.: um pagamento registrado). Confira a coluna "O que é" para não lançar em dobro.`
-        : 'Nenhuma linha coincide com movimentos já lançados: todas entram como novas.'}</p>
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Data</th><th>Descrição</th><th class="num">Valor</th><th>O que é</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="4">O arquivo não tem movimentos.</td></tr>'}</tbody>
-      </table></div>
-      ${formActions(`Importar ${preview.count} linha(s)`)}
+      <ul class="recon-preview-counts">
+        <li><strong>${fresh - review.length}</strong> nova(s)</li>
+        <li><strong>${review.length}</strong> para revisar</li>
+        <li><strong>${already}</strong> já importada(s) antes, serão ignoradas</li>
+      </ul>
+      ${review.length ? `<h3>Revise: parecem movimentos que já estão no painel</h3>
+        <p class="field-help">Ex.: um pagamento registrado em Contas a pagar. Deixe "Já lançado" para não contar em dobro.</p>
+        ${bankPreviewTable(review.map(({item, index}) => bankPreviewRow(item, index, eventsById)).join(''))}`
+        : '<p class="field-help">Nenhuma linha precisa de revisão.</p>'}
+      <details class="recon-preview-all">
+        <summary>Ver as linhas do arquivo${items.length > BANK_PREVIEW_ALL_LIMIT ? ` (as ${BANK_PREVIEW_ALL_LIMIT} mais recentes)` : ''}</summary>
+        ${bankPreviewTable(recent.filter(({item}) => item.already_imported || !item.candidate_cash_event_ids.length)
+          .map(({item, index}) => bankPreviewRow(item, index, eventsById)).join('') || '<tr><td colspan="4">O arquivo não tem movimentos.</td></tr>')}
+      </details>
+      ${formActions(submitLabel)}
     </form>`;
 }
 
@@ -540,7 +565,7 @@ function bindBankCommit(drawer, picked, preview, ctx) {
       const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/bank-imports`, data);
       clearDirty();
       drawer.setBody(`<p role="status"><strong>Extrato importado.</strong></p>
-        <p>${result.imported} movimento(s) novo(s) · ${result.linked} ligado(s) a lançamentos existentes · ${result.duplicates} já importado(s) antes.</p>
+        <p>${result.imported} movimento(s) novo(s) · ${result.linked} ligado(s) a lançamentos existentes · ${result.duplicates} já importado(s) antes (ignorados).</p>
         <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Conferir movimentos</button></div>`);
       if (ctx.onSaved) ctx.onSaved(result);
     } catch (e) {

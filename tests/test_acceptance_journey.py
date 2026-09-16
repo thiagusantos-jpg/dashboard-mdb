@@ -137,7 +137,15 @@ def test_expense_payment_correction_and_statement_journey(client):
     # A second import of the same statement creates nothing new.
     again = ok(client.post(f"{BASE}/cash-accounts/{bank['id']}/bank-imports/preview",
                            files={"file": ("extrato.ofx", STATEMENT, "application/octet-stream")}))
-    assert {item["decision"] for item in again["items"]} != {"new"}
+    assert again["already_imported"] == len(again["items"])
+    assert all(not item["candidate_cash_event_ids"] for item in again["items"])
+    before = ok(client.get(f"{BASE}/cash-events"))
+    result = ok(client.post(f"{BASE}/cash-accounts/{bank['id']}/bank-imports",
+                            files={"file": ("extrato.ofx", STATEMENT, "application/octet-stream")},
+                            data={"preview_hash": again["preview_hash"],
+                                  "decisions": json.dumps({item["external_id"]: item["decision"] for item in again["items"]})}), 201)
+    assert result["imported"] == 0 and result["duplicates"] == len(again["items"])
+    assert len(ok(client.get(f"{BASE}/cash-events"))) == len(before)
 
 
 def test_archiving_a_category_keeps_history(client):

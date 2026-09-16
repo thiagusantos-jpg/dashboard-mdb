@@ -300,11 +300,35 @@ def _candidate_cash_events(
     return [row["id"] for row in rows if row["id"] not in linked and row["id"] not in reversed_ids]
 
 
+def _imported_external_ids(conn, company: int, cash_account_id: int) -> set:
+    return {
+        row["external_id"]
+        for row in conn.execute(
+            "SELECT external_id FROM external_records WHERE company=? AND source=? AND account_id=?",
+            (company, PROVIDER_BANK_FILE, str(cash_account_id)),
+        )
+    }
+
+
 def _preview_items(conn, company: int, cash_account_id: int, transactions: list) -> list:
     linked = _linked_cash_event_ids(conn)
     reversed_ids = _reversed_cash_event_ids(conn)
+    imported = _imported_external_ids(conn, company, cash_account_id)
     items = []
     for tx in transactions:
+        if tx.external_id in imported:
+            # A line from an earlier import (same file again, or overlapping
+            # statements): committing it is a no-op, so offer nothing to link.
+            items.append({
+                "external_id": tx.external_id,
+                "date": tx.date,
+                "amount_cents": tx.amount_cents,
+                "description": tx.description,
+                "candidate_cash_event_ids": [],
+                "decision": "new",
+                "already_imported": True,
+            })
+            continue
         candidates = _candidate_cash_events(
             conn, company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
             linked=linked, reversed_ids=reversed_ids,
@@ -322,6 +346,7 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
             "description": tx.description,
             "candidate_cash_event_ids": [str(c) for c in candidates],
             "decision": decision,
+            "already_imported": False,
         })
     return items
 
@@ -366,6 +391,7 @@ def preview_bank_import(company: int, cash_account_id: int, filename: str, conte
         "start": min(dates) if dates else None,
         "end": max(dates) if dates else None,
         "total_cents": sum(t.amount_cents for t in transactions),
+        "already_imported": sum(1 for item in items if item["already_imported"]),
         "items": items,
     }
 
@@ -442,10 +468,23 @@ def commit_bank_import(
                 if already_seen:
                     duplicates += 1
                     continue
-                ledger.post_cash_event(
+                event = ledger.post_cash_event(
                     company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
                     tx.description or f"Importado ({tx.external_id})",
                     conn=conn,
+                )
+                # Claim the movement for this bank line, so a later statement
+                # never offers it as "already recorded" for a different line.
+                conn.execute(
+                    """
+                    INSERT INTO bank_cash_links(
+                        id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
+                        event["id"], db.now(),
+                    ),
                 )
                 imported += 1
                 continue

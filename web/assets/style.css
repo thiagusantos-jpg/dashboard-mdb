@@ -1716,3 +1716,6 @@ div.action-stat { cursor: default; }
 .data-table .num.value-negative { color: var(--negative); font-weight: 700; }
 .recon-tab-empty { color: var(--text-muted); padding: 8px 12px; }
 :root[data-theme="dark"] .recon-tabs .btn-secondary[aria-pressed="true"] { background: var(--yellow); color: #1a1a1a; }
+.recon-preview-counts { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 12px; padding: 0; list-style: none; font-size: 13px; }
+.recon-preview-all { margin: 12px 0; }
+.recon-preview-all summary { cursor: pointer; font-weight: 600; min-height: 32px; }
