@@ -46,7 +46,9 @@ async function renderConciliacao(token) {
     && (!filters.from || e.occurred_at >= filters.from) && (!filters.to || e.occurred_at <= filters.to);
   const eventsById = Object.fromEntries(events.map((e) => [String(e.id), e]));
   // Transfers (e.g. Reserva Stone) and reversals are not income or spending: nothing to match.
-  const pending = events.filter((e) => (e.kind || 'entry') === 'entry' && !linkedEventIds.has(String(e.id))).filter(matches);
+  // The Stone monthly fee's expense comes from the receivables report: its bank line needs no match either.
+  const pending = events.filter((e) => (e.kind || 'entry') === 'entry' && !isStoneChargeLine(e.description)
+    && !linkedEventIds.has(String(e.id))).filter(matches);
   const visibleGroups = groups.filter((g) => {
     const anchor = g.links.find((l) => l.item_type === 'cash_event');
     const event = anchor && eventsById[String(anchor.item_id)];
@@ -331,6 +333,11 @@ function reconciliationSourceStatus(done, text) {
   return `<span class="${done ? 'badge-success' : 'badge-warning'}">${done ? 'Em dia' : 'Falta'}</span> <span class="source-detail">${text}</span>`;
 }
 
+// Same rule as backend/integrations/bank_files.py::is_stone_charge.
+function isStoneChargeLine(description) {
+  return /mensalidade\s*\|\s*cobran/i.test(description || '');
+}
+
 function reconciliationSourcesSection(sources, cashAccounts) {
   const reserve = (cashAccounts || []).find(isReserveAccount);
   const reserveLine = reserve ? `<p class="recon-reserve"><span><strong>Reserva Stone</strong> · saldo no painel ${money(reserve.balance_cents)} · o rendimento não vem no extrato</span>
@@ -427,6 +434,16 @@ function readImportForm(form, ui) {
   return {accountId, file};
 }
 
+/* What the import booked by itself, so the partner knows not to type it again. */
+function stoneAutomaticSummary(result) {
+  const parts = [];
+  if (result.fee_entries) parts.push(`taxas de ${result.fee_entries} dia(s) de vendas (${money(result.fee_cents || 0)})`);
+  if (result.monthly_fees) parts.push(`${result.monthly_fees} mensalidade(s) Stone (${money(result.monthly_fee_cents || 0)})`);
+  if (!parts.length) return '';
+  return `<div class="stone-warning"><p><strong>Lançado automaticamente:</strong> ${parts.join(' e ')}.</p>
+    <p>Não lance essas taxas nem a mensalidade à mão em Despesas: o painel avisa se alguém tentar.</p></div>`;
+}
+
 function openStoneImportForm(cashAccounts, ctx) {
   ctx = ctx || {};
   const drawer = openDrawer({title: 'Importar vendas Stone', trigger: ctx.trigger, body: importFormBody(
@@ -448,7 +465,8 @@ function openStoneImportForm(cashAccounts, ctx) {
       const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/receivables-import`, data);
       clearDirty();
       drawer.setBody(`<p role="status"><strong>Importação concluída.</strong></p>
-        <p>${result.imported} linha(s) nova(s) · ${result.duplicates} já existiam${result.fee_entries ? ` · taxas lançadas em ${result.fee_entries} despesa(s) por dia` : ''}.</p>
+        <p>${result.imported} linha(s) nova(s) · ${result.duplicates} já existiam.</p>
+        ${stoneAutomaticSummary(result)}
         <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Fechar</button></div>`);
       if (ctx.onSaved) ctx.onSaved(result);
     } catch (e) {
@@ -472,6 +490,7 @@ function bankPreviewRow(item, index, eventsById) {
     [{value: 'new', label: item.internal_transfer ? 'Movimento comum (entrada/saída)' : 'Novo movimento'}],
     item.candidate_cash_event_ids.map((id) => ({value: `link:${id}`, label: reconciliationCandidateLabel(id, eventsById)})));
   const control = item.already_imported ? '<span class="badge-muted">Já importada</span>'
+    : item.stone_charge && options.length === 1 ? '<span class="badge-info">Mensalidade Stone — despesa já lançada pelo relatório</span>'
     : options.length === 1 ? '<span class="badge-muted">Novo movimento</span>'
     : `<label class="visually-hidden" for="bank-decision-${index}">O que é esta linha</label>
       <select id="bank-decision-${index}" class="login-input" data-external-id="${esc(item.external_id)}">
@@ -510,6 +529,7 @@ function bankPreviewBody(preview, eventsById) {
         <li><strong>${fresh - review.length - transfers.length}</strong> nova(s)</li>
         <li><strong>${review.length}</strong> para revisar</li>
         ${transfers.length ? `<li><strong>${transfers.length}</strong> da Reserva Stone (transferência interna)</li>` : ''}
+        ${preview.stone_charges ? `<li><strong>${preview.stone_charges}</strong> mensalidade(s) Stone: só o dinheiro entra, a despesa vem do relatório</li>` : ''}
         <li><strong>${already}</strong> já importada(s) antes, serão ignoradas</li>
       </ul>
       ${review.length ? `<h3>Revise: parecem movimentos que já estão no painel</h3>

@@ -129,3 +129,41 @@ test('the page compares with the previous month without depending on it', () => 
   // O selo de competência repetia o seletor do cabeçalho: saiu.
   assert.doesNotMatch(page.slice(0, page.indexOf('const refresh')), /periodo-badge/);
 });
+
+/* Taxas e mensalidade da Stone vêm do relatório: não pedem conferência uma a uma. */
+const stoneFee = (id, day) => ({id, account_id: '9', description: `Taxas Stone de ${day}/09`, amount_cents: 3000,
+  due_date: `2026-09-${day}`, status: 'overdue', source: 'stone_receivable'});
+
+test('Stone automatic expenses are tagged, never "a pagar", and only offer history', () => {
+  const f = loadFinance();
+  const html = f.expenseRowHtml(stoneFee('s1', '10'), {'9': {name: 'Taxas de adquirentes'}});
+  assert.match(html, /Automático · Stone/);
+  assert.match(html, /Descontado pela Stone/);
+  assert.doesNotMatch(html, /overdue/);
+  assert.match(html, /data-entry-action="history"/);
+  assert.doesNotMatch(html, /data-entry-action="edit"/);
+  assert.equal(f.unpaidNotice([stoneFee('s1', '10'), stoneFee('s2', '11')]), null);
+  assert.equal(f.unpaidNotice([stoneFee('s1', '10'), ENTRIES[0]]).count, 1);
+});
+
+test('a category made only of Stone daily fees folds into one line', () => {
+  const f = loadFinance();
+  const fees = ['01', '02', '03', '04'].map((d) => stoneFee(`s${d}`, d));
+  const [group] = f.expenseGroups(fees, {'9': {name: 'Taxas de adquirentes'}});
+  const html = f.expenseGroupRowsHtml(group, {'9': {name: 'Taxas de adquirentes'}});
+  assert.match(html, /4 lançamentos vindos do relatório de recebíveis, já conferidos na importação/);
+  assert.equal((html.match(/data-stone-group="9" hidden/g) || []).length, 4);
+  const mixed = f.expenseGroups([...fees, Object.assign({}, ENTRIES[1], {account_id: '9'})], {})[0];
+  assert.doesNotMatch(f.expenseGroupRowsHtml(mixed, {}), /stone-auto-summary/, 'a manual entry keeps the list open');
+});
+
+test('the fixed expense setup shows the terminal fee as automatic when the report covers it', () => {
+  const f = loadFinance();
+  const html = f.fixedSetupRowsHtml([
+    {system_key: 'payment_terminal_rent', label: 'Aluguel da maquininha', stone_automatic: true, configured: false},
+    {system_key: 'rent', label: 'Aluguel', stone_automatic: false, configured: false},
+  ], '2026-09');
+  assert.match(html, /Automática pelo relatório da Stone/);
+  assert.doesNotMatch(html, /amount-payment_terminal_rent/);
+  assert.match(html, /amount-rent/);
+});

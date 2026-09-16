@@ -109,3 +109,17 @@ def test_transfer_decisions_are_refused_on_lines_that_are_not_reserve_moves(ston
 def test_the_reserve_name_matches_the_one_reconciliation_hides():
     from backend.finance import reconciliation
     assert reconciliation.RESERVE_ACCOUNT_NAME == bank_files.RESERVE_ACCOUNT_NAME
+
+
+def test_the_stone_monthly_fee_line_is_flagged_as_cash_only(stone_account):
+    statement = (
+        "Data,Descricao,Valor,FITID\n"
+        "2026-06-05,LOJA LTDA - Mensalidade | Cobrança,-90.00,M-1\n"
+        "2026-06-05,FORNECEDOR - Pagamento,-50.00,P-1\n"
+    ).encode("utf-8")
+    preview = bank_files.preview_bank_import(COMPANY, stone_account["id"], "extrato.csv", statement)
+    by_id = {item["external_id"]: item for item in preview["items"]}
+    assert by_id["M-1"]["stone_charge"] is True
+    assert by_id["M-1"]["decision"] == "new", "the money did leave the account"
+    assert by_id["P-1"]["stone_charge"] is False
+    assert preview["stone_charges"] == 1

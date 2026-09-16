@@ -87,17 +87,21 @@ def test_portal_csv_books_fees_once_per_day_and_never_as_bills(receivables_db, s
 
     content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
     result = receivables.sync_receivables(COMPANY, stone_account["id"], content)
-    assert result == {"total": 7, "imported": 7, "duplicates": 0, "fee_entries": 3}
+    assert result == {
+        "total": 7, "imported": 7, "duplicates": 0, "fee_entries": 3,
+        "fee_cents": 2_72 + 50 + 17_93 + 12_00, "monthly_fees": 1, "monthly_fee_cents": 90_00,
+    }
 
     with db.connection() as conn:
         entries = [dict(r) for r in conn.execute(
-            "SELECT e.description,e.amount_cents,a.system_key FROM financial_entries e "
+            "SELECT e.description,e.amount_cents,a.system_key,e.status FROM financial_entries e "
             "JOIN finance_accounts a ON a.id=e.account_id WHERE e.company=1 ORDER BY e.due_date,a.system_key"
         )]
     assert entries == [
-        {"description": "Taxas Stone de 10/09 (2 venda(s))", "amount_cents": 2_72 + 50, "system_key": "acquiring_fees"},
-        {"description": "Taxas Stone de 11/09 (1 venda(s))", "amount_cents": 18_00 - 7, "system_key": "acquiring_fees"},
-        {"description": "Antecipação Stone de 11/09 (1 venda(s))", "amount_cents": 12_00, "system_key": "receivables_advance"},
+        {"description": "Taxas Stone de 10/09 (2 venda(s))", "amount_cents": 2_72 + 50, "system_key": "acquiring_fees", "status": "open"},
+        {"description": "Taxas Stone de 11/09 (1 venda(s))", "amount_cents": 18_00 - 7, "system_key": "acquiring_fees", "status": "open"},
+        {"description": "Mensalidade Stone — 09/2026", "amount_cents": 90_00, "system_key": "payment_terminal_rent", "status": "paid"},
+        {"description": "Antecipação Stone de 11/09 (1 venda(s))", "amount_cents": 12_00, "system_key": "receivables_advance", "status": "open"},
     ]
     assert not any("Stone" in str(row.get("description")) for row in obligations._entry_rows(COMPANY))
 
@@ -110,9 +114,12 @@ def test_reimporting_the_portal_csv_adds_nothing(receivables_db, stone_account):
     content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
     receivables.sync_receivables(COMPANY, stone_account["id"], content)
     again = receivables.sync_receivables(COMPANY, stone_account["id"], content)
-    assert again == {"total": 7, "imported": 0, "duplicates": 7, "fee_entries": 0}
+    assert again == {
+        "total": 7, "imported": 0, "duplicates": 7, "fee_entries": 0,
+        "fee_cents": 0, "monthly_fees": 0, "monthly_fee_cents": 0,
+    }
     with db.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM financial_entries").fetchone()["n"] == 3
+        assert conn.execute("SELECT COUNT(*) AS n FROM financial_entries").fetchone()["n"] == 4
         assert conn.execute("SELECT COUNT(*) AS n FROM stone_receivables").fetchone()["n"] == 7
 
 
@@ -129,3 +136,28 @@ def test_a_later_export_with_new_rows_for_a_booked_day_adds_a_second_fee_entry(r
             (f"{stone_account['id']}:mdr:2026-09-10:%",),
         ).fetchall()
     assert [(r["external_id"].rsplit(":", 1)[-1], r["amount_cents"]) for r in rows] == [("1", 2_72), ("2", 50)]
+
+
+def test_the_monthly_fee_counts_once_in_the_result_and_not_in_the_cash_forecast(receivables_db, stone_account):
+    from backend.finance.forecast import forecast
+
+    content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
+    receivables.sync_receivables(COMPANY, stone_account["id"], content)
+    result = management_result(COMPANY, "2026-09")
+    line = next(l for l in result["accounts"] if l["system_key"] == "payment_terminal_rent")
+    assert line["actual_cents"] == 90_00
+
+    # Before the settlement: the day nets to what lands in the bank, once.
+    ahead = {d["date"]: d for d in forecast(COMPANY, date(2026, 9, 11), date(2026, 9, 11), as_of=date(2026, 9, 1))["days"]}
+    items = ahead["2026-09-11"]["items"]
+    assert not any("Mensalidade" in item["description"] for item in items)
+    assert sum(item["amount_cents"] for item in items) == 1_170_00 - 9_93 - 90_00
+
+
+def test_past_stone_fees_are_not_piled_onto_today(receivables_db, stone_account):
+    from backend.finance.forecast import forecast
+
+    content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
+    receivables.sync_receivables(COMPANY, stone_account["id"], content)
+    today = forecast(COMPANY, date(2026, 9, 16), date(2026, 9, 16), as_of=date(2026, 9, 16))["days"][0]
+    assert not any("Stone" in item["description"] for item in today["items"])

@@ -74,18 +74,29 @@ def sync_receivables(company: int, cash_account_id: int, xml_content: bytes) -> 
     return {"total": len(receivables), "imported": imported, "duplicates": duplicates}
 
 
+MONTHLY_FEE_CATEGORY = "Cobrança"
+
+
 def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> dict:
     """Portal CSV import, in one transaction (a quarter is ~7k rows; one
     connection per row would not fit a serverless request). Fees are booked
     once per settlement day — MDR in "Taxas de adquirentes", the anticipation
-    discount in "Antecipação de recebíveis" — instead of one expense per sale."""
+    discount in "Antecipação de recebíveis" — instead of one expense per sale.
+
+    The report is also the only place the monthly terminal fee always shows up
+    (the statement only has it when Stone charges it apart from a deposit), so
+    each "Cobrança" row becomes one "Mensalidade Stone" expense, already paid:
+    its cash effect is the report row itself (a smaller deposit) or the
+    statement line, never a bill to pay."""
     receivables = parse_receivables_csv(content)
     fee_accounts = {
         "mdr": accounts.account_by_key(company, "acquiring_fees"),
         "advance": accounts.account_by_key(company, "receivables_advance"),
+        "monthly": accounts.account_by_key(company, "payment_terminal_rent"),
     }
     imported = duplicates = 0
     fees_by_day: dict = {}
+    monthly_fees = []
     timestamp = db.now()
     with db.connection() as conn:
         existing = {
@@ -135,6 +146,8 @@ def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> 
             )
             existing.add(external_id)
             known_keys.add(key)
+            if receivable.category == MONTHLY_FEE_CATEGORY and receivable.net_cents < 0:
+                monthly_fees.append(receivable)
             day = fees_by_day.setdefault(receivable.settlement_date, {"mdr": 0, "advance": 0, "sales": 0})
             day["advance"] += receivable.advance_fee_cents
             day["mdr"] += receivable.fee_cents - receivable.advance_fee_cents
@@ -142,6 +155,20 @@ def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> 
             imported += 1
 
         fee_entries = 0
+        fee_cents = 0
+        for fee in monthly_fees:
+            settlement = fee.settlement_date
+            entry = create_entry(EntryCommand(
+                company_id=company, account_id=fee_accounts["monthly"]["id"], amount_cents=-fee.net_cents,
+                competence=settlement[:7], due_date=date.fromisoformat(settlement),
+                source="stone_receivable",
+                external_id=f"{cash_account_id}:monthly:{fee.transaction_key}",
+                description=f"Mensalidade Stone — {settlement[5:7]}/{settlement[:4]}",
+            ), conn=conn)
+            conn.execute(
+                "UPDATE financial_entries SET status='paid',version=version+1,updated_at=? WHERE id=?",
+                (db.now(), entry["id"]),
+            )
         for settlement, day in sorted(fees_by_day.items()):
             for kind, label in (("mdr", "Taxas Stone"), ("advance", "Antecipação Stone")):
                 amount = day[kind]
@@ -160,9 +187,13 @@ def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> 
                     description=f"{label} de {settlement[8:10]}/{settlement[5:7]} ({day['sales']} venda(s))",
                 ), conn=conn)
                 fee_entries += 1
+                fee_cents += amount
     return {
         "total": len(receivables), "imported": imported, "duplicates": duplicates,
         "fee_entries": fee_entries if imported else 0,
+        "fee_cents": fee_cents if imported else 0,
+        "monthly_fees": len(monthly_fees),
+        "monthly_fee_cents": -sum(fee.net_cents for fee in monthly_fees),
     }
 
 

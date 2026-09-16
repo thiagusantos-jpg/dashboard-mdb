@@ -17,7 +17,7 @@ from ..finance.entry_management import (
     update_entry,
 )
 from ..finance.expense_schedules import confirm_entry, create_expense_schedule, preview_expense_schedule
-from ..finance import fixed_expenses
+from ..finance import fixed_expenses, stone_guard
 from ..finance.payments import CASH_LINK_REQUIRED_MESSAGE
 from ..finance.recurrence import (
     RecurrenceConflictError,
@@ -44,6 +44,7 @@ class EntryCreate(BaseModel):
     payment_method: str = Field(default="", pattern=r"^(|boleto|pix|debito_automatico|transferencia)$")
     payment_code: str = Field(default="", max_length=200)
     forecast: bool = False
+    confirm_not_stone_duplicate: bool = False
 
 
 class Settlement(BaseModel):
@@ -85,6 +86,7 @@ class RecurrenceCreate(BaseModel):
     counterparty_id: Optional[int] = None
     payment_method: str = Field(default="", pattern=r"^(|boleto|pix|debito_automatico|transferencia)$")
     payment_code: str = Field(default="", max_length=200)
+    confirm_not_stone_duplicate: bool = False
 
 
 class RecurrencePatch(BaseModel):
@@ -119,12 +121,28 @@ class ExpenseScheduleCreate(ExpenseSchedulePreviewRequest):
     store_id: Optional[int] = None
     counterparty_id: Optional[int] = None
     confirmed: bool = False
+    confirm_not_stone_duplicate: bool = False
 
 
 class EntryConfirm(BaseModel):
     expected_version: int
     amount_cents: Optional[int] = Field(default=None, gt=0)
     competence: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+
+
+STONE_DUPLICATE_FIELD = "confirm_not_stone_duplicate"
+
+
+def _guard_stone_duplicate(company: int, account_id: int, months, confirmed: bool) -> None:
+    """Stone fees and the monthly fee come from the imported report; a manual
+    one needs the partner to say it is a different charge."""
+    if confirmed:
+        return
+    message = stone_guard.duplicate_message(company, account_id, months)
+    if message:
+        raise HTTPException(
+            422, _error_detail("stone_duplicate", message, [STONE_DUPLICATE_FIELD])
+        )
 
 
 def _require_sensitive_if_needed(
@@ -258,6 +276,7 @@ def add_entry(
     ),
 ):
     _require_sensitive_if_needed(company, body.account_id, auth)
+    _guard_stone_duplicate(company, body.account_id, [body.competence], body.confirm_not_stone_duplicate)
     if body.counterparty_id is not None:
         # Same rule as editing (B1): a counterparty from another company is rejected.
         from ..finance.validators import validate_counterparty
@@ -347,6 +366,7 @@ def add_recurrence(
     ),
 ):
     _require_sensitive_if_needed(company, body.account_id, auth)
+    _guard_stone_duplicate(company, body.account_id, None, body.confirm_not_stone_duplicate)
     try:
         return create_recurrence(
             company=company,
@@ -510,6 +530,13 @@ def add_expense_schedule(
 ):
     _require_sensitive_if_needed(company, body.account_id, auth)
     try:
+        months = [row["competence"] for row in preview_expense_schedule(
+            body.total_cents, body.count, body.first_due, body.competence_mode, body.competence,
+        )]
+    except ValueError as exc:
+        raise HTTPException(422, _error_detail("invalid_fields", str(exc))) from exc
+    _guard_stone_duplicate(company, body.account_id, months, body.confirm_not_stone_duplicate)
+    try:
         result = create_expense_schedule(
             company=company,
             account_id=body.account_id,
@@ -632,6 +659,15 @@ def get_fixed_expense_template(
     return fixed_expenses.setup_template(company)
 
 
+@router.get("/stone-coverage")
+def get_stone_coverage(
+    company: int,
+    auth=Depends(permissions.require_permission("finance.read")),
+):
+    """Categories booked automatically from the Stone report and the months it covers."""
+    return stone_guard.coverage(company)
+
+
 @router.post("/fixed-expenses", status_code=201)
 def post_fixed_expenses(
     company: int,
@@ -645,6 +681,12 @@ def post_fixed_expenses(
             raise HTTPException(422, _error_detail("invalid_fields", "Despesa fixa desconhecida."))
         # Salários e encargos são contas sensíveis.
         _require_sensitive_if_needed(company, row["account_id"], auth)
+        if row.get("stone_automatic"):
+            raise HTTPException(422, _error_detail(
+                "stone_duplicate",
+                "A mensalidade da Stone já entra automaticamente pelo relatório de recebíveis.",
+                ["items"],
+            ))
     try:
         return fixed_expenses.setup_fixed_expenses(
             company, body.period, [item.model_dump() for item in body.items], created_by=auth.user_id,

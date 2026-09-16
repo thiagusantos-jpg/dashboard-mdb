@@ -105,7 +105,7 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
     filter changes nothing for them."""
     rows = conn.execute(
         """
-        SELECT e.id,e.due_date,e.amount_cents,e.description,a.nature,
+        SELECT e.id,e.due_date,e.amount_cents,e.description,e.source,a.nature,
                COALESCE(SUM(
                    CASE WHEN ev.event_type='settled' THEN ev.amount_cents
                         WHEN ev.event_type='reversed' THEN -ev.amount_cents ELSE 0 END
@@ -116,7 +116,7 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
         WHERE e.company=? AND e.due_date<=?
           AND e.status IN ('open','overdue','partially_paid')
           AND e.source<>'loan'
-        GROUP BY e.id,e.due_date,e.amount_cents,e.description,a.nature
+        GROUP BY e.id,e.due_date,e.amount_cents,e.description,e.source,a.nature
         """,
         (company, end.isoformat()),
     ).fetchall()
@@ -137,8 +137,17 @@ def _open_entries_by_due_date_on_connection(conn, company: int, end: date) -> di
             "description": row["description"],
             "source": "financial_entries",
             "confidence": "forecast",
+            "entry_source": row["source"],
         })
     return by_due_date
+
+
+STONE_FEE_SOURCE = "stone_receivable"
+
+
+def _public(item: dict) -> dict:
+    """Forecast items without the entry's internal origin marker."""
+    return {key: value for key, value in item.items() if key != "entry_source"}
 
 
 def _open_installments_by_due_date_on_connection(conn, company: int, end: date) -> dict:
@@ -303,12 +312,14 @@ def forecast(company: int, start: date, end: date, scenario: str = "base", *, as
             items = list(realized_by_day.get(day_iso, []))
             for due_date, rows in open_entries_by_due.items():
                 if due_date <= today_iso:
-                    items.extend(rows)
+                    # A Stone fee is never paid: it was discounted from a deposit
+                    # the bank import already counted. Only future ones matter.
+                    items.extend(_public(row) for row in rows if row.get("entry_source") != STONE_FEE_SOURCE)
             for due_date, rows in open_installments_by_due.items():
                 if due_date <= today_iso:
                     items.extend(rows)
         else:
-            items = list(open_entries_by_due.get(day_iso, []))
+            items = [_public(row) for row in open_entries_by_due.get(day_iso, [])]
             items += list(open_installments_by_due.get(day_iso, []))
             items += list(expected_settlements_by_day.get(day_iso, []))
             if scenario_adjustment:

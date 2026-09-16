@@ -281,6 +281,10 @@ function fixedSetupHtml(period) {
 function fixedSetupRowsHtml(rows, period) {
   const cells = rows.map((row) => {
     const key = esc(row.system_key);
+    if (row.stone_automatic && !row.configured) {
+      return `<span class="fixed-setup-label">${esc(row.label)}</span>
+        <span class="fixed-setup-done">${icon('circle-check')} Automática pelo relatório da Stone</span><span></span>`;
+    }
     if (row.configured) {
       return `<span class="fixed-setup-label">${esc(row.label)}</span>
         <span class="fixed-setup-done">${icon('circle-check')} Já cadastrada</span><span></span>`;
@@ -323,7 +327,7 @@ async function loadFixedSetup(period) {
     form.querySelectorAll('[data-error-for]').forEach((slot) => { slot.textContent = ''; });
     const formError = form.querySelector('[data-form-error]');
     formError.textContent = '';
-    const values = rows.filter((row) => !row.configured).map((row) => ({
+    const values = rows.filter((row) => !row.configured && !row.stone_automatic).map((row) => ({
       system_key: row.system_key,
       amount: form.elements[`amount-${row.system_key}`].value,
       due_day: form.elements[`due-${row.system_key}`].value,
@@ -493,8 +497,18 @@ const DESPESAS_FILTERS = {
   all: {label: 'Todos', match: () => true},
 };
 
+/* Taxas e mensalidade vindas do relatório da Stone: já descontadas no depósito e
+ * conferidas pela importação. Não há o que pagar nem o que revisar uma a uma. */
+function isStoneAutomatic(entry) {
+  return entry.source === 'stone_receivable';
+}
+
 function expenseRowActions(entry) {
   const actions = [];
+  if (isStoneAutomatic(entry)) {
+    return `<button type="button" class="btn-secondary" data-entry-action="history" data-entry-id="${esc(entry.id)}"
+       aria-label="Histórico: ${esc(entry.description)}">Histórico</button>`;
+  }
   if (entry.status === 'forecast') actions.push(['confirm', 'Confirmar']);
   if (!['cancelled', 'reversed'].includes(entry.status)) actions.push(['edit', 'Editar']);
   if (entry.source === 'manual' && ['open', 'forecast'].includes(entry.status)) actions.push(['cancel', 'Cancelar']);
@@ -570,12 +584,13 @@ function expensesCardsHtml(totals, delta, groups) {
  * atraso é trabalho de Contas a pagar, e duas telas alarmando a mesma conta confundem. */
 function expenseRowHtml(entry, accountsById) {
   const parcel = entry.installment_count ? ` · parcela ${entry.installment_number}/${entry.installment_count}` : '';
+  const auto = isStoneAutomatic(entry);
   return `
-    <tr>
-      <td>${esc(entry.description)}<div class="muted">${esc((accountsById[String(entry.account_id)] || {}).name || '—')}${parcel}</div></td>
+    <tr${auto ? ' data-stone-auto' : ''}>
+      <td>${esc(entry.description)}${auto ? ' <span class="payables-tag">Automático · Stone</span>' : ''}<div class="muted">${esc((accountsById[String(entry.account_id)] || {}).name || '—')}${parcel}</div></td>
       <td class="num">${money(entry.amount_cents)}</td>
       <td>${dateBR(entry.due_date)}</td>
-      <td>${statusBadge(entry.status)}</td>
+      <td>${auto ? '<span class="badge-success">Descontado pela Stone</span>' : statusBadge(entry.status)}</td>
       <td><div class="row-actions">${expenseRowActions(entry)}</div></td>
     </tr>`;
 }
@@ -583,7 +598,7 @@ function expenseRowHtml(entry, accountsById) {
 /* A ponte entre as duas telas, dita em voz alta em vez de adivinhada: aqui se vê quanto o
  * mês custou; o que ainda precisa sair do caixa se paga na outra. */
 function unpaidNotice(entries) {
-  const open = (entries || []).filter((entry) => ['open', 'overdue', 'partially_paid'].includes(entry.status));
+  const open = (entries || []).filter((entry) => !isStoneAutomatic(entry) && ['open', 'overdue', 'partially_paid'].includes(entry.status));
   if (!open.length) return null;
   return {count: open.length, cents: open.reduce((sum, entry) => sum + entry.amount_cents, 0)};
 }
@@ -598,6 +613,17 @@ function unpaidNoticeHtml(notice) {
       <a href="${routeHash('contas-pagar')}">Abrir Contas a pagar →</a></p>`;
 }
 
+// A category made only of Stone automatic entries (one per day) folds into one line.
+function expenseGroupRowsHtml(group, accountsById) {
+  const rows = group.items.map((entry) => expenseRowHtml(entry, accountsById));
+  if (group.items.length <= 3 || !group.items.every(isStoneAutomatic)) return rows.join('');
+  return `<tr class="stone-auto-summary"><td colspan="5">
+      <span class="payables-tag">Automático · Stone</span>
+      ${group.items.length} lançamentos vindos do relatório de recebíveis, já conferidos na importação.
+      <button type="button" class="btn-link" data-stone-auto-toggle="${esc(group.key)}" aria-expanded="false">Ver dia a dia</button>
+    </td></tr>${rows.map((row) => row.replace('<tr data-stone-auto', `<tr data-stone-auto data-stone-group="${esc(group.key)}" hidden`)).join('')}`;
+}
+
 function expenseGroupsHtml(groups, accountsById) {
   return `<div class="table-wrap"><table class="data-table payables-table">
       <thead><tr><th>Descrição</th><th class="num">Valor</th><th>Vencimento</th><th>Status</th>
@@ -605,7 +631,7 @@ function expenseGroupsHtml(groups, accountsById) {
       ${groups.map((group) => `<tbody class="payables-group">
         <tr class="payables-group-row"><th colspan="5" scope="rowgroup">${esc(group.name)}
           <span>${group.items.length} ${group.items.length === 1 ? 'lançamento' : 'lançamentos'} · ${money(group.cents)}${group.cents ? ` · ${String(group.share).replace('.', ',')}% do total` : ''}</span></th></tr>
-        ${group.items.map((entry) => expenseRowHtml(entry, accountsById)).join('')}</tbody>`).join('')}
+        ${expenseGroupRowsHtml(group, accountsById)}</tbody>`).join('')}
     </table></div>`;
 }
 
@@ -694,6 +720,12 @@ async function renderDespesas(token) {
   content.querySelectorAll('[data-expense-new]').forEach((button) => button.addEventListener('click', () =>
     openExpenseForm(null, Object.assign({trigger: button, onSaved: refresh}, lookups))));
   const entriesById = Object.fromEntries(entries.map((e) => [String(e.id), e]));
+  content.querySelectorAll('[data-stone-auto-toggle]').forEach((button) => button.addEventListener('click', () => {
+    const open = button.getAttribute('aria-expanded') !== 'true';
+    button.setAttribute('aria-expanded', String(open));
+    button.textContent = open ? 'Recolher' : 'Ver dia a dia';
+    content.querySelectorAll(`[data-stone-group="${CSS.escape(button.dataset.stoneAutoToggle)}"]`).forEach((row) => { row.hidden = !open; });
+  }));
   content.querySelectorAll('[data-entry-action]').forEach((button) => button.addEventListener('click', () => {
     const entry = entriesById[button.dataset.entryId];
     const ctx = Object.assign({trigger: button, onSaved: refresh}, lookups);
