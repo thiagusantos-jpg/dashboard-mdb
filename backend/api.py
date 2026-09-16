@@ -254,6 +254,10 @@ def sync_job(job_id:int,auth=Depends(security.authenticate)):
 def cron_sync(request:Request):
     # Vercel Cron issues a GET request on schedule, with Authorization: Bearer <CRON_SECRET>.
     # See https://vercel.com/docs/cron-jobs/manage-cron-jobs#securing-cron-jobs.
+    # vercel.json schedules it in UTC: '0 9 * * *' is 06:00 in São Paulo. It ran at
+    # 03:00 BRT until 2026-09-16, when Set/2026 was published two days short because
+    # Mobne had not exported 14/09 yet at that hour (see dashboard()'s covered end).
+    # Hobby allows one cron a day, so this hour is the only shot the day gets.
     secret=os.environ.get('CRON_SECRET')
     if not secret or request.headers.get('authorization')!=f'Bearer {secret}':
         raise HTTPException(401,'Não autorizado.')
