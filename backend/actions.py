@@ -265,9 +265,13 @@ def ensure_due_reminders(company: int, today, *, created_by: Optional[int] = Non
     open_keys = {f"vencimento:{item['kind']}:{item['id']}" for item in items}
 
     with db.connection() as conn:
+        # O padrão do LIKE vai como parâmetro, nunca no texto do SQL: database.py::_PGConn
+        # troca '?' por '%s' antes de entregar a query ao psycopg, e um '%' literal que
+        # sobrasse ali seria lido como placeholder ("only '%s', '%b', '%t' are allowed").
+        # O SQLite aceitava dos dois jeitos, então só o Postgres quebrava — em produção.
         rows = conn.execute(
-            "SELECT id,alert_key,status FROM actions WHERE company=? AND alert_key LIKE 'vencimento:%'",
-            (company,),
+            "SELECT id,alert_key,status FROM actions WHERE company=? AND alert_key LIKE ?",
+            (company, "vencimento:%"),
         ).fetchall()
     known = {row["alert_key"] for row in rows}
     stale = [row for row in rows if row["status"] in _ACTIVE_STATUSES and row["alert_key"] not in open_keys]
