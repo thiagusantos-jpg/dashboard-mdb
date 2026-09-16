@@ -18,6 +18,8 @@
 const CASHFLOW_KIND_LABELS = {bank: 'Conta bancária', payment: 'Maquininha/adquirente', cash: 'Dinheiro em caixa'};
 const CASHFLOW_CONFIDENCE_LABELS = {realized: 'Realizado', forecast: 'Previsto', simulated: 'Simulado'};
 const CASHFLOW_CONFIDENCE_BADGES = {realized: 'badge-success', forecast: 'badge-info', simulated: 'badge-warning'};
+// Só os tipos que merecem um selo no extrato: um lançamento comum não precisa dizer que é comum.
+const CASHFLOW_EVENT_KIND_TAGS = {transfer: 'Transferência', reversal: 'Estorno'};
 
 const CASHFLOW_HORIZONS = [30, 60, 90];
 // Fixo, independente do horizonte escolhido: é só o trecho "sólido" do gráfico, para
@@ -163,6 +165,33 @@ function confidenceBadge(confidence) {
   return `<span class="${CASHFLOW_CONFIDENCE_BADGES[confidence] || 'badge-muted'}">${esc(CASHFLOW_CONFIDENCE_LABELS[confidence] || confidence)}</span>`;
 }
 
+/* O extrato vem do mais novo para o mais antigo, e o saldo da conta é o total de tudo que
+ * ela já movimentou — então o saldo depois do lançamento mais novo é o saldo atual, e cada
+ * linha anterior desconta o próprio valor. A conta fecha mesmo quando a conta tem mais
+ * movimentos do que as 200 linhas que a API devolve: andando para trás, nada de mais antigo
+ * entra nessa soma. */
+function statementRows(events, balanceCents) {
+  let running = balanceCents;
+  return (events || []).map((event) => {
+    const row = Object.assign({}, event, {balance_cents: running});
+    running -= event.amount_cents;
+    return row;
+  });
+}
+
+function statementHtml(rows) {
+  if (!rows.length) return '<p class="muted">Nenhum movimento nesta conta ainda.</p>';
+  return `<div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Data</th><th>Descrição</th><th class="num">Valor</th><th class="num">Saldo</th></tr></thead>
+      <tbody>${rows.map((row) => `<tr>
+        <td>${dateBR(row.occurred_at)}</td>
+        <td>${esc(row.description)}${CASHFLOW_EVENT_KIND_TAGS[row.kind] ? ` <span class="payables-tag">${CASHFLOW_EVENT_KIND_TAGS[row.kind]}</span>` : ''}</td>
+        <td class="num">${money(row.amount_cents)}</td>
+        <td class="num">${money(row.balance_cents)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
 // Agrupa os dias com movimento pelo tipo escolhido (entradas/saídas/todas) e descarta
 // o dia inteiro se o filtro esvaziar seus itens — um dia sem nada não vira um grupo vazio.
 function movementGroups(days, tipo) {
@@ -261,6 +290,28 @@ function openCashTransferForm(accountOptions, ctx) {
   bindDrawerForm(drawer, buildTransferRequest, () => { drawer.close(); if (ctx.onSaved) ctx.onSaved(); });
 }
 
+/* "Quanto entrou e saiu na maquininha?" — a projeção não responde isso: ela é consolidada e
+ * as contas previstas ainda não escolheram de qual conta vão sair. Quem responde é o extrato
+ * da conta, que é só o realizado, onde cada movimento sabe a que conta pertence. */
+async function openCashStatement(account, ctx) {
+  ctx = ctx || {};
+  const drawer = openDrawer({
+    title: `Extrato — ${account.name}`, trigger: ctx.trigger,
+    body: '<div class="skeleton-block" aria-label="Carregando extrato"></div>',
+  });
+  let events;
+  try {
+    events = await api(`${financeBasePath()}/cash-events?cash_account_id=${encodeURIComponent(account.id)}`);
+  } catch (e) {
+    return drawerLoadError(drawer, e, () => { drawer.close(); openCashStatement(account, ctx); });
+  }
+  drawer.setBody(`
+    <p class="muted">${esc(CASHFLOW_KIND_LABELS[account.kind] || account.kind)} · saldo atual de <strong>${money(account.balance_cents)}</strong></p>
+    ${statementHtml(statementRows(events, account.balance_cents))}
+    <p class="field-help">Só o que já aconteceu nesta conta. O que ainda vai entrar ou sair está na projeção, que é consolidada de todas as contas.</p>
+    <div class="btn-row"><button type="button" class="btn-secondary" data-drawer-close>Fechar</button></div>`);
+}
+
 /* ---------------------------------------------------------------- page */
 
 async function renderFluxoCaixa(token) {
@@ -296,6 +347,7 @@ async function renderFluxoCaixa(token) {
       <td>${esc(CASHFLOW_KIND_LABELS[a.kind] || a.kind)}</td>
       <td class="num">${money(a.balance_cents)}</td>
       <td><div class="row-actions">
+        <button type="button" class="btn-secondary" data-cash-statement="${esc(a.id)}" aria-label="Extrato de ${esc(a.name)}">Extrato</button>
         <button type="button" class="btn-secondary" data-cash-rename="${esc(a.id)}" aria-label="Renomear ${esc(a.name)}">Renomear</button>
         <button type="button" class="btn-secondary" data-cash-archive="${esc(a.id)}" aria-label="Arquivar ${esc(a.name)}">Arquivar</button>
       </div></td>
@@ -335,6 +387,8 @@ async function renderFluxoCaixa(token) {
     <div class="chart-container chart-h-330" id="chart-cashflow-balance"></div>
     ${outlookHtml(cashOutlook(forecastData))}
     <h2 class="section-header">Próximos ${horizon} dias — realizado e previsto</h2>
+    <p class="section-note">Projeção consolidada de todas as contas: uma conta a pagar só escolhe de qual conta sai
+      na hora do pagamento. Para ver conta por conta, abra o extrato dela em Contas de caixa.</p>
     ${groups.length ? movementGroupsHtml(groups, today) : emptyMovements}
     <div class="settings-block mt-16">
       <h2>Contas de caixa</h2>
@@ -364,6 +418,8 @@ async function renderFluxoCaixa(token) {
     openCashAccountForm({trigger: ev.currentTarget, onSaved: refresh}));
 
   const byId = Object.fromEntries(accounts.map((a) => [String(a.id), a]));
+  content.querySelectorAll('[data-cash-statement]').forEach((button) => button.addEventListener('click', () =>
+    openCashStatement(byId[button.dataset.cashStatement], {trigger: button})));
   content.querySelectorAll('[data-cash-rename]').forEach((button) => button.addEventListener('click', () =>
     openRenameForm('cashAccount', byId[button.dataset.cashRename], {trigger: button, onSaved: refresh})));
   content.querySelectorAll('[data-cash-archive]').forEach((button) => button.addEventListener('click', () => {

@@ -127,6 +127,58 @@ test('movements group by day; a filtered-out day disappears instead of showing a
   assert.equal(onlyIncoming[0].items.length, 1);
 });
 
+/* Detalhe por conta: a projeção é consolidada e uma conta a pagar só escolhe de qual conta
+ * sai na hora do pagamento, então quem responde "o que entrou e saiu nesta conta" é o
+ * extrato do realizado, não um filtro na projeção. */
+
+test('the statement walks the balance backwards from the current one, newest row first', () => {
+  const f = loadCashflow();
+  // A API devolve do mais novo para o mais antigo; o saldo atual da conta é 200,00.
+  const events = [
+    {id: 3, occurred_at: '2026-09-16', description: 'Venda', amount_cents: 10_000, kind: 'entry'},
+    {id: 2, occurred_at: '2026-09-15', description: 'Boleto', amount_cents: -5_000, kind: 'entry'},
+    {id: 1, occurred_at: '2026-09-14', description: 'Saldo inicial', amount_cents: 15_000, kind: 'entry'},
+  ];
+  const rows = f.statementRows(events, 20_000);
+  assert.deepEqual(Array.from(rows.map((r) => r.balance_cents)), [20_000, 10_000, 15_000]);
+  // O primeiro lançamento da lista fecha no saldo atual, e cada linha anterior desconta o próprio valor.
+  assert.equal(rows[0].description, 'Venda');
+});
+
+test('an account with more movements than the API returns still shows honest running balances', () => {
+  const f = loadCashflow();
+  // Só as 200 mais novas voltam: andando para trás, o que é mais antigo nunca entra na conta.
+  const events = [{id: 9, occurred_at: '2026-09-16', description: 'Última', amount_cents: 1_000, kind: 'entry'}];
+  const rows = f.statementRows(events, 500_000);
+  assert.equal(rows[0].balance_cents, 500_000);
+});
+
+test('an empty account says so instead of drawing an empty table', () => {
+  const f = loadCashflow();
+  assert.deepEqual(Array.from(f.statementRows(null, 0)), []);
+  assert.match(f.statementHtml([]), /Nenhum movimento nesta conta ainda/);
+});
+
+test('transfers and reversals are tagged in the statement; a plain entry is not', () => {
+  const f = loadCashflow();
+  const html = f.statementHtml(f.statementRows([
+    {id: 3, occurred_at: '2026-09-16', description: 'Para o banco', amount_cents: -1_000, kind: 'transfer'},
+    {id: 2, occurred_at: '2026-09-15', description: 'Estorno: erro de digitação', amount_cents: 500, kind: 'reversal'},
+    {id: 1, occurred_at: '2026-09-14', description: 'Venda', amount_cents: 2_000, kind: 'entry'},
+  ], 1_500));
+  assert.match(html, /Transferência<\/span>/);
+  assert.match(html, /Estorno<\/span>/);
+  assert.doesNotMatch(html, /Venda<\/td>[\s\S]*?payables-tag/);
+});
+
+test('the account statement is a drawer and the projection says out loud that it is consolidated', () => {
+  const cashflow = fs.readFileSync(path.join(root, 'web/assets/cashflow.js'), 'utf8');
+  assert.match(cashflow, /function openCashStatement/);
+  assert.match(cashflow, /data-cash-statement/);
+  assert.match(cashflow, /cash-events\?cash_account_id=/);
+  assert.match(cashflow, /Projeção consolidada de todas as contas/);
+});
+
 test("today's group and a negative-balance day both say so in the text, not only in color", () => {
   const f = loadCashflow();
   const days = [
