@@ -38,7 +38,7 @@ def expect(account, day: str, *net_cents: int):
             )
 
 
-def credit(account, day: str, cents: int, description="Crédito Stone"):
+def credit(account, day: str, cents: int, description="LOJA - Elo | Débito"):
     return ledger.post_cash_event(COMPANY, account["id"], cents, date.fromisoformat(day), description)
 
 
@@ -85,7 +85,7 @@ def test_a_credit_with_the_wrong_amount_is_divergent_with_the_gap(stone):
     day = by_day(check())["2026-09-10"]
     assert day["status"] == "divergent"
     assert day["difference_cents"] == -230_00
-    assert day["credit"]["description"] == "Crédito Stone"
+    assert day["credit"]["description"] == "LOJA - Elo | Débito"
 
 
 def test_nothing_arrived_is_missing_only_after_the_grace_days(stone):
@@ -114,12 +114,63 @@ def test_an_exact_match_is_not_stolen_by_a_neighbour_day_that_differs(stone):
     expect(stone, "2026-09-09", 700_00)
     expect(stone, "2026-09-10", 500_00)
     credit(stone, "2026-09-10", 500_00)
-    credit(stone, "2026-09-10", 650_00)
+    credit(stone, "2026-09-11", 650_00)
 
     days = by_day(check())
     assert days["2026-09-10"]["status"] == "ok"
     assert days["2026-09-09"]["status"] == "divergent"
     assert days["2026-09-09"]["difference_cents"] == -50_00
+
+
+def test_a_conta_stone_day_sums_its_card_credits_and_ignores_pix_and_the_reserve(stone):
+    expect(stone, "2026-08-05", 1_500_00, 529_26)
+    credit(stone, "2026-08-05", 748_73, "LOJA LTDA - Antecipação | Crédito")
+    credit(stone, "2026-08-05", 352_84, "LOJA LTDA - Antecipação | Crédito")
+    credit(stone, "2026-08-05", 291_75, "LOJA LTDA - Visa Electron | Débito")
+    credit(stone, "2026-08-05", 547_81, "LOJA LTDA - Maestro | Débito")
+    credit(stone, "2026-08-05", 88_13, "LOJA LTDA - Elo | Débito")
+    credit(stone, "2026-08-05", 48_71, "FULANO DE TAL - Pix | Maquininha")
+    credit(stone, "2026-08-05", 5_000_00, "LOJA LTDA - Reserva Stone")
+    credit(stone, "2026-08-05", 300_00, "CLIENTE - Transferência | Pix")
+
+    result = reconciliation.stone_daily_check(
+        COMPANY, date(2026, 8, 1), date(2026, 8, 10), today=TODAY,
+    )
+    day = by_day(result)["2026-08-05"]
+    assert day["status"] == "ok"
+    assert day["received_cents"] == 2_029_26
+    assert day["credit"]["count"] == 5
+    assert day["credit"]["description"] == "5 créditos de cartão (Antecipação | Crédito, Elo | Débito, Maestro | Débito…)"
+
+
+def test_a_short_day_of_card_credits_is_divergent_not_matched_to_a_pix(stone):
+    expect(stone, "2026-08-05", 100_00)
+    credit(stone, "2026-08-05", 80_00, "LOJA - Elo | Débito")
+    credit(stone, "2026-08-05", 100_00, "FULANO - Pix | Maquininha")
+
+    day = by_day(reconciliation.stone_daily_check(COMPANY, date(2026, 8, 1), date(2026, 8, 10), today=TODAY))["2026-08-05"]
+    assert day["status"] == "divergent"
+    assert day["difference_cents"] == -20_00
+
+
+def test_another_bank_with_a_single_stone_deposit_still_matches(stone):
+    bank = ledger.create_account(COMPANY, "Itaú", "bank")
+    expect(bank, "2026-09-10", 400_00)
+    credit(bank, "2026-09-10", 400_00, "TED STONE PAGAMENTOS SA")
+    credit(bank, "2026-09-10", 400_00, "PIX RECEBIDO JOAO")
+
+    day = by_day(check(cash_account_id=bank["id"]))["2026-09-10"]
+    assert day["status"] == "ok"
+    assert day["credit"]["description"] == "TED STONE PAGAMENTOS SA"
+
+
+def test_an_account_with_unlabelled_credits_falls_back_to_single_credits(stone):
+    bank = ledger.create_account(COMPANY, "Banco", "bank")
+    expect(bank, "2026-09-10", 400_00)
+    credit(bank, "2026-09-10", 400_00, "CREDITO EM CONTA")
+    credit(bank, "2026-09-10", 70_00, "CREDITO EM CONTA")
+
+    assert by_day(check(cash_account_id=bank["id"]))["2026-09-10"]["status"] == "ok"
 
 
 def test_reversed_credits_and_other_accounts_are_ignored(stone):

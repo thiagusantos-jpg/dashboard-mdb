@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import secrets
 from datetime import date, timedelta
 from typing import Optional
@@ -324,6 +325,56 @@ STONE_DAYS_BEFORE = 1
 STONE_DAYS_AFTER = 3
 STONE_DEFAULT_TOLERANCE_CENTS = 100
 
+# The Conta Stone statement pays card sales as one credit per brand per day
+# ("Elo | Débito", "Antecipação | Crédito"), mixed with instant Pix from the
+# terminal and moves to/from "Reserva Stone". Another bank shows one deposit
+# from Stone. Either way the day's card credits are summed and compared with
+# the XML; Pix, transfers and the reserve are not card settlements.
+_CARD_SETTLEMENT = re.compile(r"\|\s*(d[ée]bito|cr[ée]dito)\s*$|antecipa", re.IGNORECASE)
+_NOT_SETTLEMENT = re.compile(r"reserva stone|\bpix\b|transfer[êe]ncia|devolu[çc][ãa]o", re.IGNORECASE)
+_STONE_DEPOSIT = re.compile(r"stone", re.IGNORECASE)
+
+
+def _is_card_settlement(description: str) -> bool:
+    text = description or ""
+    if _CARD_SETTLEMENT.search(text):
+        return True
+    return bool(_STONE_DEPOSIT.search(text)) and not _NOT_SETTLEMENT.search(text)
+
+
+def _settlement_units(credits: list) -> list:
+    """Per account: the day's card credits summed into one unit. An account
+    with no recognizable card credit (a bank that labels deposits oddly)
+    falls back to its individual credits."""
+    by_account = {}
+    for credit in credits:
+        by_account.setdefault(credit["cash_account_id"], []).append(credit)
+    units = []
+    for account_id, rows in by_account.items():
+        card = [c for c in rows if _is_card_settlement(c["description"])]
+        if not card:
+            units.extend(
+                dict(c, unit=f"event:{c['id']}", count=1) for c in rows
+            )
+            continue
+        days = {}
+        for c in card:
+            days.setdefault(c["occurred_at"][:10], []).append(c)
+        for day, members in days.items():
+            kinds = sorted({m["description"].rsplit(" - ", 1)[-1].strip() for m in members})
+            units.append({
+                "unit": f"day:{account_id}:{day}",
+                "cash_account_id": account_id,
+                "occurred_at": day,
+                "amount_cents": sum(m["amount_cents"] for m in members),
+                "count": len(members),
+                "description": (
+                    members[0]["description"] if len(members) == 1
+                    else f"{len(members)} créditos de cartão ({', '.join(kinds[:3])}{'…' if len(kinds) > 3 else ''})"
+                ),
+            })
+    return units
+
 
 def stone_daily_check(
     company: int,
@@ -365,7 +416,7 @@ def stone_daily_check(
             for row in conn.execute("SELECT id,name FROM cash_accounts WHERE company=?", (company,))
         }
 
-    credits = [dict(row) for row in credit_rows]
+    credits = _settlement_units([dict(row) for row in credit_rows])
     used = set()
 
     def window(settlement: date, account_id) -> list:
@@ -373,11 +424,11 @@ def stone_daily_check(
         hi = (settlement + timedelta(days=STONE_DAYS_AFTER)).isoformat()
         return [
             c for c in credits
-            if c["id"] not in used and c["cash_account_id"] == account_id and lo <= c["occurred_at"] <= hi
+            if c["unit"] not in used and c["cash_account_id"] == account_id and lo <= c["occurred_at"][:10] <= hi
         ]
 
     def distance(credit: dict, settlement: date) -> int:
-        return abs((date.fromisoformat(credit["occurred_at"]) - settlement).days)
+        return abs((date.fromisoformat(credit["occurred_at"][:10]) - settlement).days)
 
     days = []
     # Exact-enough matches first, so a close-but-wrong credit never steals the
@@ -401,7 +452,7 @@ def stone_daily_check(
         }
         if candidates:
             best = min(candidates, key=lambda c: (abs(c["amount_cents"] - expected), distance(c, settlement)))
-            used.add(best["id"])
+            used.add(best["unit"])
             day.update(status="ok", credit=best, received_cents=best["amount_cents"],
                        difference_cents=best["amount_cents"] - expected)
         else:
@@ -412,7 +463,7 @@ def stone_daily_check(
         nearby = window(settlement, day["cash_account_id"])
         if nearby:
             best = min(nearby, key=lambda c: (distance(c, settlement), abs(c["amount_cents"] - day["expected_cents"])))
-            used.add(best["id"])
+            used.add(best["unit"])
             day.update(status="divergent", credit=best, received_cents=best["amount_cents"],
                        difference_cents=best["amount_cents"] - day["expected_cents"])
         elif settlement + timedelta(days=STONE_DAYS_AFTER) < today:
