@@ -506,7 +506,7 @@ function drawerButtons(cancelLabel, submitLabel, submitClass) {
 }
 
 // Submit runs `run(form)`; success closes the drawer, a failure stays visible inside it.
-function bindDrawerForm(drawer, run) {
+function bindActionForm(drawer, run) {
   const form = drawer.dialog.querySelector('form');
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -535,7 +535,7 @@ function openConcludeDrawer(a, trigger) {
       <p class="field-help">Opcional. Fica no histórico para os outros sócios.</p>
       ${drawerButtons('Cancelar', 'Concluir ação', 'btn-primary')}
     </form>`});
-  bindDrawerForm(drawer, (form) =>
+  bindActionForm(drawer, (form) =>
     transitionAction(a, 'resolved', form.elements.note.value.trim(), 'Ação concluída. Ela está em “Concluídas”.'));
 }
 
@@ -550,7 +550,7 @@ function openDismissDrawer(a, trigger) {
       <textarea id="action-dismiss-note" name="note" class="login-input" rows="3" maxlength="1800" placeholder="Opcional"></textarea>
       ${drawerButtons('Manter ação', 'Descartar', 'btn-secondary action-danger')}
     </form>`});
-  bindDrawerForm(drawer, (form) =>
+  bindActionForm(drawer, (form) =>
     transitionAction(a, 'dismissed', dismissNote(form.elements.reason.value, form.elements.note.value), 'Ação descartada.'));
 }
 
@@ -580,7 +580,7 @@ function openEditDrawer(a, trigger) {
       <select id="action-priority" name="priority" class="login-input">${priorityOptions(a.priority)}</select>
       ${drawerButtons('Cancelar', 'Salvar', 'btn-primary')}
     </form>`});
-  bindDrawerForm(drawer, async (form) => {
+  bindActionForm(drawer, async (form) => {
     await api(`/api/companies/${APP.company}/actions/${a.id}`, {method: 'PATCH', body: JSON.stringify(actionEditPayload(form.elements))});
     await reloadActions('Ação atualizada.');
   });
@@ -599,7 +599,7 @@ function openNewActionDrawer(trigger) {
       <input id="new-action-due" name="due_date" type="date" class="login-input">
       ${drawerButtons('Cancelar', 'Criar ação', 'btn-primary')}
     </form>`});
-  bindDrawerForm(drawer, async (form) => {
+  bindActionForm(drawer, async (form) => {
     await api(`/api/companies/${APP.company}/actions`, {method: 'POST', body: JSON.stringify(manualActionPayload(form.elements, Date.now()))});
     setActionsFilter('pendentes', '');
     await reloadActions('Ação criada.');
