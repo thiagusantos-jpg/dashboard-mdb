@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
-from ..finance import obligations, payments
+from ..finance import obligations, payment_matches, payments
 
 
 router = APIRouter(prefix="/api/companies/{company}/finance", tags=["finance"])
@@ -125,6 +125,24 @@ def obligations_summary(
     auth: security.AuthContext = Depends(permissions.require_permission("finance.read")),
 ):
     return obligations.obligation_summary(
+        company,
+        today=_datetime.now(ZoneInfo("America/Sao_Paulo")).date(),
+        include_sensitive=_has_permission(auth, "finance.sensitive.read", company),
+    )
+
+
+@router.get("/obligations/payment-suggestions")
+def obligation_payment_suggestions(
+    company: int,
+    auth: security.AuthContext = Depends(permissions.require_permission("finance.read")),
+):
+    """Contas abertas que já têm um débito correspondente no caixa. Só sugere: a baixa
+    em si passa pela gaveta de pagamento e por payments.record_payment, como sempre.
+
+    Declarada antes de /obligations/{kind}/{obligation_id} de propósito — o caminho
+    literal precisa vir antes do parametrizado, senão "payment-suggestions" seria lido
+    como um `kind`."""
+    return payment_matches.suggestions(
         company,
         today=_datetime.now(ZoneInfo("America/Sao_Paulo")).date(),
         include_sensitive=_has_permission(auth, "finance.sensitive.read", company),

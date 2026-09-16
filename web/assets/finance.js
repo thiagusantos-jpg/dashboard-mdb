@@ -801,6 +801,77 @@ function payablesCardsHtml(summary, filters, page) {
   </div>`;
 }
 
+/* Os próximos 30 dias resumidos: o que entra (inclusive o que a Stone ainda vai
+ * depositar), o que sai, e o pior dia. O pior dia é a pergunta real do sócio — em que dia
+ * o dinheiro acaba — e não quanto sobra no fim do mês, que esconde um vale no meio. */
+function cashOutlook(projection) {
+  const days = (projection && projection.days) || [];
+  if (!days.length) return null;
+  let incoming = 0;
+  let outgoing = 0;
+  days.forEach((day) => day.items.forEach((item) => {
+    if (item.amount_cents >= 0) incoming += item.amount_cents;
+    else outgoing += item.amount_cents;
+  }));
+  const stone = days.some((day) => day.items.some((item) => item.source === 'stone_receivables'));
+  const lowest = projection.lowest || null;
+  // O horizonte pedido, não a quantidade de linhas: a projeção devolve um objeto por dia,
+  // extremos incluídos, então contar linhas diria "31 dias" para uma janela de 30.
+  const horizon = projection.start && projection.end
+    ? Math.round((Date.parse(projection.end) - Date.parse(projection.start)) / 86400000)
+    : days.length;
+  return {
+    horizon_days: horizon,
+    incoming_cents: incoming,
+    outgoing_cents: outgoing,
+    final_cents: days[days.length - 1].balance_cents,
+    lowest,
+    negative: !!(lowest && lowest.balance_cents < 0),
+    hasStone: stone,
+  };
+}
+
+function outlookHtml(outlook) {
+  if (!outlook) return '';
+  const figure = (label, value, extra) =>
+    `<div class="outlook-figure${extra ? ` ${extra}` : ''}"><span>${label}</span><strong>${value}</strong></div>`;
+  const warning = outlook.negative
+    ? `<p class="outlook-alert">${icon('triangle-alert')} <span>O caixa fica negativo em ${dateBR(outlook.lowest.date)}:
+        ${money(outlook.lowest.balance_cents)}. Antecipe um recebimento ou negocie um vencimento antes dessa data.</span></p>`
+    : `<p class="outlook-foot">Menor saldo no período: ${outlook.lowest ? `${money(outlook.lowest.balance_cents)} em ${dateBR(outlook.lowest.date)}` : '—'}.</p>`;
+  return `
+    <section class="outlook-card" aria-labelledby="outlook-title">
+      <div class="forecast-head"><h2 id="outlook-title">Próximos ${outlook.horizon_days} ${outlook.horizon_days === 1 ? 'dia' : 'dias'}</h2>
+        <span>${outlook.hasStone ? 'Inclui o que a Stone ainda vai depositar' : 'Sem recebíveis de cartão no período'}</span></div>
+      <div class="outlook-grid">
+        ${figure('Entra', money(outlook.incoming_cents))}
+        ${figure('Sai', money(-outlook.outgoing_cents))}
+        ${figure('Saldo no fim', money(outlook.final_cents), outlook.final_cents < 0 ? 'bad' : '')}
+      </div>
+      ${warning}
+    </section>`;
+}
+
+/* Contas que já parecem ter saído da conta: um débito do extrato bate com o saldo em
+ * aberto e com a data. Só aparece o par sem ambiguidade, e quem confirma é o sócio. */
+function suggestionsHtml(suggestions) {
+  const items = suggestions || [];
+  if (!items.length) return '';
+  return `
+    <section class="suggestion-card" aria-labelledby="suggestion-title">
+      <div class="forecast-head"><h2 id="suggestion-title">Parece que já foram pagas</h2>
+        <span>${items.length} ${items.length === 1 ? 'conta' : 'contas'}</span></div>
+      <p class="forecast-lead">Achamos no caixa uma saída do mesmo valor, perto do vencimento. Confira e dê a baixa — nada é quitado sem você confirmar.</p>
+      <ul class="forecast-list">${items.map((item) => `
+        <li><div><strong>${esc(item.obligation.description)}</strong>
+            <span>Vencia em ${dateBR(item.obligation.due_date)} · saída de ${money(-item.cash_event.amount_cents)} em ${dateBR(item.cash_event.occurred_at)}${item.cash_event.description ? ` · ${esc(item.cash_event.description)}` : ''}</span></div>
+          <span class="num">${money(item.obligation.open_cents)}</span>
+          <button type="button" class="btn-secondary btn-compact" data-suggestion-pay="${esc(item.obligation.id)}"
+            aria-label="Dar baixa: ${esc(item.obligation.description)}">Dar baixa</button></li>`).join('')}
+      </ul>
+    </section>`;
+}
+
 function forecastsHtml(summary, today) {
   const forecasts = (summary && summary.forecasts) || [];
   if (!forecasts.length) return '';
@@ -828,15 +899,20 @@ async function renderContasPagar(token) {
     view: 'lista', month: localTodayISO().slice(0, 7)});
   if (routeKind) Object.assign(filters, {quick: 'emprestimos', kind: routeKind});
   financeLoading(title, subtitle, 'Carregando contas a pagar');
-  let page, positions = null, summary = null;
+  let page, positions = null, summary = null, projection = null, suggestions = null;
   try {
     // The loan filter also shows the contracts (ficha, renegotiation), which
     // used to live on their own Empréstimos page.
-    [page, positions, summary] = await Promise.all([
+    const horizonStart = localTodayISO();
+    [page, positions, summary, projection, suggestions] = await Promise.all([
       api(obligationQuery(filters)),
       filters.kind === 'loan_installment' ? api(`/api/companies/${APP.company}/finance/loans`) : Promise.resolve(null),
       // The urgency summary is a guide on top of the list: without it the list still works.
       api(`/api/companies/${APP.company}/finance/obligations/summary`).catch(() => null),
+      // Same rule for the next two: they add context and a shortcut on top of the list,
+      // so a failure in either leaves the page whole instead of taking it down.
+      api(`/api/companies/${APP.company}/finance/forecast?start=${horizonStart}&end=${isoAddDays(horizonStart, 30)}&scenario=base`).catch(() => null),
+      api(`/api/companies/${APP.company}/finance/obligations/payment-suggestions`).catch(() => null),
     ]);
   } catch (e) {
     if (!APP.pageState.isCurrent(token)) return;
@@ -863,6 +939,8 @@ async function renderContasPagar(token) {
     ${payablesCardsHtml(summary, filters, page)}
     ${coverage ? `<p class="payables-coverage ${coverage.tone}" role="status">${icon(coverage.tone === 'short' ? 'triangle-alert' : coverage.tone === 'ok' ? 'circle-check' : 'lightbulb')}
       <span>${esc(coverage.text)}</span>${coverage.tone === 'ok' ? '' : ` <a href="${routeHash('fluxo-caixa')}">Abrir Fluxo de caixa →</a>`}</p>` : ''}
+    ${suggestionsHtml(suggestions)}
+    ${outlookHtml(cashOutlook(projection))}
     ${forecastsHtml(summary, today)}
     <div class="payables-toolbar">
       <div class="payables-views" role="group" aria-label="Como ver as contas">
@@ -989,6 +1067,13 @@ async function renderContasPagar(token) {
     Object.assign(filters, quickFilter('todas', today), {q: ''});
     renderContasPagar();
   });
+  // A baixa sugerida não quita nada sozinha: abre a gaveta de sempre, já vinculada ao
+  // movimento, para o sócio conferir e confirmar.
+  content.querySelectorAll('[data-suggestion-pay]').forEach((button) => button.addEventListener('click', () => {
+    const item = (suggestions || []).find((one) => String(one.obligation.id) === button.dataset.suggestionPay);
+    if (!item) return;
+    openPaymentForm(item.obligation, {trigger: button, linkCashEvent: item.cash_event, onSaved: refresh});
+  }));
   content.querySelectorAll('[data-forecast-confirm]').forEach((button) => button.addEventListener('click', async () => {
     const forecast = summary.forecasts.find((item) => String(item.id) === button.dataset.forecastConfirm);
     const request = buildForecastConfirm(forecast);

@@ -977,6 +977,23 @@ async function openPaymentForm(obligation, ctx) {
       option.hidden = !!option.value && !!term && !option.textContent.toLowerCase().includes(term);
     });
   });
+  // Baixa sugerida: a conta já saiu do caixa, então a gaveta abre em "vincular movimento"
+  // com ele escolhido. A lista carregada é limitada, então o movimento é acrescentado
+  // quando não estiver nela — melhor que abrir um campo vazio sem explicação.
+  if (ctx.linkCashEvent) {
+    const suggested = ctx.linkCashEvent;
+    if (!Array.from(eventSelect.options).some((option) => String(option.value) === String(suggested.id))) {
+      const option = document.createElement('option');
+      option.value = String(suggested.id);
+      option.textContent = `${dateBR(suggested.occurred_at)} — ${suggested.description} — ${money(suggested.amount_cents)}`;
+      eventSelect.appendChild(option);
+    }
+    eventSelect.value = String(suggested.id);
+    const link = form.querySelector('input[name="cash_mode"][value="link"]');
+    link.disabled = false;
+    link.checked = true;
+    syncCashMode();
+  }
   bindDrawerForm(drawer, (values) => buildPaymentRequest(obligation, values), (result) => {
     drawer.close();
     if (ctx.onSaved) ctx.onSaved(result);

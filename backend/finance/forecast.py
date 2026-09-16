@@ -189,6 +189,44 @@ def _open_installments_by_due_date_on_connection(conn, company: int, end: date) 
     return by_due_date
 
 
+def _expected_settlements_by_day_on_connection(conn, company: int, start: date, end: date) -> dict:
+    """Card money Stone has yet to deposit, grouped by settlement date.
+
+    Emits the GROSS amount, not the net. backend/finance/receivables.py::
+    sync_receivables already creates an expense entry for each receivable's fee
+    (account `acquiring_fees`) that is born 'open' and that nothing ever
+    settles, so _open_entries_by_due_date_on_connection above already counts
+    that fee as an outflow on this very day. Since net = gross - fee, adding
+    the net here would subtract the fee twice; adding the gross leaves
+    gross - fee = net, which is what actually lands in the account.
+
+    Callers must keep `start` after today: a settlement that already happened
+    arrived as a real cash_event through the bank import, and
+    _realized_events_by_day_on_connection above already counts it."""
+    rows = conn.execute(
+        """
+        SELECT settlement_date,COUNT(*) AS count,COALESCE(SUM(gross_cents),0) AS gross_cents
+        FROM stone_receivables
+        WHERE company=? AND settlement_date BETWEEN ? AND ?
+        GROUP BY settlement_date
+        """,
+        (company, start.isoformat(), end.isoformat()),
+    ).fetchall()
+    by_day: dict = defaultdict(list)
+    for row in rows:
+        gross = int(row["gross_cents"])
+        if gross <= 0:
+            continue
+        count = int(row["count"])
+        by_day[row["settlement_date"]].append({
+            "amount_cents": gross,
+            "description": f"Recebíveis Stone ({count} {'venda' if count == 1 else 'vendas'})",
+            "source": "stone_receivables",
+            "confidence": "forecast",
+        })
+    return by_day
+
+
 def _average_daily_realized_on_connection(conn, company: int, as_of: date, window_days: int = 30) -> float:
     window_start = as_of - timedelta(days=window_days)
     row = conn.execute(
@@ -233,6 +271,16 @@ def forecast(company: int, start: date, end: date, scenario: str = "base", *, as
         open_entries_by_due = _open_entries_by_due_date_on_connection(conn, company, end)
         open_installments_by_due = _open_installments_by_due_date_on_connection(conn, company, end)
 
+        # Strictly after today, mirroring `realized_effective_end` above: a
+        # settlement already made came in as a real cash_event through the bank
+        # import, so counting it here too would count the same money twice.
+        settlements_start = max(start, today + timedelta(days=1))
+        expected_settlements_by_day = (
+            _expected_settlements_by_day_on_connection(conn, company, settlements_start, end)
+            if settlements_start <= end
+            else {}
+        )
+
         scenario_adjustment = 0
         if scenario != "base":
             baseline_avg = _average_daily_realized_on_connection(conn, company, today)
@@ -262,6 +310,7 @@ def forecast(company: int, start: date, end: date, scenario: str = "base", *, as
         else:
             items = list(open_entries_by_due.get(day_iso, []))
             items += list(open_installments_by_due.get(day_iso, []))
+            items += list(expected_settlements_by_day.get(day_iso, []))
             if scenario_adjustment:
                 items.append({
                     "amount_cents": scenario_adjustment,
