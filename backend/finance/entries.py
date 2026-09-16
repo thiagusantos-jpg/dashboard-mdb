@@ -191,6 +191,47 @@ def get_entry(entry_id: int) -> dict:
         return _entry_snapshot(conn, entry_id)
 
 
+def entry_with_paid(conn, entry_id: int):
+    """An entry's raw row and its paid total, read in ONE statement.
+
+    Reading the two separately is a torn read on any connection that is not a
+    snapshot, and `db.connection()` is not one by default: it leaves
+    `isolation_level=""`, so every bare SELECT is its own independent read (see
+    database.py::connection). `settle_entry_on_connection` below bumps
+    `financial_entries.version` in the same transaction that inserts the
+    settled event, so version and paid always move together — but a payment
+    committing between two separate reads showed callers a pair that can exist
+    in no single moment: version still 1 while the events already summed
+    60.000. A racing caller was then rejected by the BALANCE rule ("O pagamento
+    excede o saldo em aberto" — a 422 blaming the amount the user typed, or a
+    bare ValueError that escaped record_payment as a 500) instead of the
+    VERSION rule's 409 "recarregue o lançamento".
+
+    The returned row is the raw financial_entries row with no derived column
+    left on it, so it can still serve as an audit `before` snapshot (see
+    payments.py::record_payment step 7, which pairs it with a raw `after`).
+
+    The paid expression is duplicated from _paid_cents() above on purpose: both
+    are plain SQL literals so tests/test_sql_placeholders.py can still scan them
+    (an f-string is a JoinedStr, invisible to that scan). Change one, change both.
+    """
+    row = conn.execute(
+        """
+        SELECT e.*, COALESCE((
+            SELECT SUM(CASE WHEN event_type='settled' THEN amount_cents
+                            WHEN event_type='reversed' THEN -amount_cents ELSE 0 END)
+            FROM financial_events WHERE entry_id=e.id
+        ),0) AS paid_cents_total
+        FROM financial_entries e WHERE e.id=?
+        """,
+        (entry_id,),
+    ).fetchone()
+    if not row:
+        return None, 0
+    row = dict(row)
+    return row, int(row.pop("paid_cents_total"))
+
+
 def settle_entry_on_connection(
     conn,
     entry_id: int,
@@ -218,14 +259,21 @@ def settle_entry_on_connection(
     """
     if amount_cents <= 0:
         raise ValueError("O pagamento deve ser maior que zero.")
-    entry = conn.execute(
-        "SELECT * FROM financial_entries WHERE id=?", (entry_id,)
-    ).fetchone()
+    entry, paid = entry_with_paid(conn, entry_id)
     if not entry:
         raise ValueError("Lançamento não encontrado.")
     if entry["status"] in {"cancelled", "reversed"}:
         raise ValueError("Este lançamento não pode ser pago.")
-    paid = _paid_cents(conn, entry_id)
+    # Before the balance guard, not after it. When `expected_version` is stale
+    # the caller's whole view of this entry is out of date, and the honest
+    # answer is "recarregue" — not "seu valor excede o saldo", which judges the
+    # amount against a balance the caller never saw. The conditioned UPDATE
+    # below remains the authoritative gate; checking here only makes the loser
+    # of a race fail for the right reason, and as EntryVersionConflict (which
+    # record_payment maps to a 409) rather than as a bare ValueError that
+    # escaped record_payment's `except PaymentError` entirely as a 500.
+    if expected_version is not None and int(entry["version"]) != int(expected_version):
+        raise EntryVersionConflict("Versão desatualizada; recarregue o lançamento.")
     if paid + amount_cents > entry["amount_cents"]:
         raise ValueError("O pagamento excede o saldo em aberto.")
     timestamp = db.now()

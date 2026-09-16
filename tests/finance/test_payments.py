@@ -11,10 +11,13 @@ from backend.finance import accounts, ledger, loans
 from backend.finance import payments
 from backend.finance.entries import (
     EntryCommand,
+    EntryVersionConflict,
     create_entry,
+    entry_with_paid,
     get_entry,
     reverse_entry,
     settle_entry,
+    settle_entry_on_connection,
 )
 from backend.finance.entry_management import entry_history
 from backend.finance.forecast import forecast
@@ -504,8 +507,10 @@ def test_backfill_leaves_cash_event_null(payments_db):
 # --- Concurrency proxy on SQLite (documented limitation: see task report) --
 
 
-def test_two_concurrent_payments_exceeding_balance_only_one_confirms(payments_db):
-    bank = bank_account()
+def _race_two_payments_over_one_balance(round_number: int):
+    """Two payments of 60.000 against a 100.000 entry, fired together. Returns
+    (results, errors) — exactly one of each is the only acceptable outcome."""
+    bank = bank_account(f"Banco {round_number}")
     entry = expense_entry(100_000)
 
     results = {}
@@ -525,20 +530,99 @@ def test_two_concurrent_payments_exceeding_balance_only_one_confirms(payments_db
         except Exception as exc:  # noqa: BLE001
             errors[name] = exc
 
-    t1 = threading.Thread(target=attempt, args=("a", "concurrent-a"))
-    t2 = threading.Thread(target=attempt, args=("b", "concurrent-b"))
+    t1 = threading.Thread(target=attempt, args=("a", f"concurrent-a-{round_number}"))
+    t2 = threading.Thread(target=attempt, args=("b", f"concurrent-b-{round_number}"))
     t1.start()
     t2.start()
     t1.join(timeout=10)
     t2.join(timeout=10)
+    return entry, bank, results, errors
 
-    assert len(results) == 1, f"expected exactly one winner, got results={results} errors={errors}"
-    assert len(errors) == 1
-    assert isinstance(errors[list(errors)[0]], PaymentConflictError)
 
-    reloaded = get_entry(entry["id"])
-    assert reloaded["open_cents"] == 40_000
-    assert ledger.account_balance(bank["id"]) == -60_000
+def test_two_concurrent_payments_exceeding_balance_only_one_confirms(payments_db):
+    """Repeated on purpose. The losing thread's rejection used to depend on
+    where the winner's commit landed between its two reads: read the entry row
+    before the commit and the paid total after it, and the pre-check saw an
+    impossible pair (version still 1, paid already 60.000) and answered with the
+    BALANCE rule — PaymentValidationError, a 422 blaming the amount — instead of
+    the VERSION rule's 409. One round caught it roughly one time in six, which
+    is exactly how a real defect hides as a flaky test; the reads are now a
+    single statement (entries.entry_with_paid), so every round must agree."""
+    for round_number in range(25):
+        entry, bank, results, errors = _race_two_payments_over_one_balance(round_number)
+        context = f"round={round_number} results={list(results)} errors={errors}"
+        assert len(results) == 1, f"expected exactly one winner, {context}"
+        assert len(errors) == 1, f"expected exactly one loser, {context}"
+        loser = errors[list(errors)[0]]
+        assert isinstance(loser, PaymentConflictError), (
+            f"the loser of a race must be told to reload (409), not that its amount "
+            f"is too big (422) — got {type(loser).__name__}: {loser}. {context}"
+        )
+        assert get_entry(entry["id"])["open_cents"] == 40_000, context
+        assert ledger.account_balance(bank["id"]) == -60_000, context
+
+
+def test_a_stale_version_is_a_conflict_even_when_the_balance_is_also_short(payments_db):
+    """Both rules reject this payment; only one of them is the truth.
+
+    The caller holds version 1 of an entry that has since been paid down to
+    40.000, and asks to pay 60.000. The balance rule would answer "seu valor
+    excede o saldo" — judging the amount against a balance this caller has never
+    seen. The version rule answers "recarregue o lançamento", which is what
+    actually happened, and it has to win: settle_entry_on_connection used to
+    check the balance first and raise a BARE ValueError, which record_payment's
+    `except PaymentError` did not catch at all — a 500 instead of a 409."""
+    entry = expense_entry(100_000)
+    settle_entry(entry["id"], 60_000, paid_at=date(2026, 9, 12))
+
+    with db.connection() as conn:
+        # EntryVersionConflict subclasses ValueError, so asserting the subclass
+        # is the whole point: a bare ValueError here is the old behaviour.
+        with pytest.raises(EntryVersionConflict):
+            settle_entry_on_connection(
+                conn, entry["id"], 60_000, paid_at=date(2026, 9, 12), expected_version=1
+            )
+
+
+def test_a_stale_payment_reaches_the_caller_as_a_conflict_not_a_bad_amount(payments_db):
+    """The user-facing contract, stated plainly: a caller holding a stale
+    version is told to reload (409), never that its amount is wrong (422).
+
+    This one passes without the fix too — read sequentially, the pre-check sees
+    version 2 and the version rule fires on its own. It is here to pin the
+    contract; the race above is what catches the torn read that broke it."""
+    bank = bank_account()
+    entry = expense_entry(100_000)
+    record_payment(
+        COMPANY, "entry", entry["id"], amount_cents=60_000, paid_at=date(2026, 9, 12),
+        expected_version=1, idempotency_key="first", cash_account_id=bank["id"],
+    )
+    with pytest.raises(PaymentConflictError):
+        record_payment(
+            COMPANY, "entry", entry["id"], amount_cents=60_000, paid_at=date(2026, 9, 12),
+            expected_version=1, idempotency_key="second", cash_account_id=bank["id"],
+        )
+
+
+def test_an_entry_and_its_paid_total_come_from_one_read(payments_db):
+    """entries.entry_with_paid is the single-statement read the fix rests on:
+    it must return the paid total AND leave the row raw, because record_payment
+    stores that row as the audit trail's `before` snapshot next to a raw `after`."""
+    entry = expense_entry(100_000)
+    settle_entry(entry["id"], 25_000, paid_at=date(2026, 9, 12))
+    with db.connection() as conn:
+        row, paid = entry_with_paid(conn, entry["id"])
+        missing, absent_paid = entry_with_paid(conn, entry["id"] + 1)
+    assert paid == 25_000
+    assert row["version"] == 2                       # moved together with `paid`
+    assert "paid_cents_total" not in row             # the row stays a raw snapshot
+    assert set(row) == set(_raw_entry_columns())
+    assert (missing, absent_paid) == (None, 0)
+
+
+def _raw_entry_columns():
+    with db.connection() as conn:
+        return dict(conn.execute("SELECT * FROM financial_entries LIMIT 1").fetchone())
 
 
 # --- Final review C1: state guard on the loan-installment path -------------

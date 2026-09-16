@@ -13,6 +13,7 @@ from .entries import (
     EntryVersionConflict,
     _paid_cents,
     create_entry_on_connection,
+    entry_with_paid,
     reverse_settlement_on_connection,
     settle_entry_on_connection,
 )
@@ -481,11 +482,14 @@ def record_payment(
 
             # 2/3. Load obligation, validate state, version and balance.
             if kind == "entry":
-                entry = conn.execute(
-                    "SELECT * FROM financial_entries WHERE id=? AND company=?",
-                    (obligation_id, company),
-                ).fetchone()
-                if not entry:
+                # Row and paid total in ONE read: read separately, a payment
+                # committing between them showed this pre-check an impossible
+                # pair (version still 1, paid already 60.000), and the balance
+                # rule below rejected the loser of a race with a 422 blaming
+                # the amount instead of the version rule's 409. See
+                # entries.entry_with_paid() for the full story.
+                entry, paid = entry_with_paid(conn, obligation_id)
+                if not entry or entry["company"] != company:
                     raise PaymentNotFoundError("Lançamento não encontrado.")
                 # Re-review fix, part 2 (defense in depth). An entry the loan
                 # machinery owns (`source='loan'` — see obligations.py's
@@ -527,7 +531,6 @@ def record_payment(
                     raise PaymentConflictError(
                         "Versão desatualizada; recarregue o lançamento."
                     )
-                paid = _paid_cents(conn, obligation_id)
                 open_cents = max(0, entry["amount_cents"] - paid)
                 if amount_cents > open_cents:
                     raise PaymentValidationError(
