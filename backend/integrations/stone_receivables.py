@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import csv
 import gzip
+import io
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -24,6 +27,10 @@ class Receivable:
     fee_cents: int
     net_cents: int
     settlement_date: Optional[str]
+    # CSV only: the part of fee_cents that is the anticipation discount, and
+    # the portal category ("Venda", "Cobrança", "Cancelamento"...).
+    advance_fee_cents: int = 0
+    category: str = "Venda"
 
 
 def _to_cents(raw: Optional[str]) -> int:
@@ -83,6 +90,93 @@ def parse_conciliation_xml(content: bytes) -> list:
                 net_cents=net,
                 settlement_date=settlement,
             ))
+    return receivables
+
+
+# --- Relatório de recebíveis do portal Stone (CSV) ----------------------------
+# The portal exports the same settlement data as the XML, one row per sale:
+# DOCUMENTO;STONECODE;CATEGORIA;DATA DA VENDA;DATA DE VENCIMENTO;...;STONE ID;
+# QTD DE PARCELAS;Nº DA PARCELA;VALOR BRUTO;VALOR LÍQUIDO;DESCONTO DE MDR;
+# DESCONTO DE ANTECIPAÇÃO;DESCONTO UNIFICADO;ÚLTIMO STATUS;...
+# Checked against a real Conta Stone statement (jun–ago/2026): the day's net
+# sum equals the day's card credits on all 92 days. Pix is not in this report.
+
+_CSV_REQUIRED = ("CATEGORIA", "DATA DE VENCIMENTO", "VALOR BRUTO", "VALOR LÍQUIDO")
+_SALE = "Venda"
+
+
+def _csv_cents(raw: Optional[str]) -> int:
+    text = (raw or "").strip()
+    if not text:
+        return 0
+    try:
+        value = Decimal(text.replace(".", "").replace(",", "."))
+    except InvalidOperation:
+        raise ReceivablesFileError(f"Valor inválido no relatório da Stone: {raw!r}") from None
+    return int((value * 100).quantize(Decimal(1), rounding="ROUND_HALF_UP"))
+
+
+def _csv_date(raw: Optional[str]) -> Optional[str]:
+    match = re.match(r"^(\d{2})/(\d{2})/(\d{4})", (raw or "").strip())
+    return f"{match.group(3)}-{match.group(2)}-{match.group(1)}" if match else None
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "outro"
+
+
+def looks_like_receivables_csv(content: bytes) -> bool:
+    head = content[:600].decode("utf-8-sig", errors="ignore").upper()
+    return "STONE ID" in head and "VALOR LÍQUIDO" in head
+
+
+def parse_receivables_csv(content: bytes) -> list:
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
+    fields = [f.strip() for f in (reader.fieldnames or [])]
+    missing = [name for name in _CSV_REQUIRED if name not in fields]
+    if missing:
+        raise ReceivablesFileError(
+            "Este CSV não é o relatório de recebíveis da Stone (faltam as colunas: " + ", ".join(missing) + ")."
+        )
+    receivables = []
+    seen = {}
+    for raw_row in reader:
+        row = {(k or "").strip(): (v or "").strip() for k, v in raw_row.items()}
+        settlement = _csv_date(row.get("DATA DE VENCIMENTO"))
+        if not settlement:
+            continue
+        category = row.get("CATEGORIA") or _SALE
+        gross = _csv_cents(row.get("VALOR BRUTO"))
+        net = _csv_cents(row.get("VALOR LÍQUIDO"))
+        stone_id = row.get("STONE ID", "")
+        number = int(row.get("Nº DA PARCELA") or 1)
+        if stone_id and category == _SALE:
+            key = stone_id
+        elif stone_id:
+            key = f"{stone_id}:{_slug(category)}"
+        else:
+            # Monthly fee and balance adjustments carry no Stone ID: identify
+            # them by what they are, numbering exact repeats within the file.
+            base = f"{_slug(category)}:{settlement}:{net}"
+            seen[base] = seen.get(base, 0) + 1
+            key = f"{base}:{seen[base]}"
+        receivables.append(Receivable(
+            transaction_key=key,
+            installment_number=number,
+            brand_id=row.get("BANDEIRA") or None,
+            gross_cents=gross,
+            fee_cents=gross - net if category in (_SALE, "Cancelamento") else 0,
+            net_cents=net,
+            settlement_date=settlement,
+            advance_fee_cents=-_csv_cents(row.get("DESCONTO DE ANTECIPAÇÃO")) if category == _SALE else 0,
+            category=category,
+        ))
+    if not receivables:
+        raise ReceivablesFileError("O relatório da Stone não tem nenhuma linha com data de vencimento.")
     return receivables
 
 

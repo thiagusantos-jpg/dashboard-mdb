@@ -80,3 +80,52 @@ def test_effective_fee_report_compares_to_contracted_rate(receivables_db, stone_
     assert report["effective_rate_pct"] == pytest.approx(2.6875, rel=1e-3)
     assert report["contracted_rate_pct"] == 2.0
     assert report["variance_pct"] == pytest.approx(0.6875, rel=1e-3)
+
+
+def test_portal_csv_books_fees_once_per_day_and_never_as_bills(receivables_db, stone_account):
+    from backend.finance import obligations
+
+    content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
+    result = receivables.sync_receivables(COMPANY, stone_account["id"], content)
+    assert result == {"total": 7, "imported": 7, "duplicates": 0, "fee_entries": 3}
+
+    with db.connection() as conn:
+        entries = [dict(r) for r in conn.execute(
+            "SELECT e.description,e.amount_cents,a.system_key FROM financial_entries e "
+            "JOIN finance_accounts a ON a.id=e.account_id WHERE e.company=1 ORDER BY e.due_date,a.system_key"
+        )]
+    assert entries == [
+        {"description": "Taxas Stone de 10/09 (2 venda(s))", "amount_cents": 2_72 + 50, "system_key": "acquiring_fees"},
+        {"description": "Taxas Stone de 11/09 (1 venda(s))", "amount_cents": 18_00 - 7, "system_key": "acquiring_fees"},
+        {"description": "Antecipação Stone de 11/09 (1 venda(s))", "amount_cents": 12_00, "system_key": "receivables_advance"},
+    ]
+    assert not any("Stone" in str(row.get("description")) for row in obligations._entry_rows(COMPANY))
+
+    days = {d["settlement_date"]: d for d in receivables.expected_settlements(COMPANY, date(2026, 9, 1), date(2026, 9, 30))}
+    assert days["2026-09-10"]["net_cents"] == 90_26 + 49_50
+    assert days["2026-09-11"]["net_cents"] == 1_170_00 - 9_93 - 90_00
+
+
+def test_reimporting_the_portal_csv_adds_nothing(receivables_db, stone_account):
+    content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
+    receivables.sync_receivables(COMPANY, stone_account["id"], content)
+    again = receivables.sync_receivables(COMPANY, stone_account["id"], content)
+    assert again == {"total": 7, "imported": 0, "duplicates": 7, "fee_entries": 0}
+    with db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM financial_entries").fetchone()["n"] == 3
+        assert conn.execute("SELECT COUNT(*) AS n FROM stone_receivables").fetchone()["n"] == 7
+
+
+def test_a_later_export_with_new_rows_for_a_booked_day_adds_a_second_fee_entry(receivables_db, stone_account):
+    content = (FIXTURES / "stone-recebiveis-sample.csv").read_bytes()
+    lines = content.decode("utf-8-sig").splitlines()
+    first_part = "\n".join(lines[:2]).encode()
+    receivables.sync_receivables(COMPANY, stone_account["id"], first_part)
+    result = receivables.sync_receivables(COMPANY, stone_account["id"], content)
+    assert result["imported"] == 6 and result["duplicates"] == 1
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT external_id,amount_cents FROM financial_entries WHERE external_id LIKE ? ORDER BY external_id",
+            (f"{stone_account['id']}:mdr:2026-09-10:%",),
+        ).fetchall()
+    assert [(r["external_id"].rsplit(":", 1)[-1], r["amount_cents"]) for r in rows] == [("1", 2_72), ("2", 50)]

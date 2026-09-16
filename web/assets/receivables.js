@@ -1,5 +1,5 @@
 /* Recebíveis Stone: agenda de recebimentos (passados e futuros) e taxa efetiva
- * vs. contratada. A importação do XML da Stone mora em Conciliação → Fontes de
+ * vs. contratada. A importação das vendas Stone (CSV/XML) mora em Conciliação → Fontes de
  * dados (openStoneImportForm, reconciliation.js); aqui fica só um atalho.
  * Loaded after reconciliation.js and uses its shared api(), esc(), money(), APP
  * globals plus finance.js's dateBR()/financeError(), loans.js's addMonthsISO()
@@ -70,7 +70,7 @@ async function renderRecebiveis(token) {
         <button type="button" class="btn-primary" id="receivables-create-account">Criar conta de caixa</button>
       </div>`
     : `<div class="page-toolbar">
-        <p class="page-subtitle">As vendas Stone (XML) são importadas em <a href="#/conciliacao">Conciliação</a>, junto com o extrato bancário.</p>
+        <p class="page-subtitle">As vendas Stone (relatório de recebíveis) são importadas em <a href="#/conciliacao">Conciliação</a>, junto com o extrato bancário.</p>
         <button type="button" class="btn-secondary" id="receivables-import-open">Importar vendas Stone</button>
       </div>`;
 
@@ -91,7 +91,7 @@ async function renderRecebiveis(token) {
     <h2 class="section-header">Agenda de recebimentos <span class="section-hint">${dateBR(start)} a ${dateBR(end)}</span></h2>
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Data</th><th>Situação</th><th class="num">Vendas</th><th class="num">Bruto</th><th class="num">Taxa</th><th class="num">Líquido</th></tr></thead>
-      <tbody>${settlementRows || `<tr><td colspan="6">Nenhum recebível entre ${dateBR(start)} e ${dateBR(end)}. Importe o XML da Stone para ver a agenda.</td></tr>`}</tbody>
+      <tbody>${settlementRows || `<tr><td colspan="6">Nenhum recebível entre ${dateBR(start)} e ${dateBR(end)}. Importe o relatório de recebíveis da Stone para ver a agenda.</td></tr>`}</tbody>
     </table></div>`;
 
   const refresh = () => renderRecebiveis();
