@@ -1,4 +1,4 @@
-/* Conciliação: ponto único de entrada dos dados externos (vendas Stone em XML e
+/* Conciliação: ponto único de entrada dos dados externos (vendas Stone em CSV/XML e
  * extrato bancário em OFX/CSV) e o casamento entre lançamentos de caixa e
  * lançamentos financeiros (um crédito pode fechar várias vendas e taxas).
  * Loaded before app.js and uses its shared api(), esc(), money(), APP globals
@@ -276,7 +276,7 @@ function reconciliationStoneSection(check, sources) {
   const header = `<h2 class="section-header">Repasses da Stone <span class="section-hint">${period}</span></h2>`;
   if (!days.length) {
     return `<section class="recon-stone">${header}
-      <div class="empty-state"><p>Nenhuma venda Stone com repasse neste período. Importe o XML da Stone em Fontes de dados ou ajuste o período.</p></div>
+      <div class="empty-state"><p>Nenhuma venda Stone com repasse neste período. Importe o relatório de recebíveis da Stone em Fontes de dados ou ajuste o período.</p></div>
     </section>`;
   }
   const diffCls = sum.difference_cents < 0 ? 'kpi-negative' : '';
@@ -354,7 +354,7 @@ function reconciliationSourcesSection(sources, cashAccounts) {
     const id = esc(src.cash_account_id);
     return `<tr>
       <td><strong>${esc(src.name)}</strong></td>
-      <td>${stone}<br><button type="button" class="btn-link" data-source-action="stone" data-account="${id}">Importar XML da Stone</button></td>
+      <td>${stone}<br><button type="button" class="btn-link" data-source-action="stone" data-account="${id}">Importar vendas Stone</button></td>
       <td>${bank}<br><button type="button" class="btn-link" data-source-action="bank" data-account="${id}">Importar extrato (OFX/CSV)</button></td>
     </tr>`;
   }).join('');
@@ -362,7 +362,7 @@ function reconciliationSourcesSection(sources, cashAccounts) {
     <h2 id="recon-sources-title" class="section-header">Fontes de dados</h2>
     <p class="page-subtitle">Mantenha as duas fontes em dia: as vendas Stone dizem quanto deveria cair; o extrato diz quanto caiu.</p>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Conta</th><th>Vendas Stone (XML)</th><th>Extrato bancário</th></tr></thead>
+      <thead><tr><th>Conta</th><th>Vendas Stone</th><th>Extrato bancário</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${reserveLine}
@@ -430,7 +430,8 @@ function readImportForm(form, ui) {
 function openStoneImportForm(cashAccounts, ctx) {
   ctx = ctx || {};
   const drawer = openDrawer({title: 'Importar vendas Stone', trigger: ctx.trigger, body: importFormBody(
-    cashAccounts, ctx, '.xml', 'Arquivo XML', 'No portal Stone: Conciliação → baixar arquivo, layout 2.4 (XML). Reimportar o mesmo arquivo não duplica nada.',
+    cashAccounts, ctx, '.csv,.xml', 'Relatório de recebíveis (CSV) ou arquivo XML',
+    'No portal Stone, exporte o relatório de recebíveis em CSV (ou o arquivo de conciliação XML). Reimportar o mesmo período não duplica nada.',
     'Importar vendas')});
   const form = drawer.dialog.querySelector('form');
   const ui = formUiFor(form);
@@ -447,7 +448,7 @@ function openStoneImportForm(cashAccounts, ctx) {
       const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/receivables-import`, data);
       clearDirty();
       drawer.setBody(`<p role="status"><strong>Importação concluída.</strong></p>
-        <p>${result.imported} venda(s) nova(s) · ${result.duplicates} já existiam.</p>
+        <p>${result.imported} linha(s) nova(s) · ${result.duplicates} já existiam${result.fee_entries ? ` · taxas lançadas em ${result.fee_entries} despesa(s) por dia` : ''}.</p>
         <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Fechar</button></div>`);
       if (ctx.onSaved) ctx.onSaved(result);
     } catch (e) {
