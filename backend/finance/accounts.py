@@ -15,6 +15,7 @@ class AccountNature(str, Enum):
     COGS = "cogs"
     OPERATING_EXPENSE = "operating_expense"
     FINANCIAL_EXPENSE = "financial_expense"
+    FINANCIAL_INCOME = "financial_income"
     TAX_EXPENSE = "tax_expense"
     FINANCING_INFLOW = "financing_inflow"
     LOAN_PRINCIPAL = "loan_principal"
@@ -79,6 +80,8 @@ def _definitions():
         ("loan_interest", "5.02", "Juros de empréstimos", financial, True),
         ("fines", "5.03", "Juros e multas", financial, False),
         ("receivables_advance", "5.04", "Antecipação de recebíveis", financial, True),
+        ("investment_income", "5.10", "Rendimentos de aplicações", AccountNature.FINANCIAL_INCOME.value, False),
+        ("investment_taxes", "5.11", "IR/IOF e ajustes de aplicações", financial, False),
         ("acquiring_fees", "5.05", "Taxas de adquirentes e cartões", operating, False),
         ("payment_terminal_rent", "5.06", "Aluguel de máquinas", operating, False),
         ("expired_loss", "6.01", "Perdas por vencimento", operating, False),

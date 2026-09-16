@@ -35,6 +35,7 @@ function loadReconciliation() {
   context.dateBR = (iso) => (iso ? String(iso).slice(0, 10) : '—');
   context.financeBasePath = () => '/api/companies/1/finance';
   context.formActions = (label) => `<button type="submit">${label}</button>`;
+  context.isReserveAccount = (a) => !!a && a.name === 'Reserva Stone';
   context.kpi = (title, value, subtitle, subCls, valueCls) => `<div class="kpi ${valueCls || ''}">${title}|${value}|${subtitle || ''}</div>`;
   vm.runInContext(fs.readFileSync(path.join(root, 'web/assets/reconciliation.js'), 'utf8'), context);
   return context;
@@ -216,4 +217,13 @@ test('the page asks the Stone check for the filtered period and account', () => 
   const source = fs.readFileSync(path.join(root, 'web/assets/reconciliation.js'), 'utf8');
   assert.match(source, /reconciliation\/stone-daily\?\$\{stoneParams\}/);
   assert.match(source, /stoneParams\.set\('cash_account_id', filters\.account\)/);
+});
+
+test('the checklist offers to update the reserve balance when the reserve account exists', () => {
+  const context = loadReconciliation();
+  const src = [{cash_account_id: '11', name: 'Conta Stone', stone: {count: 1, last_import_at: 'x', last_settlement_date: 'y'}, bank: {count: 1, last_import_at: 'z'}}];
+  const html = context.reconciliationSourcesSection(src, [{id: '11', name: 'Conta Stone'}, {id: '12', name: 'Reserva Stone', balance_cents: -90000}]);
+  assert.match(html, /saldo no painel R\$-90000/);
+  assert.match(html, /data-source-action="reserve" data-account="12">Atualizar saldo da Reserva/);
+  assert.doesNotMatch(context.reconciliationSourcesSection(src, [{id: '11', name: 'Conta Stone'}]), /Atualizar saldo da Reserva/);
 });

@@ -68,3 +68,26 @@ def test_forecast_endpoint_returns_days_and_lowest(client):
     body = response.json()
     assert len(body["days"]) == 30
     assert "lowest" in body
+
+
+def test_reserve_balance_update_via_api(client):
+    reserve_account = client.post(
+        "/api/companies/1/finance/cash-accounts", json={"name": "Reserva Stone", "kind": "bank"}
+    ).json()
+    path = f"/api/companies/1/finance/cash-accounts/{reserve_account['id']}/reserve-balance"
+
+    status = client.get(path, params={"as_of": "2026-09-01"})
+    assert status.status_code == 200, status.text
+    assert status.json()["suggest_opening"] is True
+
+    opening = client.post(path, json={"real_balance_cents": 1_000_00, "as_of": "2026-09-01", "opening": True})
+    assert opening.status_code == 200, opening.text
+    assert opening.json()["booked"] == "opening"
+
+    income = client.post(path, json={"real_balance_cents": 1_008_50, "as_of": "2026-09-10"})
+    assert income.json()["booked"] == "income"
+    assert income.json()["difference_cents"] == 8_50
+
+    backwards = client.post(path, json={"real_balance_cents": 1_009_00, "as_of": "2026-09-05"})
+    assert backwards.status_code == 422
+    assert client.get("/api/companies/1/finance/cash-accounts/999/reserve-balance").status_code == 404

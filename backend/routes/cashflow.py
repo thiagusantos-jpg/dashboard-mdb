@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import database as db, permissions, security
-from ..finance import ledger
+from ..finance import ledger, reserve
 from ..finance.forecast import forecast as compute_forecast
 
 
@@ -186,3 +186,38 @@ def patch_cash_account(company: int, account_id: int, body: CashAccountPatch):
         raise HTTPException(422, {"code": "invalid_fields", "message": str(exc), "fields": []}) from exc
     account["balance_cents"] = ledger.account_balance(account["id"])
     return account
+
+
+class ReserveBalance(BaseModel):
+    real_balance_cents: int = Field(ge=0)
+    as_of: date
+    opening: bool = False
+
+
+@router.get(
+    "/cash-accounts/{cash_account_id}/reserve-balance",
+    dependencies=[Depends(permissions.require_permission("finance.read"))],
+)
+def get_reserve_balance(company: int, cash_account_id: int, as_of: Optional[date] = None):
+    _require_company(company)
+    try:
+        return reserve.balance_status(company, cash_account_id, as_of or date.today())
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/cash-accounts/{cash_account_id}/reserve-balance")
+def post_reserve_balance(
+    company: int,
+    cash_account_id: int,
+    body: ReserveBalance,
+    auth: security.AuthContext = Depends(permissions.require_permission("finance.write")),
+):
+    _require_company(company)
+    try:
+        return reserve.update_balance(
+            company, cash_account_id, body.real_balance_cents, body.as_of,
+            opening=body.opening, created_by=auth.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc

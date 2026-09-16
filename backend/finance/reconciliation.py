@@ -23,7 +23,7 @@ def _linked_item_ids(conn, item_type: str) -> set:
     }
 
 
-_INFLOW_NATURES = {"revenue", "financing_inflow"}
+_INFLOW_NATURES = {"revenue", "financing_inflow", "financial_income"}
 
 
 def _candidate_entries(conn, company: int, around: date, window_days: int) -> list:

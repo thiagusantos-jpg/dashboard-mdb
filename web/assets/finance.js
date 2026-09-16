@@ -158,6 +158,7 @@ const DRE_LINES = [
   ['owner_compensation_cents', 'Pró-labore', 'minus'],
   ['operating_result_cents', 'Resultado operacional', 'subtotal'],
   ['financial_expenses_cents', 'Despesas financeiras', 'minus'],
+  ['financial_income_cents', 'Rendimentos de aplicações', 'plus'],
   ['managerial_result_cents', 'Resultado gerencial', 'total'],
 ];
 
@@ -166,8 +167,9 @@ function shareOfRevenue(cents, revenue) {
 }
 
 // A zero expense line is "sem lançamentos", never a confirmed zero.
+// Investment income only shows up in the months that have it.
 function dreRows(result) {
-  return DRE_LINES.map(([key, label, kind]) => ({
+  return DRE_LINES.filter(([key, , kind]) => kind !== 'plus' || result[key]).map(([key, label, kind]) => ({
     key, label, kind, cents: result[key],
     pct: shareOfRevenue(result[key], result.revenue_cents),
     empty: kind === 'minus' && key !== 'cogs_cents' && result[key] === 0,
@@ -207,7 +209,7 @@ function resultHeroHtml(result, period, status) {
 
 function dreHtml(result) {
   const rows = dreRows(result).map((r) => {
-    const sign = r.kind === 'minus' ? '−' : r.kind === 'base' ? '' : '=';
+    const sign = r.kind === 'minus' ? '−' : r.kind === 'plus' ? '+' : r.kind === 'base' ? '' : '=';
     const tone = r.kind === 'total' && r.cents != null ? (r.cents < 0 ? ' negative' : ' positive') : '';
     const width = r.pct == null ? 0 : Math.max(0, Math.min(100, Math.abs(r.pct)));
     return `<li class="dre-row ${r.kind}${r.empty ? ' empty' : ''}${tone}">

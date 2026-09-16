@@ -191,3 +191,27 @@ test("today's group and a negative-balance day both say so in the text, not only
   assert.match(html, /class="payables-group negative"/);
   assert.match(html, /· negativo/);
 });
+
+test('the reserve balance update validates Brazilian amounts and sends the opening choice', () => {
+  const context = loadCashflow();
+  context.parseMoneyToCents = (t) => { const n = Number(String(t).replace(/\./g, '').replace(',', '.')); return String(t).trim() && Number.isFinite(n) ? Math.round(n * 100) : null; };
+  context.todayISO = () => '2026-09-16';
+  context.financeBasePath = () => '/api/companies/1/finance';
+  const ok = context.buildReserveBalanceRequest('12', {real_balance: '3.127,45', as_of: '2026-09-16', opening: true});
+  assert.equal(ok.path, '/api/companies/1/finance/cash-accounts/12/reserve-balance');
+  assert.deepEqual({...ok.body}, {real_balance_cents: 312745, as_of: '2026-09-16', opening: true});
+  assert.equal(context.buildReserveBalanceRequest('12', {real_balance: '10', as_of: '2026-09-16'}).body.opening, false);
+  assert.ok(context.buildReserveBalanceRequest('12', {real_balance: '', as_of: '2026-09-16'}).errors.real_balance);
+  assert.ok(context.buildReserveBalanceRequest('12', {real_balance: '1', as_of: '2026-09-20'}).errors.as_of);
+  assert.ok(context.isReserveAccount({name: 'Reserva Stone'}));
+  assert.ok(!context.isReserveAccount({name: 'Conta Stone'}));
+});
+
+test('the reserve drawer says how the difference will be booked before saving', () => {
+  const context = loadCashflow();
+  assert.match(context.reserveBalanceOutcome(-90000, 310000, true), /\+R\$ 4000\.00 entra como <strong>saldo inicial<\/strong>/);
+  assert.match(context.reserveBalanceOutcome(310000, 312745, false), /\+R\$ 27\.45 entra como <strong>rendimento da Reserva<\/strong>/);
+  assert.match(context.reserveBalanceOutcome(310000, 309500, false), /−R\$ 5\.00 entra como <strong>ajuste negativo<\/strong>/);
+  assert.match(context.reserveBalanceOutcome(100, 100, false), /nada será lançado/);
+  assert.equal(context.reserveBalanceOutcome(100, null, false), '');
+});

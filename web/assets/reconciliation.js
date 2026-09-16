@@ -83,7 +83,7 @@ async function renderConciliacao(token) {
   document.getElementById('content').innerHTML = `
     <h1 class="page-title">${title}</h1>
     <div class="page-subtitle">${subtitle}</div>
-    ${reconciliationSourcesSection(sources)}
+    ${reconciliationSourcesSection(sources, cashAccounts)}
     <form id="reconciliation-filter" class="page-toolbar recon-filter" aria-label="Período e conta conferidos">
       <div class="filters">
         <div><label class="field-label" for="reconciliation-account">Conta</label>
@@ -331,7 +331,10 @@ function reconciliationSourceStatus(done, text) {
   return `<span class="${done ? 'badge-success' : 'badge-warning'}">${done ? 'Em dia' : 'Falta'}</span> <span class="source-detail">${text}</span>`;
 }
 
-function reconciliationSourcesSection(sources) {
+function reconciliationSourcesSection(sources, cashAccounts) {
+  const reserve = (cashAccounts || []).find(isReserveAccount);
+  const reserveLine = reserve ? `<p class="recon-reserve"><span><strong>Reserva Stone</strong> · saldo no painel ${money(reserve.balance_cents)} · o rendimento não vem no extrato</span>
+      <button type="button" class="btn-link" data-source-action="reserve" data-account="${esc(reserve.id)}">Atualizar saldo da Reserva</button></p>` : '';
   if (!sources.length) {
     return `<section class="recon-sources" aria-labelledby="recon-sources-title">
       <h2 id="recon-sources-title" class="section-header">Fontes de dados</h2>
@@ -362,6 +365,7 @@ function reconciliationSourcesSection(sources) {
       <thead><tr><th>Conta</th><th>Vendas Stone (XML)</th><th>Extrato bancário</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
+    ${reserveLine}
     <button type="button" class="btn-link" data-source-action="create-account">+ Nova conta de caixa</button>
   </section>`;
 }
@@ -375,6 +379,7 @@ function bindReconciliationSources(cashAccounts, eventsById) {
     if (action === 'create-account') openCashAccountForm(ctx);
     else if (action === 'stone') openStoneImportForm(cashAccounts, ctx);
     else if (action === 'bank') openBankImportForm(cashAccounts, ctx);
+    else if (action === 'reserve') openReserveBalanceForm(cashAccounts.find((acc) => String(acc.id) === ctx.accountId), ctx);
   }));
 }
 

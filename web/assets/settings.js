@@ -925,7 +925,7 @@ function startSyncClock() {
 /* ---------------------------------------------------------------- Categorias e favorecidos */
 
 var CATALOG_NATURE_LABELS = {
-  operating_expense: 'Despesa operacional', tax_expense: 'Impostos', financial_expense: 'Despesa financeira',
+  operating_expense: 'Despesa operacional', tax_expense: 'Impostos', financial_expense: 'Despesa financeira', financial_income: 'Receita financeira',
   cost_of_goods: 'Custo de mercadoria', profit_distribution: 'Distribuição de lucros', financing_inflow: 'Entrada de financiamento',
   loan_principal: 'Amortização de principal', transfer: 'Transferência', revenue: 'Receita',
 };
