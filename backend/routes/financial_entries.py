@@ -41,6 +41,8 @@ class EntryCreate(BaseModel):
     store_id: Optional[int] = None
     counterparty_id: Optional[int] = None
     notes: str = Field(default="", max_length=2000)
+    payment_method: str = Field(default="", pattern=r"^(|boleto|pix|debito_automatico|transferencia)$")
+    payment_code: str = Field(default="", max_length=200)
     forecast: bool = False
 
 
@@ -63,6 +65,8 @@ class EntryUpdate(BaseModel):
     competence: Optional[str] = None
     due_date: Optional[date] = None
     notes: Optional[str] = None
+    payment_method: Optional[str] = Field(default=None, pattern=r"^(|boleto|pix|debito_automatico|transferencia)$")
+    payment_code: Optional[str] = Field(default=None, max_length=200)
 
 
 class EntryCancel(BaseModel):
@@ -79,6 +83,8 @@ class RecurrenceCreate(BaseModel):
     due_day: int = Field(ge=1, le=31)
     store_id: Optional[int] = None
     counterparty_id: Optional[int] = None
+    payment_method: str = Field(default="", pattern=r"^(|boleto|pix|debito_automatico|transferencia)$")
+    payment_code: str = Field(default="", max_length=200)
 
 
 class RecurrencePatch(BaseModel):
@@ -280,6 +286,8 @@ def add_entry(
                 store_id=body.store_id,
                 counterparty_id=body.counterparty_id,
                 notes=body.notes,
+                payment_method=body.payment_method,
+                payment_code=body.payment_code,
                 created_by=auth.user_id,
                 forecast=body.forecast,
             )
@@ -350,6 +358,8 @@ def add_recurrence(
             due_day=body.due_day,
             store=body.store_id,
             counterparty_id=body.counterparty_id,
+            payment_method=body.payment_method,
+            payment_code=body.payment_code,
             created_by=auth.user_id,
         )
     except ValueError as exc:

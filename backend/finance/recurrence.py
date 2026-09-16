@@ -6,7 +6,7 @@ from datetime import date
 from typing import Optional
 
 from .. import database as db
-from .entries import EntryCommand, create_entry
+from .entries import EntryCommand, create_entry, validate_payment_code, validate_payment_method
 from .entry_management import _insert_audit
 from . import validators as _shared_validators
 
@@ -73,6 +73,8 @@ def create_recurrence(
     end_competence: Optional[str] = None,
     store: Optional[int] = None,
     counterparty_id: Optional[int] = None,
+    payment_method: str = "",
+    payment_code: str = "",
     created_by: Optional[int] = None,
 ) -> dict:
     date.fromisoformat(start_competence + "-01")
@@ -88,8 +90,8 @@ def create_recurrence(
             INSERT INTO financial_recurrences(
                 id,company,store,account_id,counterparty_id,description,
                 amount_cents,start_competence,end_competence,due_day,
-                created_by,created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                payment_method,payment_code,created_by,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 recurrence_id,
@@ -102,6 +104,8 @@ def create_recurrence(
                 start_competence,
                 end_competence,
                 due_day,
+                validate_payment_method(payment_method),
+                validate_payment_code(payment_code),
                 created_by,
                 timestamp,
                 timestamp,
@@ -156,6 +160,8 @@ def generate_occurrences(recurrence_id: int, *, through_competence: str) -> list
                         external_id=f"{recurrence_id}:{competence}",
                         recurrence_id=recurrence_id,
                         description=recurrence["description"],
+                        payment_method=recurrence["payment_method"],
+                        payment_code=recurrence["payment_code"],
                         created_by=recurrence["created_by"],
                         forecast=True,
                     )

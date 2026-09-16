@@ -6,6 +6,7 @@ from datetime import date
 from typing import Iterable, Optional
 
 from .. import database as db
+from .entries import validate_payment_code, validate_payment_method
 from .entries import _paid_cents, get_entry
 from . import validators as _shared_validators
 
@@ -38,9 +39,11 @@ _OPEN_EDITABLE_FIELDS = {
     "amount_cents",
     "competence",
     "due_date",
+    "payment_method",
+    "payment_code",
     "notes",
 }
-_PARTIAL_EDITABLE_FIELDS = {"description", "due_date", "notes"}
+_PARTIAL_EDITABLE_FIELDS = {"description", "due_date", "notes", "payment_method", "payment_code"}
 
 _BLOCKED_STATUSES = {"cancelled", "reversed", "paid"}
 
@@ -224,6 +227,18 @@ def update_entry(
 
         if "notes" in patch:
             updates["notes"] = _validate_notes(patch["notes"])
+
+        if "payment_method" in patch:
+            try:
+                updates["payment_method"] = validate_payment_method(patch["payment_method"])
+            except ValueError as exc:
+                raise EntryValidationError(str(exc), fields=["payment_method"]) from exc
+
+        if "payment_code" in patch:
+            try:
+                updates["payment_code"] = validate_payment_code(patch["payment_code"])
+            except ValueError as exc:
+                raise EntryValidationError(str(exc), fields=["payment_code"]) from exc
 
         if not updates:
             raise EntryValidationError("Nenhuma alteração informada.")

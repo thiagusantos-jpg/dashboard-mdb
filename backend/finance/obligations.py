@@ -178,7 +178,7 @@ def _entry_rows(company: int) -> list:
         rows = conn.execute(
             f"""
             SELECT e.id,e.version,e.description,e.due_date,e.competence,
-                   e.amount_cents,e.status,e.source,
+                   e.amount_cents,e.status,e.source,e.payment_method,
                    e.installment_number,e.installment_count,a.sensitive,
                    COALESCE(SUM(
                        CASE WHEN ev.event_type='settled' THEN ev.amount_cents
@@ -196,7 +196,7 @@ def _entry_rows(company: int) -> list:
             -- does not extend to a joined table's columns, so this query would
             -- 500 there. Same convention as backend/finance/reporting.py.
             GROUP BY e.id,e.version,e.description,e.due_date,e.competence,
-                     e.amount_cents,e.status,e.source,
+                     e.amount_cents,e.status,e.source,e.payment_method,
                      e.installment_number,e.installment_count,a.sensitive
             """,
             (company, *_OPEN_ENTRY_STATUSES, *_NON_PAYABLE_NATURES, _LOAN_ENTRY_SOURCE),
@@ -219,6 +219,8 @@ def _entry_rows(company: int) -> list:
             "open_cents": open_cents,
             "status": status,
             "source": row["source"],
+            # A bill on direct debit leaves the account by itself: never offered in a batch.
+            "payment_method": row["payment_method"] or "",
             "loan_id": None,
             "number": row["installment_number"],
             "count": row["installment_count"],
@@ -272,6 +274,7 @@ def _loan_installment_rows(company: int) -> list:
             "open_cents": open_cents,
             "status": status,
             "source": "loan",
+            "payment_method": "",
             "loan_id": str(row["loan_id"]),
             "number": row["number"],
             "count": row["count"],
@@ -435,7 +438,7 @@ def get_obligation(
             row = conn.execute(
                 f"""
                 SELECT e.id,e.version,e.description,e.due_date,e.competence,
-                       e.amount_cents,e.status,e.source,
+                       e.amount_cents,e.status,e.source,e.payment_method,
                        e.installment_number,e.installment_count,a.sensitive
                        ,COALESCE(SUM(
                            CASE WHEN ev.event_type='settled' THEN ev.amount_cents
@@ -458,7 +461,7 @@ def get_obligation(
                 -- non-aggregated selected column must be listed for
                 -- PostgreSQL, joined columns included.
                 GROUP BY e.id,e.version,e.description,e.due_date,e.competence,
-                         e.amount_cents,e.status,e.source,
+                         e.amount_cents,e.status,e.source,e.payment_method,
                          e.installment_number,e.installment_count,a.sensitive
                 """,
                 (item_id, company, *_NON_PAYABLE_NATURES, _LOAN_ENTRY_SOURCE),
@@ -483,6 +486,8 @@ def get_obligation(
             "open_cents": open_cents,
             "status": status,
             "source": row["source"],
+            # A bill on direct debit leaves the account by itself: never offered in a batch.
+            "payment_method": row["payment_method"] or "",
             "loan_id": None,
             "number": row["installment_number"],
             "count": row["installment_count"],
@@ -539,6 +544,7 @@ def get_obligation(
             "open_cents": open_cents,
             "status": status,
             "source": "loan",
+            "payment_method": "",
             "loan_id": str(row["loan_id"]),
             "number": row["number"],
             "count": row["count"],

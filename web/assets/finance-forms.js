@@ -27,10 +27,11 @@ var SERVER_FIELD_NAMES = {
   start_date: 'start_date',
 };
 
-var ENTRY_FIELD_ORDER = ['account_id', 'counterparty_id', 'description', 'amount_cents', 'competence', 'due_date', 'notes'];
+var ENTRY_FIELD_ORDER = ['account_id', 'counterparty_id', 'description', 'amount_cents', 'competence', 'due_date',
+  'payment_method', 'payment_code', 'notes'];
 var ENTRY_FORM_FIELD = {amount_cents: 'amount'};
 var OPEN_EDITABLE = ENTRY_FIELD_ORDER;
-var PARTIAL_EDITABLE = ['description', 'due_date', 'notes'];
+var PARTIAL_EDITABLE = ['description', 'due_date', 'payment_method', 'payment_code', 'notes'];
 
 var DRAWER_CLOSE_ICON = '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>';
 
@@ -130,6 +131,13 @@ function paymentDefaults(obligation, today) {
   return {amount: centsToMoneyInput(obligation.open_cents), paid_at: today || todayISO()};
 }
 
+// What actually leaves the account: the bill plus any late fee typed alongside it.
+function paymentTotalCents(obligation, values) {
+  const amount = parseMoneyToCents(values.amount) || 0;
+  const fee = isBlank(values.late_fee) ? 0 : (parseMoneyToCents(values.late_fee) || 0);
+  return amount + fee;
+}
+
 function buildPaymentRequest(obligation, values) {
   const errors = {};
   const amount = parseMoneyToCents(values.amount);
@@ -139,6 +147,11 @@ function buildPaymentRequest(obligation, values) {
   }
   if (isBlank(values.paid_at)) errors.paid_at = 'Informe a data do pagamento.';
   const body = {amount_cents: amount, paid_at: values.paid_at, expected_version: obligation.version};
+  if (!isBlank(values.late_fee)) {
+    const fee = parseMoneyToCents(values.late_fee);
+    if (fee == null || fee <= 0) errors.late_fee = 'Informe o acréscimo em reais, ou deixe o campo vazio.';
+    else body.late_fee_cents = fee;
+  }
   if (obligation.kind === 'loan_installment') {
     const principal = parseMoneyToCents(values.principal);
     const interest = parseMoneyToCents(values.interest);
@@ -167,8 +180,41 @@ function entryCandidate(values) {
     amount_cents: parseMoneyToCents(values.amount),
     competence: values.competence,
     due_date: values.due_date,
+    payment_method: String(values.payment_method || '').trim(),
+    payment_code: String(values.payment_code || '').trim(),
     notes: String(values.notes || '').trim(),
   };
+}
+
+// How the bill leaves the account. The code is the boleto line or the Pix copy-and-paste,
+// kept only to check and copy — the partner finds the boleto itself in the bank's DDA.
+var PAYMENT_METHOD_OPTIONS = [
+  {value: '', label: 'Não informado'},
+  {value: 'boleto', label: 'Boleto'},
+  {value: 'pix', label: 'Pix'},
+  {value: 'debito_automatico', label: 'Débito automático'},
+  {value: 'transferencia', label: 'Transferência'},
+];
+
+/* The supplier's last bill is a starting point, never an overwrite: only fields the
+ * partner left empty are filled, and the form says which ones it touched. */
+function applySuggestion(values, suggestion) {
+  const next = Object.assign({}, values);
+  const filled = [];
+  const fill = (field, value) => {
+    if (value == null || value === '' || !isBlank(next[field])) return;
+    next[field] = String(value);
+    filled.push(field);
+  };
+  fill('account_id', suggestion.account_id);
+  if (isBlank(next.amount) && suggestion.amount_cents != null) {
+    next.amount = centsToMoneyInput(suggestion.amount_cents);
+    filled.push('amount');
+  }
+  fill('payment_method', suggestion.payment_method);
+  fill('payment_code', suggestion.payment_code);
+  // The description is never suggested: what this month's bill is for is the partner's to say.
+  return {values: next, filled};
 }
 
 function buildExpenseRequest(entry, values) {
@@ -181,6 +227,8 @@ function buildExpenseRequest(entry, values) {
   if (amount == null || amount <= 0) errors.amount = 'Informe um valor maior que zero.';
   const common = {account_id: String(values.account_id || ''), description: String(values.description || '').trim()};
   if (!isBlank(values.counterparty_id)) common.counterparty_id = String(values.counterparty_id);
+  if (!isBlank(values.payment_method)) common.payment_method = String(values.payment_method);
+  if (!isBlank(values.payment_code)) common.payment_code = String(values.payment_code).trim();
   const base = financeBasePath();
 
   if (values.mode === 'recurring') {
@@ -223,7 +271,8 @@ function buildExpenseEdit(entry, values, errors) {
   const next = entryCandidate(values);
   const current = entryCandidate({
     account_id: entry.account_id, counterparty_id: entry.counterparty_id, description: entry.description,
-    amount: centsToMoneyInput(entry.amount_cents), competence: entry.competence, due_date: entry.due_date, notes: entry.notes,
+    amount: centsToMoneyInput(entry.amount_cents), competence: entry.competence, due_date: entry.due_date,
+    payment_method: entry.payment_method, payment_code: entry.payment_code, notes: entry.notes,
   });
   if (next.amount_cents == null || next.amount_cents <= 0) errors.amount = 'Informe um valor maior que zero.';
   const body = {expected_version: entry.version};
@@ -635,6 +684,11 @@ async function openExpenseForm(entry, ctx) {
         <div class="btn-row"><button type="button" class="btn-secondary" data-schedule-preview>Ver prévia das parcelas</button></div>
         <div data-schedule-preview-result aria-live="polite"></div>
       </div>
+      <div class="form-grid">
+        ${formField('payment_method', 'Como é paga', withLock(selectControl(PAYMENT_METHOD_OPTIONS, v.payment_method || '', null), 'payment_method'))}
+        ${formField('payment_code', 'Linha digitável ou Pix copia e cola', withLock(textInput(v.payment_code, 200), 'payment_code'),
+          'Opcional. Serve para conferir e copiar na hora de pagar.')}
+      </div>
       <details class="form-details"${v.counterparty_id || v.notes ? ' open' : ''}>
         <summary>Fornecedor e observações</summary>
         ${formField('counterparty_id', 'Fornecedor ou favorecido', withLock(selectControl(counterpartyOptions, v.counterparty_id, 'Nenhum'), 'counterparty_id'))}
@@ -655,6 +709,7 @@ async function openExpenseForm(entry, ctx) {
   const form = drawer.dialog.querySelector('form');
   let previewSignature = null;
   wireQuickCounterparty(form, lookups);
+  wireCounterpartySuggestion(form, entry);
   const scheduleSignature = (values) => JSON.stringify([values.amount, values.count, values.first_due, values.competence_mode, values.competence]);
   const syncMode = () => {
     const mode = entry ? 'single' : readFormValues(form).mode;
@@ -865,6 +920,7 @@ async function openPaymentForm(obligation, ctx) {
   const eventOptions = outflows.map((e) => ({value: e.id, label: `${dateBR(e.occurred_at)} — ${e.description} — ${money(e.amount_cents)}`}));
   const isLoan = obligation.kind === 'loan_installment';
   const split = ctx.split || {};
+  const overdue = !isLoan && obligation.due_date && String(obligation.due_date).slice(0, 10) < todayISO();
 
   drawer.setBody(`
     <form class="drawer-form" novalidate>
@@ -876,6 +932,8 @@ async function openPaymentForm(obligation, ctx) {
       <div class="form-grid">
         ${formField('amount', 'Valor pago (R$)', moneyInput(defaults.amount), 'Pagamento parcial: informe só o valor pago agora.')}
         ${formField('paid_at', 'Data do pagamento', dateInput(defaults.paid_at))}
+        ${overdue ? `<div data-late-fee>${formField('late_fee', 'Juros e multa (R$)', moneyInput(''),
+          'Só o que foi pago a mais por causa do atraso. Vira uma despesa em "Juros e multas".')}</div>` : ''}
         ${isLoan ? formField('principal', 'Principal (R$)', moneyInput(split.principal_cents != null ? centsToMoneyInput(split.principal_cents) : '')) : ''}
         ${isLoan ? formField('interest', 'Juros (R$)', moneyInput(split.interest_cents != null ? centsToMoneyInput(split.interest_cents) : ''), 'Principal + juros = valor pago.') : ''}
       </div>
@@ -892,10 +950,18 @@ async function openPaymentForm(obligation, ctx) {
         ${formField('event_filter', 'Buscar movimento', '<input class="login-input" type="search" autocomplete="off" placeholder="Descrição, data ou valor">')}
         ${formField('existing_cash_event_id', 'Movimento importado ou lançado', selectControl(eventOptions, '', 'Escolha…'), 'Nenhuma nova saída é criada: o pagamento usa este movimento.')}
       </div>
+      <p class="payment-total" data-payment-total aria-live="polite"></p>
       ${formActions('Registrar pagamento')}
     </form>`);
 
   const form = drawer.dialog.querySelector('form');
+  const total = form.querySelector('[data-payment-total]');
+  const syncTotal = () => {
+    const values = readFormValues(form);
+    total.textContent = `Sai da conta: ${money(paymentTotalCents(obligation, values))}`;
+  };
+  form.addEventListener('input', syncTotal);
+  syncTotal();
   const syncCashMode = () => {
     const mode = readFormValues(form).cash_mode;
     form.querySelectorAll('[data-cash-mode]').forEach((section) => {
@@ -1069,4 +1135,43 @@ function openRenegotiationForm(position, ctx) {
     if (ctx.onSaved) ctx.onSaved(result);
   });
   wireSchedulePreview(form, () => position.principal_cents);
+}
+
+/* Choosing a known supplier offers its last bill: category, amount and how it was paid.
+ * Only empty fields are filled, and "Limpar" undoes exactly what was filled. */
+function wireCounterpartySuggestion(form, entry) {
+  if (entry) return;  // editing an existing bill never repeats an older one
+  const select = form.elements.namedItem('counterparty_id');
+  if (!select) return;
+  const note = document.createElement('p');
+  note.className = 'suggestion-note';
+  note.hidden = true;
+  select.insertAdjacentElement('afterend', note);
+  select.addEventListener('change', async () => {
+    note.hidden = true;
+    if (!select.value) return;
+    let suggestion;
+    try {
+      suggestion = await api(`${financeBasePath()}/counterparties/${select.value}/last-expense`);
+    } catch (e) {
+      return;  // no history (204) or no access: the form stays as the partner left it
+    }
+    if (!suggestion || !suggestion.amount_cents) return;
+    const applied = applySuggestion(readFormValues(form), suggestion);
+    applied.filled.forEach((field) => {
+      const el = form.elements.namedItem(field);
+      if (el) el.value = applied.values[field];
+    });
+    if (!applied.filled.length) return;
+    note.innerHTML = `Repetido do último lançamento${suggestion.competence ? ` (${esc(suggestion.competence)})` : ''}.
+      <button type="button" class="btn-link" data-suggestion-clear>Limpar</button>`;
+    note.hidden = false;
+    note.querySelector('[data-suggestion-clear]').addEventListener('click', () => {
+      applied.filled.forEach((field) => {
+        const el = form.elements.namedItem(field);
+        if (el) el.value = '';
+      });
+      note.hidden = true;
+    });
+  });
 }

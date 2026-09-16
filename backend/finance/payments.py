@@ -121,6 +121,7 @@ def _request_hash(
     existing_cash_event_id: Optional[int],
     principal_cents: Optional[int],
     interest_cents: Optional[int],
+    late_fee_cents: Optional[int] = None,
 ) -> str:
     # Deliberately excludes expected_version: the brief requires a genuine
     # idempotent replay (same key, same meaningful body) to return the
@@ -135,6 +136,7 @@ def _request_hash(
         "existing_cash_event_id": existing_cash_event_id,
         "principal_cents": principal_cents,
         "interest_cents": interest_cents,
+        "late_fee_cents": late_fee_cents,
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -384,6 +386,7 @@ def record_payment(
     existing_cash_event_id: Optional[int] = None,
     principal_cents: Optional[int] = None,
     interest_cents: Optional[int] = None,
+    late_fee_cents: Optional[int] = None,
     actor_id: Optional[int] = None,
 ) -> dict:
     if kind not in _KINDS:
@@ -405,6 +408,17 @@ def record_payment(
         )
     if cash_account_id is None and existing_cash_event_id is None:
         raise PaymentCashLinkRequiredError()
+
+    if late_fee_cents is not None:
+        if isinstance(late_fee_cents, bool) or late_fee_cents <= 0:
+            raise PaymentValidationError(
+                "O acréscimo por atraso deve ser maior que zero.", fields=["late_fee_cents"]
+            )
+        if kind != "entry":
+            raise PaymentValidationError(
+                "A parcela de empréstimo já separa principal e juros: não recebe acréscimo por atraso.",
+                fields=["late_fee_cents"],
+            )
 
     if kind == "entry":
         if principal_cents is not None or interest_cents is not None:
@@ -439,6 +453,8 @@ def record_payment(
     interest_account_id = None
     if kind == "loan_installment" and interest_cents:
         interest_account_id = accounts.account_by_key(company, "loan_interest")["id"]
+    # Same reason as above: resolve (and possibly seed) the account outside the transaction.
+    late_fee_account_id = accounts.account_by_key(company, "fines")["id"] if late_fee_cents else None
 
     request_hash = _request_hash(
         kind=kind,
@@ -449,6 +465,7 @@ def record_payment(
         existing_cash_event_id=existing_cash_event_id,
         principal_cents=principal_cents,
         interest_cents=interest_cents,
+        late_fee_cents=late_fee_cents,
     )
 
     try:
@@ -581,7 +598,7 @@ def record_payment(
                         "Movimento de caixa não encontrado.",
                         fields=["existing_cash_event_id"],
                     )
-                if event["amount_cents"] != -amount_cents:
+                if event["amount_cents"] != -(amount_cents + (late_fee_cents or 0)):
                     raise PaymentValidationError(
                         "Movimento de caixa não corresponde ao valor pago.",
                         fields=["existing_cash_event_id"],
@@ -613,6 +630,7 @@ def record_payment(
             # concurrency gate (see entries.settle_entry_on_connection).
             financial_event_id = None
             interest_entry_id = None
+            late_fee_entry_id = None
             if kind == "entry":
                 try:
                     financial_event_id = settle_entry_on_connection(
@@ -633,6 +651,25 @@ def record_payment(
                         "SELECT * FROM financial_entries WHERE id=?", (obligation_id,)
                     ).fetchone()
                 )
+                if late_fee_cents:
+                    late_fee_entry = create_entry_on_connection(
+                        conn,
+                        EntryCommand(
+                            company_id=company,
+                            account_id=late_fee_account_id,
+                            amount_cents=late_fee_cents,
+                            competence=paid_at.isoformat()[:7],
+                            due_date=paid_at,
+                            source="late_fee",
+                            external_id=f"late-fee:{idempotency_key}",
+                            description=f"Juros e multa — {description}",
+                            created_by=actor_id,
+                        ),
+                    )
+                    late_fee_entry_id = late_fee_entry["id"]
+                    settle_entry_on_connection(
+                        conn, late_fee_entry_id, late_fee_cents, paid_at=paid_at, created_by=actor_id
+                    )
             else:
                 interest_entry_id, financial_event_id = _ensure_interest_settlement(
                     conn,
@@ -666,7 +703,7 @@ def record_payment(
                 cash_event = post_cash_event(
                     company,
                     cash_account_id,
-                    -amount_cents,
+                    -(amount_cents + (late_fee_cents or 0)),
                     paid_at,
                     f"Pagamento — {description}",
                     entry_id=(obligation_id if kind == "entry" else None),
@@ -717,6 +754,8 @@ def record_payment(
                 "payment_id": str(payment_id),
                 "obligation": after_item,
                 "cash_event_id": str(cash_event_id) if cash_event_id is not None else None,
+                "late_fee_cents": late_fee_cents,
+                "late_fee_entry_id": str(late_fee_entry_id) if late_fee_entry_id is not None else None,
             }
             try:
                 conn.execute(
@@ -725,15 +764,17 @@ def record_payment(
                         id,company,obligation_kind,obligation_id,amount_cents,
                         principal_cents,interest_cents,paid_at,cash_event_id,
                         owns_cash_event,financial_event_id,interest_entry_id,
+                        late_fee_cents,late_fee_entry_id,
                         idempotency_key,request_hash,response_json,reversed_at,
                         created_by,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         payment_id, company, kind, obligation_id, amount_cents,
                         principal_cents, interest_cents, paid_at.isoformat(),
                         cash_event_id, owns_cash_event, financial_event_id,
-                        interest_entry_id, idempotency_key, request_hash,
+                        interest_entry_id, late_fee_cents, late_fee_entry_id,
+                        idempotency_key, request_hash,
                         json.dumps(response, ensure_ascii=False), None,
                         actor_id, timestamp,
                     ),
@@ -940,6 +981,29 @@ def reverse_payment(
                 )
                 before_snapshot = dict(entry)
                 entity_type = "financial_entry"
+                # The surcharge was created by this payment: undo it whole, so it never
+                # lingers as a new bill to pay (same two writes as entries.reverse_entry,
+                # done here on the open transaction).
+                if payment["late_fee_entry_id"] is not None:
+                    fee_row = conn.execute(
+                        "SELECT * FROM financial_entries WHERE id=?", (payment["late_fee_entry_id"],)
+                    ).fetchone()
+                    if fee_row and fee_row["status"] not in {"cancelled", "reversed"}:
+                        fee_timestamp = db.now()
+                        conn.execute(
+                            """
+                            INSERT INTO financial_events(
+                                id,entry_id,event_type,amount_cents,occurred_at,reason,created_by,created_at
+                            ) VALUES(?,?,?,?,?,?,?,?)
+                            """,
+                            (_new_id(), payment["late_fee_entry_id"], "reversed",
+                             payment["late_fee_cents"] or 0, reversed_at.isoformat(),
+                             clean_reason, actor_id, fee_timestamp),
+                        )
+                        conn.execute(
+                            "UPDATE financial_entries SET status='reversed',version=version+1,updated_at=? WHERE id=?",
+                            (fee_timestamp, payment["late_fee_entry_id"]),
+                        )
             else:
                 installment = conn.execute(
                     """

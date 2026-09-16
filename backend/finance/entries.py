@@ -45,8 +45,28 @@ class EntryCommand:
     installment_number: Optional[int] = None
     installment_count: Optional[int] = None
     notes: str = ""
+    payment_method: str = ""
+    payment_code: str = ""
     created_by: Optional[int] = None
     forecast: bool = False
+
+
+# How the bill leaves the account. Empty means "not said yet".
+PAYMENT_METHODS = ("boleto", "pix", "debito_automatico", "transferencia")
+
+
+def validate_payment_method(value) -> str:
+    method = (value or "").strip()
+    if method and method not in PAYMENT_METHODS:
+        raise ValueError("Forma de pagamento inválida.")
+    return method
+
+
+def validate_payment_code(value) -> str:
+    code = (value or "").strip()
+    if len(code) > 200:
+        raise ValueError("O código de pagamento é longo demais.")
+    return code
 
 
 def _new_id() -> int:
@@ -89,8 +109,8 @@ def create_entry_on_connection(conn, command: EntryCommand) -> dict:
             id,company,store,account_id,counterparty_id,description,
             amount_cents,competence,due_date,status,source,external_id,
             recurrence_id,installment_number,installment_count,notes,
-            created_by,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            payment_method,payment_code,created_by,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             entry_id,
@@ -109,6 +129,8 @@ def create_entry_on_connection(conn, command: EntryCommand) -> dict:
             command.installment_number,
             command.installment_count,
             command.notes.strip(),
+            validate_payment_method(command.payment_method),
+            validate_payment_code(command.payment_code),
             command.created_by,
             timestamp,
             timestamp,

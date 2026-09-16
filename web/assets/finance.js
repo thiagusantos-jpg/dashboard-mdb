@@ -692,9 +692,11 @@ function dayTotals(items) {
   return totals;
 }
 
-// A loan installment needs its principal/interest split, so it is paid one by one.
+/* A loan installment needs its principal/interest split, and a bill on direct debit
+ * already leaves the account by itself — neither belongs in a batch payment. */
 function selectableObligations(items) {
-  return (items || []).filter((item) => item.kind === 'entry' && (item.allowed_actions || []).includes('pay'));
+  return (items || []).filter((item) => item.kind === 'entry' && (item.allowed_actions || []).includes('pay')
+    && item.payment_method !== 'debito_automatico');
 }
 
 function selectionSummary(items, selectedKeys) {
@@ -766,9 +768,11 @@ function obligationRow(item, today) {
   }
   actions.push(`<button type="button" class="btn-secondary btn-compact" data-obligation-details="${esc(item.key)}" aria-label="Detalhes: ${esc(item.description)}">Detalhes</button>`);
   const tag = item.kind === 'loan_installment' ? '<span class="payables-tag">Empréstimo</span>'
-    : item.count > 1 ? `<span class="payables-tag">Parcela ${esc(item.number)}/${esc(item.count)}</span>` : '';
+    : item.payment_method === 'debito_automatico' ? '<span class="payables-tag">Débito automático</span>'
+      : item.count > 1 ? `<span class="payables-tag">Parcela ${esc(item.number)}/${esc(item.count)}</span>` : '';
   const partial = item.paid_cents > 0 ? `<div class="muted">Pago ${money(item.paid_cents)} de ${money(item.total_cents)}</div>` : '';
-  const selectable = item.kind === 'entry' && item.allowed_actions.includes('pay');
+  // Same rule as the batch itself, so a bill that cannot be batch-paid shows no checkbox.
+  const selectable = selectableObligations([item]).length > 0;
   return `
     <tr>
       <td class="payables-check-cell">${selectable

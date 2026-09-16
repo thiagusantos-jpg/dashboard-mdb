@@ -82,8 +82,8 @@ def test_list_obligations_returns_shared_contract_shape(client):
     item = body["items"][0]
     assert set(item.keys()) == {
         "key", "kind", "id", "version", "description", "due_date", "competence",
-        "total_cents", "paid_cents", "open_cents", "status", "source", "loan_id",
-        "number", "count", "allowed_actions",
+        "total_cents", "paid_cents", "open_cents", "status", "source", "payment_method",
+        "loan_id", "number", "count", "allowed_actions",
     }
     assert item["key"] in (item["kind"] + ":" + item["id"],)
     assert isinstance(item["id"], str)

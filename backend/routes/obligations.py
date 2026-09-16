@@ -26,6 +26,7 @@ class PaymentCreate(BaseModel):
     existing_cash_event_id: Optional[int] = None
     principal_cents: Optional[int] = None
     interest_cents: Optional[int] = None
+    late_fee_cents: Optional[int] = Field(default=None, ge=1)
 
 
 class PaymentReversalCreate(BaseModel):
@@ -236,6 +237,7 @@ def add_payment(
             existing_cash_event_id=body.existing_cash_event_id,
             principal_cents=body.principal_cents,
             interest_cents=body.interest_cents,
+            late_fee_cents=body.late_fee_cents,
             actor_id=auth.user_id,
         )
     except payments.PaymentNotFoundError as exc:

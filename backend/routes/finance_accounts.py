@@ -82,6 +82,29 @@ def get_counterparties(company: int):
         ]
 
 
+@router.get(
+    "/counterparties/{counterparty_id}/last-expense",
+    dependencies=[Depends(permissions.require_permission("finance.read"))],
+)
+def get_counterparty_last_expense(company: int, counterparty_id: int):
+    """What this supplier was charged last time — the form offers it as a starting
+    point so a monthly bill is not retyped. Cancelled/reversed entries do not count."""
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id,account_id,amount_cents,competence,due_date,description,
+                   payment_method,payment_code
+            FROM financial_entries
+            WHERE company=? AND counterparty_id=? AND status NOT IN ('cancelled','reversed')
+            ORDER BY competence DESC,due_date DESC,id DESC LIMIT 1
+            """,
+            (company, counterparty_id),
+        ).fetchone()
+    if not row:
+        return Response(status_code=204)
+    return dict(row)
+
+
 class AccountPatch(BaseModel):
     expected_version: int = Field(ge=1)
     name: Optional[str] = Field(default=None, max_length=160)
