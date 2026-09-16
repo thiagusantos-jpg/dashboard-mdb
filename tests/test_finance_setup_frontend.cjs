@@ -82,4 +82,7 @@ test('closing reminders link to their month in Resultado gerencial and are reque
   assert.equal(source.href, '#/financeiro/2026-08');
   assert.match(read('web/assets/actions.js'), /actions\/closing-reminder/);
   assert.match(read('web/assets/app.js'), /ensureClosingReminder\(\)/);
+  assert.equal(context.actionOrigin('vencimento:entry:9'), 'vencimento');
+  assert.equal(context.actionSource({alert_key: 'vencimento:entry:9'}, '2026-09').href, '#/contas-pagar');
+  assert.match(read('web/assets/actions.js'), /actions\/due-reminders/);
 });

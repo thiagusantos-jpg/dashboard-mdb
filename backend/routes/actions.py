@@ -107,6 +107,19 @@ def ensure_company_closing_reminder(
     return actions.ensure_closing_reminder(company, today, created_by=auth.user_id)
 
 
+@router.post(
+    "/actions/due-reminders",
+    dependencies=[Depends(permissions.require_permission("finance.read"))],
+)
+def ensure_company_due_reminders(
+    company: int,
+    auth: security.AuthContext = Depends(permissions.require_permission("dashboard.read")),
+):
+    _require_company(company)
+    today = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    return actions.ensure_due_reminders(company, today, created_by=auth.user_id)
+
+
 @router.patch(
     "/actions/{action_id}",
     dependencies=[Depends(permissions.require_permission("dashboard.read"))],

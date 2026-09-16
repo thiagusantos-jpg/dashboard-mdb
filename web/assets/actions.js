@@ -15,6 +15,7 @@ const ACTION_ORIGINS = {
   mapa: {label: 'Mapa de produtos', icon: 'map'},
   manual: {label: 'Manual', icon: 'clipboard-list'},
   fechamento: {label: 'Fechamento do mês', icon: 'calendar'},
+  vencimento: {label: 'Conta a pagar', icon: 'calendar'},
 };
 const ACTION_PRIORITY_LABELS = {high: 'Alta', medium: 'Média', low: 'Baixa'};
 const ACTION_PRIORITY_RANK = {high: 0, medium: 1, low: 2};
@@ -142,6 +143,7 @@ function actionSource(a, period) {
     return {href: routeHash('estoque', period, new URLSearchParams({filtro: ALERT_FILTERS[key]})), label: 'Ver produtos'};
   }
   if (key === 'integracao') return {href: '#/configuracoes/integracoes', label: 'Abrir integrações'};
+  if (key.startsWith('vencimento:')) return {href: routeHash('contas-pagar'), label: 'Abrir Contas a pagar'};
   const closing = key.match(/^fechamento:(\d{4}-\d{2})$/);
   if (closing) return {href: routeHash('financeiro', closing[1]), label: 'Abrir Resultado gerencial'};
   if (key.startsWith('mapa:')) return {href: routeHash('mapa', period), label: 'Abrir no mapa'};
@@ -669,14 +671,21 @@ async function loadResumoActionsNotice() {
   box.hidden = false;
 }
 
-/* The backend creates the closing action for last month once (from day 5 on) and
- * resolves it by itself when that month is reviewed. No finance access: nothing happens. */
+/* Two reminders the backend keeps by itself, asked for once per login: last month's
+ * closing (created from day 5 on, resolved when the month is reviewed) and one action
+ * per bill about to fall due (resolved when the bill is paid). No finance access:
+ * both answer 403 and nothing happens. */
 async function ensureClosingReminder() {
   if (APP.company == null) return;
   try {
     await api(`/api/companies/${APP.company}/actions/closing-reminder`, {method: 'POST'});
   } catch (e) {
     /* the badge below still counts whatever exists */
+  }
+  try {
+    await api(`/api/companies/${APP.company}/actions/due-reminders`, {method: 'POST'});
+  } catch (e) {
+    /* same: the reminders are a convenience, never a blocker */
   }
   refreshActionsBadge();
 }

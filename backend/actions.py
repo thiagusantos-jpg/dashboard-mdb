@@ -235,3 +235,58 @@ def ensure_closing_reminder(company: int, today, *, created_by: Optional[int] = 
         priority="high", due_date=f"{today.year:04d}-{today.month:02d}-10", created_by=created_by,
     )
     return {"period": period, "status": "created", "action": action}
+
+
+DUE_REMINDER_DAYS = 2
+DUE_REMINDER_LIMIT = 8
+
+
+def _due_reminder_title(item: dict, today) -> str:
+    due = str(item["due_date"])[:10]
+    when = f"{due[8:10]}/{due[5:7]}"
+    verb = "venceu em" if due < today.isoformat() else "vence em"
+    return f"Pagar {item['description']} — {verb} {when}"[:240]
+
+
+def ensure_due_reminders(company: int, today, *, created_by: Optional[int] = None, limit: int = DUE_REMINDER_LIMIT) -> dict:
+    """One action per bill already overdue or falling due within two days, so the
+    partner is warned without opening Contas a pagar. Created once per bill (a
+    dismissed one never comes back) and resolved by itself once the bill is paid.
+    Capped per run so a long overdue list does not flood the Central de Ações."""
+    from datetime import timedelta
+
+    from .finance import obligations
+
+    horizon = (today + timedelta(days=DUE_REMINDER_DAYS)).isoformat()
+    items = [
+        item for item in obligations.list_obligations(company, limit=200, include_sensitive=True)["items"]
+        if item["open_cents"] > 0
+    ]
+    open_keys = {f"vencimento:{item['kind']}:{item['id']}" for item in items}
+
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT id,alert_key,status FROM actions WHERE company=? AND alert_key LIKE 'vencimento:%'",
+            (company,),
+        ).fetchall()
+    known = {row["alert_key"] for row in rows}
+    stale = [row for row in rows if row["status"] in _ACTIVE_STATUSES and row["alert_key"] not in open_keys]
+
+    resolved = [
+        transition_action(row["id"], "resolved", note="Conta paga.", created_by=created_by)
+        for row in stale
+    ]
+
+    created = []
+    for item in items:
+        if len(created) >= limit:
+            break
+        key = f"vencimento:{item['kind']}:{item['id']}"
+        if key in known or str(item["due_date"])[:10] > horizon:
+            continue
+        created.append(create_from_alert(
+            company, key, str(item["due_date"])[:10], _due_reminder_title(item, today),
+            priority="high" if str(item["due_date"])[:10] < today.isoformat() else "medium",
+            due_date=str(item["due_date"])[:10], created_by=created_by,
+        ))
+    return {"created": created, "resolved": resolved}

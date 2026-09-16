@@ -659,8 +659,99 @@ function buildForecastConfirm(forecast) {
   };
 }
 
-function obligationQuery(filters, cursor) {
-  const params = new URLSearchParams({limit: '50'});
+function monthShift(monthISO, delta) {
+  const [year, month] = String(monthISO).split('-').map(Number);
+  const total = year * 12 + (month - 1) + delta;
+  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, '0')}`;
+}
+
+// Sunday-to-Saturday weeks covering the whole month, so the calendar never cuts a week.
+function calendarWeeks(monthISO, today) {
+  const [year, month] = String(monthISO).split('-').map(Number);
+  const first = new Date(year, month - 1, 1);
+  const last = new Date(year, month, 0);
+  const start = new Date(year, month - 1, 1 - first.getDay());
+  const end = new Date(year, month - 1, last.getDate() + (6 - last.getDay()));
+  const weeks = [];
+  for (const day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
+    const iso = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    if (!weeks.length || weeks[weeks.length - 1].length === 7) weeks.push([]);
+    weeks[weeks.length - 1].push({iso, day: day.getDate(), inMonth: day.getMonth() === month - 1, isToday: iso === today});
+  }
+  return weeks;
+}
+
+function dayTotals(items) {
+  const totals = {};
+  (items || []).forEach((item) => {
+    const iso = String(item.due_date).slice(0, 10);
+    const slot = totals[iso] || (totals[iso] = {cents: 0, count: 0});
+    slot.cents += item.open_cents || 0;
+    slot.count += 1;
+  });
+  return totals;
+}
+
+// A loan installment needs its principal/interest split, so it is paid one by one.
+function selectableObligations(items) {
+  return (items || []).filter((item) => item.kind === 'entry' && (item.allowed_actions || []).includes('pay'));
+}
+
+function selectionSummary(items, selectedKeys) {
+  const keys = new Set((selectedKeys || []).map(String));
+  const chosen = (items || []).filter((item) => keys.has(String(item.key)));
+  return {count: chosen.length, cents: chosen.reduce((sum, item) => sum + (item.open_cents || 0), 0)};
+}
+
+// One request per bill, each for its own open balance — the same body the single payment form sends.
+function buildBatchPayments(items, selectedKeys, values) {
+  const keys = new Set((selectedKeys || []).map(String));
+  const chosen = selectableObligations(items).filter((item) => keys.has(String(item.key)));
+  if (!chosen.length) return {errors: {form: 'Selecione ao menos uma conta para pagar.'}};
+  const requests = [];
+  const errors = {};
+  chosen.forEach((item) => {
+    const request = buildPaymentRequest(item, {
+      amount: centsToMoneyInput(item.open_cents), paid_at: values.paid_at,
+      cash_mode: 'generate', cash_account_id: values.cash_account_id,
+    });
+    if (request.errors) Object.assign(errors, request.errors);
+    else requests.push({key: item.key, description: item.description, path: request.path, body: request.body});
+  });
+  if (Object.keys(errors).length) return {errors};
+  return {requests};
+}
+
+function calendarHtml(monthISO, today, items) {
+  const totals = dayTotals(items);
+  const [year, month] = monthISO.split('-').map(Number);
+  const weekdays = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+  const cells = calendarWeeks(monthISO, today).flat().map((cell) => {
+    const total = totals[cell.iso];
+    const late = total && cell.iso < today;
+    return `<button type="button" class="calendar-day${cell.inMonth ? '' : ' out'}${cell.isToday ? ' today' : ''}${late ? ' late' : ''}"
+      data-calendar-day="${cell.iso}"${total ? '' : ' disabled'}>
+      <span class="calendar-number">${cell.day}</span>
+      ${total ? `<span class="calendar-total">${money(total.cents)}</span><span class="calendar-count">${total.count} ${total.count === 1 ? 'conta' : 'contas'}</span>` : ''}
+    </button>`;
+  }).join('');
+  return `
+    <div class="calendar-card">
+      <div class="calendar-head">
+        <button type="button" class="btn-secondary btn-compact" data-calendar-month="-1" aria-label="Mês anterior">‹</button>
+        <strong>${MONTHS[month - 1]}/${year}</strong>
+        <button type="button" class="btn-secondary btn-compact" data-calendar-month="1" aria-label="Próximo mês">›</button>
+      </div>
+      <div class="calendar-grid" role="group" aria-label="Vencimentos de ${MONTHS[month - 1]}/${year}">
+        ${weekdays.map((day) => `<span class="calendar-weekday">${day}</span>`).join('')}
+        ${cells}
+      </div>
+      <p class="field-help">Clique num dia para ver as contas que vencem nele.</p>
+    </div>`;
+}
+
+function obligationQuery(filters, cursor, limit) {
+  const params = new URLSearchParams({limit: String(limit || 50)});
   ['kind', 'status', 'q', 'due_from', 'due_to'].forEach((key) => { if (filters[key]) params.set(key, filters[key]); });
   if (cursor) params.set('cursor', cursor);
   return `/api/companies/${APP.company}/finance/obligations?${params}`;
@@ -677,8 +768,12 @@ function obligationRow(item, today) {
   const tag = item.kind === 'loan_installment' ? '<span class="payables-tag">Empréstimo</span>'
     : item.count > 1 ? `<span class="payables-tag">Parcela ${esc(item.number)}/${esc(item.count)}</span>` : '';
   const partial = item.paid_cents > 0 ? `<div class="muted">Pago ${money(item.paid_cents)} de ${money(item.total_cents)}</div>` : '';
+  const selectable = item.kind === 'entry' && item.allowed_actions.includes('pay');
   return `
     <tr>
+      <td class="payables-check-cell">${selectable
+        ? `<input type="checkbox" class="payables-check" data-payables-select="${esc(item.key)}" aria-label="Selecionar ${esc(item.description)}">`
+        : '<span class="visually-hidden">Esta conta é paga uma a uma</span>'}</td>
       <td><div class="payables-desc">${esc(item.description)}${tag}</div>${partial}</td>
       <td><div class="${due.bucket === 'overdue' ? 'due-late' : due.bucket === 'today' ? 'due-today' : ''}">${due.text}</div>
         <div class="muted">${dateBR(item.due_date)}</div></td>
@@ -725,7 +820,8 @@ async function renderContasPagar(token) {
   const title = `${icon('calendar', {class: 'title-icon'})}Contas a pagar`;
   const subtitle = 'O que precisa ser pago, do mais urgente ao mais distante.';
   const routeKind = APP.routeParams && APP.routeParams.get('tipo') === 'emprestimo' ? 'loan_installment' : '';
-  const filters = financeFilters('contas-pagar', {quick: 'todas', kind: routeKind, status: '', q: '', due_from: '', due_to: ''});
+  const filters = financeFilters('contas-pagar', {quick: 'todas', kind: routeKind, status: '', q: '', due_from: '', due_to: '',
+    view: 'lista', month: localTodayISO().slice(0, 7)});
   if (routeKind) Object.assign(filters, {quick: 'emprestimos', kind: routeKind});
   financeLoading(title, subtitle, 'Carregando contas a pagar');
   let page, positions = null, summary = null;
@@ -765,6 +861,10 @@ async function renderContasPagar(token) {
       <span>${esc(coverage.text)}</span>${coverage.tone === 'ok' ? '' : ` <a href="${routeHash('fluxo-caixa')}">Abrir Fluxo de caixa →</a>`}</p>` : ''}
     ${forecastsHtml(summary, today)}
     <div class="payables-toolbar">
+      <div class="payables-views" role="group" aria-label="Como ver as contas">
+        <button type="button" class="payables-chip" data-payables-view="lista" aria-pressed="${filters.view !== 'calendario'}">Lista</button>
+        <button type="button" class="payables-chip" data-payables-view="calendario" aria-pressed="${filters.view === 'calendario'}">Calendário</button>
+      </div>
       <div class="payables-chips" role="group" aria-label="Filtro rápido">${chips}</div>
       <label class="visually-hidden" for="obligations-q">Buscar</label>
       <input id="obligations-q" type="search" class="login-input payables-search" maxlength="120" value="${esc(filters.q)}" placeholder="Buscar por descrição ou credor">
@@ -782,6 +882,8 @@ async function renderContasPagar(token) {
         </form>
       </details>
     </div>
+    <p class="actions-status" id="payables-status" role="status" aria-live="polite"></p>
+    <div class="payables-batch" id="payables-batch" hidden></div>
     <div id="obligations-list"></div>
     ${positions ? `<h2 class="section-header">Contratos de empréstimo</h2>${loanContractsHtml(positions)}` : ''}`;
 
@@ -789,7 +891,9 @@ async function renderContasPagar(token) {
   const content = document.getElementById('content');
   const list = document.getElementById('obligations-list');
   let nextCursor = page.next_cursor;
+  const selected = new Set();
   const paint = () => {
+    if (filters.view === 'calendario') return paintCalendar(filters, today, list);
     if (!items.length) {
       list.innerHTML = hasFilter
         ? '<div class="empty-state">Nenhuma conta com estes filtros.</div>'
@@ -798,15 +902,24 @@ async function renderContasPagar(token) {
     }
     list.innerHTML = `
       <div class="table-wrap"><table class="data-table payables-table">
-        <thead><tr><th>Conta</th><th>Vencimento</th><th class="num">Saldo a pagar</th><th><span class="visually-hidden">Ações</span></th></tr></thead>
+        <thead><tr><th><span class="visually-hidden">Selecionar</span></th><th>Conta</th><th>Vencimento</th>
+          <th class="num">Saldo a pagar</th><th><span class="visually-hidden">Ações</span></th></tr></thead>
         ${groupObligations(items, today).map((group) => `<tbody class="payables-group ${group.bucket}">
-          <tr class="payables-group-row"><th colspan="4" scope="rowgroup">${group.label}
+          <tr class="payables-group-row"><th colspan="5" scope="rowgroup">${group.label}
             <span>${group.items.length} ${group.items.length === 1 ? 'conta' : 'contas'} · ${money(group.cents)}</span></th></tr>
           ${group.items.map((item) => obligationRow(item, today)).join('')}</tbody>`).join('')}
       </table></div>
       <p class="muted">Exibindo ${items.length} de ${page.total}.</p>
       ${nextCursor ? '<div class="btn-row"><button type="button" class="btn-secondary" data-obligations-more>Carregar mais</button></div>' : ''}`;
     const byKey = Object.fromEntries(items.map((item) => [item.key, item]));
+    list.querySelectorAll('[data-payables-select]').forEach((box) => {
+      box.checked = selected.has(box.dataset.payablesSelect);
+      box.addEventListener('change', () => {
+        if (box.checked) selected.add(box.dataset.payablesSelect); else selected.delete(box.dataset.payablesSelect);
+        paintBatchBar(items, selected, refresh);
+      });
+    });
+    paintBatchBar(items, selected, refresh);
     list.querySelectorAll('[data-obligation-pay]').forEach((button) => button.addEventListener('click', () =>
       openPaymentForm(byKey[button.dataset.obligationPay], {trigger: button, onSaved: refresh})));
     list.querySelectorAll('[data-obligation-details]').forEach((button) => button.addEventListener('click', () => {
@@ -840,6 +953,10 @@ async function renderContasPagar(token) {
   // One click filters: the cards and the chips share the same quick filters.
   content.querySelectorAll('[data-quick-filter]').forEach((button) => button.addEventListener('click', () => {
     Object.assign(filters, quickFilter(button.dataset.quickFilter, today));
+    renderContasPagar();
+  }));
+  content.querySelectorAll('[data-payables-view]').forEach((button) => button.addEventListener('click', () => {
+    filters.view = button.dataset.payablesView;
     renderContasPagar();
   }));
   const search = document.getElementById('obligations-q');
@@ -882,4 +999,117 @@ async function renderContasPagar(token) {
       content.querySelector('[data-forecast-error]').textContent = 'Não foi possível confirmar: ' + e.message;
     }
   }));
+}
+
+/* The calendar reads the whole month at once (never the filtered page), so a day
+ * total is the day total — the list filters stay untouched underneath. */
+async function paintCalendar(filters, today, list) {
+  const month = filters.month;
+  const monthQuery = {kind: filters.kind, status: '', q: '', due_from: `${month}-01`, due_to: `${monthShift(month, 1)}-01`};
+  list.innerHTML = '<div class="skeleton-block" aria-label="Carregando calendário"></div>';
+  let page;
+  try {
+    page = await api(obligationQuery(monthQuery, null, 200));
+  } catch (e) {
+    list.innerHTML = `<div class="story-box">Não foi possível carregar o mês: ${esc(e.message)}</div>`;
+    return;
+  }
+  const items = page.items.filter((item) => String(item.due_date).slice(0, 7) === month);
+  list.innerHTML = calendarHtml(month, today, items);
+  list.querySelectorAll('[data-calendar-month]').forEach((button) => button.addEventListener('click', () => {
+    filters.month = monthShift(month, Number(button.dataset.calendarMonth));
+    renderContasPagar();
+  }));
+  list.querySelectorAll('[data-calendar-day]').forEach((button) => button.addEventListener('click', () => {
+    const day = button.dataset.calendarDay;
+    Object.assign(filters, {view: 'lista', quick: 'custom', status: '', due_from: day, due_to: day});
+    renderContasPagar();
+  }));
+}
+
+function paintBatchBar(items, selected, onPaid) {
+  const bar = document.getElementById('payables-batch');
+  if (!bar) return;
+  const summary = selectionSummary(items, Array.from(selected));
+  bar.hidden = !summary.count;
+  if (!summary.count) return;
+  bar.innerHTML = `<span><strong>${summary.count} ${summary.count === 1 ? 'conta' : 'contas'}</strong> · ${money(summary.cents)}</span>
+    <button type="button" class="btn-primary btn-compact" data-batch-pay>Pagar selecionadas</button>
+    <button type="button" class="btn-link" data-batch-clear>Limpar seleção</button>`;
+  bar.querySelector('[data-batch-clear]').addEventListener('click', () => {
+    selected.clear();
+    document.querySelectorAll('[data-payables-select]').forEach((box) => { box.checked = false; });
+    paintBatchBar(items, selected, onPaid);
+  });
+  bar.querySelector('[data-batch-pay]').addEventListener('click', (event) =>
+    openBatchPaymentDrawer(items, Array.from(selected), {trigger: event.currentTarget, onPaid}));
+}
+
+/* Each bill keeps its own payment (its own value, version and Idempotency-Key):
+ * one failing bill never blocks the others, and the result says what happened. */
+async function openBatchPaymentDrawer(items, keys, ctx) {
+  const chosen = selectableObligations(items).filter((item) => keys.includes(String(item.key)));
+  const drawer = openDrawer({title: 'Pagar contas selecionadas', trigger: ctx.trigger,
+    body: '<div class="skeleton-block" aria-label="Carregando contas de caixa"></div>'});
+  let lookups;
+  try {
+    lookups = await financeLookups(['cashAccounts']);
+  } catch (e) {
+    drawer.setBody(`<p class="form-error" role="alert">Não foi possível carregar as contas de caixa: ${esc(e.message)}</p>`);
+    return;
+  }
+  const accounts = lookups.cashAccounts.filter((account) => !account.archived);
+  const total = chosen.reduce((sum, item) => sum + item.open_cents, 0);
+  drawer.setBody(`
+    <form class="drawer-form action-form" novalidate>
+      <p class="action-form-lead">${chosen.length} ${chosen.length === 1 ? 'conta' : 'contas'} · ${money(total)}</p>
+      <ul class="batch-list">${chosen.map((item) => `<li><span>${esc(item.description)}</span><span class="num">${money(item.open_cents)}</span></li>`).join('')}</ul>
+      <label for="batch-paid-at">Data do pagamento</label>
+      <input id="batch-paid-at" name="paid_at" type="date" class="login-input" value="${esc(localTodayISO())}">
+      <label for="batch-account">Conta de onde sai o dinheiro</label>
+      <select id="batch-account" name="cash_account_id" class="login-input">
+        <option value="">Escolha…</option>
+        ${accounts.map((account) => `<option value="${esc(account.id)}">${esc(account.name)}</option>`).join('')}
+      </select>
+      <p class="field-help">Uma saída é lançada no fluxo de caixa para cada conta paga.</p>
+      <p class="form-error" role="alert" data-form-error></p>
+      <div class="drawer-actions"><button type="button" class="btn-secondary" data-drawer-close>Cancelar</button>
+        <button type="submit" class="btn-primary">Pagar ${chosen.length} ${chosen.length === 1 ? 'conta' : 'contas'}</button></div>
+    </form>`);
+  const form = drawer.dialog.querySelector('form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = form.querySelector('[data-form-error]');
+    const button = form.querySelector('[type="submit"]');
+    const batch = buildBatchPayments(items, keys, {
+      paid_at: form.elements.paid_at.value, cash_account_id: form.elements.cash_account_id.value,
+    });
+    if (batch.errors) {
+      error.textContent = Object.values(batch.errors)[0];
+      return;
+    }
+    button.disabled = true;
+    const done = [];
+    const failed = [];
+    for (const request of batch.requests) {
+      button.textContent = `Pagando ${done.length + failed.length + 1} de ${batch.requests.length}…`;
+      try {
+        await api(request.path, {method: 'POST', body: JSON.stringify(request.body),
+          headers: {'Idempotency-Key': newIdempotencyKey()}});
+        done.push(request);
+      } catch (e) {
+        failed.push(`${request.description}: ${e.message}`);
+      }
+    }
+    drawer.close();
+    // The refresh replaces the page (and this status line), so it has to run first.
+    if (ctx.onPaid) await ctx.onPaid();
+    const status = document.getElementById('payables-status');
+    if (status) {
+      status.textContent = failed.length
+        ? `${done.length} de ${batch.requests.length} contas pagas. Não deu certo em: ${failed.join(' · ')}`
+        : `${done.length} ${done.length === 1 ? 'conta paga' : 'contas pagas'}.`;
+      status.classList.toggle('error', failed.length > 0);
+    }
+  });
 }
