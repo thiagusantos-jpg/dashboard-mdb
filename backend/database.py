@@ -76,6 +76,10 @@ class _PGConn:
         # None of this app's SQL text otherwise contains a literal '?' character.
         cur.execute(sql.replace('?', '%s'), params)
         return _PGCursor(cur)
+    def executemany(self, sql, params_seq):
+        # psycopg sends the whole batch in pipeline mode: a few round trips, not one per row.
+        with self._conn.cursor() as cur:
+            cur.executemany(sql.replace('?', '%s'), params_seq)
     def commit(self):
         self._conn.commit()
     def rollback(self):

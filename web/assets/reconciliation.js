@@ -401,7 +401,11 @@ async function reconciliationUpload(path, formData) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = body && body.detail;
-    const message = typeof detail === 'string' ? detail : (detail && detail.message) || 'Não foi possível enviar o arquivo.';
+    // A timed-out request rolls back: the import runs in one transaction.
+    const fallback = res.status === 504
+      ? 'O servidor demorou demais para ler o arquivo e nada foi gravado. Tente de novo.'
+      : 'Não foi possível enviar o arquivo.';
+    const message = typeof detail === 'string' ? detail : (detail && detail.message) || fallback;
     const err = new Error(message);
     err.status = res.status;
     throw err;
@@ -420,8 +424,24 @@ function importFormBody(cashAccounts, ctx, accept, fileLabel, help, submitLabel)
           ctx.accountId || (cashAccounts.length === 1 ? cashAccounts[0].id : ''), 'Escolha…'))}
         ${formField('file', fileLabel, `<input type="file" class="login-input" accept="${accept}">`, help)}
       </div>
+      <p class="field-help" role="status" data-upload-status></p>
       ${formActions(submitLabel)}
     </form>`;
+}
+
+/* setBusy only dims the button; an upload can take a while, so say what is
+ * happening next to it and put the label back when it ends. */
+function uploadBusy(form, ui, busy, label) {
+  ui.setBusy(busy);
+  const button = form.querySelector('button[type="submit"]');
+  const status = form.querySelector('[data-upload-status]');
+  if (busy) {
+    if (button) { button.dataset.idleLabel = button.textContent; button.textContent = label; }
+    if (status) status.textContent = 'Processando o arquivo. Um extrato de 3 meses pode levar até 1 minuto; não feche esta janela.';
+  } else {
+    if (button && button.dataset.idleLabel) button.textContent = button.dataset.idleLabel;
+    if (status) status.textContent = '';
+  }
 }
 
 /* Reads the account + file of an import drawer; returns null after showing the error. */
@@ -460,7 +480,7 @@ function openStoneImportForm(cashAccounts, ctx) {
     if (!picked) return;
     const data = new FormData();
     data.append('file', picked.file);
-    ui.setBusy(true);
+    uploadBusy(form, ui, true, 'Importando…');
     try {
       const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/receivables-import`, data);
       clearDirty();
@@ -472,7 +492,7 @@ function openStoneImportForm(cashAccounts, ctx) {
     } catch (e) {
       ui.showError(e.message, ['file']);
     } finally {
-      if (form.isConnected) ui.setBusy(false);
+      if (form.isConnected) uploadBusy(form, ui, false);
     }
   });
 }
@@ -546,6 +566,7 @@ function bankPreviewBody(preview, eventsById) {
         ${bankPreviewTable(recent.filter(({index}) => !opened.has(index))
           .map(({item, index}) => bankPreviewRow(item, index, eventsById)).join('') || '<tr><td colspan="4">O arquivo não tem movimentos.</td></tr>')}
       </details>
+      <p class="field-help" role="status" data-upload-status></p>
       ${formActions(submitLabel)}
     </form>`;
 }
@@ -568,13 +589,13 @@ function openBankImportForm(cashAccounts, ctx) {
     if (!picked) return;
     const data = new FormData();
     data.append('file', picked.file);
-    ui.setBusy(true);
+    uploadBusy(form, ui, true, 'Lendo o extrato…');
     let preview;
     try {
       preview = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/bank-imports/preview`, data);
     } catch (e) {
+      uploadBusy(form, ui, false);
       ui.showError(e.message, ['file']);
-      ui.setBusy(false);
       return;
     }
     drawer.setBody(bankPreviewBody(preview, ctx.eventsById));
@@ -597,7 +618,7 @@ function bindBankCommit(drawer, picked, preview, ctx) {
     data.append('file', picked.file);
     data.append('preview_hash', preview.preview_hash);
     data.append('decisions', JSON.stringify(decisions));
-    ui.setBusy(true);
+    uploadBusy(form, ui, true, 'Gravando…');
     try {
       const result = await reconciliationUpload(`${financeBasePath()}/cash-accounts/${picked.accountId}/bank-imports`, data);
       clearDirty();
@@ -606,8 +627,8 @@ function bindBankCommit(drawer, picked, preview, ctx) {
         <div class="btn-row drawer-actions"><button type="button" class="btn-primary btn-wide" data-drawer-close>Conferir movimentos</button></div>`);
       if (ctx.onSaved) ctx.onSaved(result);
     } catch (e) {
+      uploadBusy(form, ui, false);
       ui.showError(e.status === 409 ? `${e.message} Feche e importe o arquivo de novo.` : e.message);
-      ui.setBusy(false);
     }
   });
 }

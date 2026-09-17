@@ -149,3 +149,71 @@ def test_commit_errors_use_the_code_message_fields_contract(client):
     stale_body = stale.json()["detail"]
     assert stale_body["code"] == "conflict"
     assert isinstance(stale_body["message"], str) and stale_body["message"]
+
+
+def _statement(lines: int) -> bytes:
+    rows = []
+    for n in range(lines):
+        memo = "Dinheiro Guardado - Reserva Stone" if n % 10 == 0 else f"Venda {n}"
+        rows.append(
+            f"<STMTTRN><DTPOSTED>202606{n % 28 + 1:02d}120000<TRNAMT>-{n + 1}.00"
+            f"<FITID>BIG-{n}<MEMO>{memo}</STMTTRN>"
+        )
+    return ("<OFX><BANKTRANLIST>" + "".join(rows) + "</BANKTRANLIST></OFX>").encode()
+
+
+def test_a_long_statement_costs_the_same_few_queries_as_a_short_one(client, monkeypatch):
+    """A 3-month Stone statement has ~3,000 lines; one query per line
+    outlived the hosting time limit against the hosted database."""
+    calls = {"n": 0}
+    real_connection = db.connection
+
+    class Counting:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def execute(self, *args):
+            calls["n"] += 1
+            return self._conn.execute(*args)
+
+        def executemany(self, *args):
+            calls["n"] += 1
+            return self._conn.executemany(*args)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def counting_connection(*args, **kwargs):
+        with real_connection(*args, **kwargs) as conn:
+            yield Counting(conn)
+
+    def run(lines: int) -> tuple:
+        cash_account = client.post(
+            "/api/companies/1/finance/cash-accounts", json={"name": f"Stone {lines}", "kind": "payment"}
+        ).json()
+        base = f"/api/companies/1/finance/cash-accounts/{cash_account['id']}/bank-imports"
+        content = _statement(lines)
+        monkeypatch.setattr(db, "connection", counting_connection)
+        calls["n"] = 0
+        preview = client.post(f"{base}/preview", files={"file": ("big.ofx", content)})
+        preview_calls = calls["n"]
+        calls["n"] = 0
+        body = preview.json()
+        commit = client.post(base, files={"file": ("big.ofx", content)}, data={
+            "preview_hash": body["preview_hash"],
+            "decisions": json.dumps({i["external_id"]: i["decision"] for i in body["items"]}),
+        })
+        monkeypatch.setattr(db, "connection", real_connection)
+        assert commit.status_code == 201, commit.text
+        return preview_calls, calls["n"], commit.json()
+
+    run(10)  # creates the Reserva Stone account, a one-off write
+    short_preview, short_commit, _ = run(20)
+    long_preview, long_commit, result = run(500)
+    assert result["imported"] + result["transferred"] + result["duplicates"] == 500
+    assert result["transferred"] == 50
+    assert long_preview == short_preview
+    assert long_commit == short_commit
