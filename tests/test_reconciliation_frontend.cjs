@@ -244,3 +244,56 @@ test('the Stone import says what it booked by itself and the monthly fee line is
   assert.match(html, /<strong>1<\/strong> mensalidade\(s\) Stone: só o dinheiro entra/);
   assert.match(html, /Mensalidade Stone — despesa já lançada pelo relatório/);
 });
+
+function fakeUploadForm() {
+  const button = {textContent: 'Revisar linhas', dataset: {}, focus() {}};
+  const status = {textContent: ''};
+  const form = {
+    elements: {namedItem: (name) => (name === 'file' ? {files: ['FILE']} : {value: '7'})},
+    querySelector: (sel) => (sel.includes('submit') ? button : sel.includes('upload-status') ? status : null),
+    querySelectorAll: () => [],
+    addEventListener: (evt, fn) => { if (evt === 'submit') form.submit = fn; },
+  };
+  return {form, button, status};
+}
+
+test('reading a statement says it is working until the answer comes back', async () => {
+  const context = loadReconciliation();
+  context.FormData = function () { this.append = () => {}; };
+  context.watchForm = () => {};
+  let answer;
+  context.fetch = () => new Promise((resolve) => { answer = resolve; });
+  const {form, button, status} = fakeUploadForm();
+  let busy = false;
+  context.formUiFor = () => ({clearError() {}, setBusy(b) { busy = b; }, showError(m) { throw new Error(m); }});
+  let body = '';
+  context.formField = () => ''; context.selectControl = () => '';
+  context.openDrawer = () => ({dialog: {querySelector: () => form}, setBody: (html) => { body = html; }});
+  context.openBankImportForm([{id: 7, name: 'Stone'}], {});
+  const pending = form.submit({preventDefault() {}});
+  assert.ok(busy);
+  assert.equal(button.textContent, 'Lendo o extrato…');
+  assert.match(status.textContent, /não feche esta janela/);
+  answer({ok: true, json: async () => ({preview_hash: 'h', count: 0, items: [], total_cents: 0})});
+  await pending;
+  assert.match(body, /Confirmar \(nada novo\)/);
+});
+
+test('a statement the server gave up on says nothing was saved and restores the button', async () => {
+  const context = loadReconciliation();
+  context.FormData = function () { this.append = () => {}; };
+  context.watchForm = () => {};
+  context.fetch = async () => ({ok: false, status: 504, json: async () => { throw new Error('html'); }});
+  const {form, button, status} = fakeUploadForm();
+  let error = '';
+  let busy = true;
+  context.formUiFor = () => ({clearError() {}, setBusy(b) { busy = b; }, showError(m) { error = m; }});
+  context.formField = () => ''; context.selectControl = () => '';
+  context.openDrawer = () => ({dialog: {querySelector: () => form}, setBody() {}});
+  context.openBankImportForm([{id: 7, name: 'Stone'}], {});
+  await form.submit({preventDefault() {}});
+  assert.equal(busy, false);
+  assert.equal(button.textContent, 'Revisar linhas');
+  assert.equal(status.textContent, '');
+  assert.match(error, /nada foi gravado/);
+});

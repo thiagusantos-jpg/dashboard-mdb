@@ -291,12 +291,13 @@ def _reversed_cash_event_ids(conn) -> set:
 
 
 def _candidate_cash_events(
-    conn, company: int, cash_account_id: int, amount_cents: int, around: date,
+    conn, company: int, cash_account_id: int, transactions: list,
     *, linked: set, reversed_ids: set,
-) -> list:
-    """Suggest cash_events that MIGHT represent the same real-world movement
-    as an imported bank line: same company/account, exact amount match, and
-    an occurred_at within CANDIDATE_WINDOW_DAYS of the transaction's date.
+):
+    """Returns a lookup `(amount_cents, around: date) -> [cash_event_id]` of
+    cash_events that MIGHT represent the same real-world movement as an
+    imported bank line: same company/account, exact amount match, and an
+    occurred_at within CANDIDATE_WINDOW_DAYS of the transaction's date.
     Never a confirmation — only ever surfaced as a suggestion in the preview
     response; the actual link only happens on the caller's explicit
     commit-time `link:<cash_event_id>` decision for that line.
@@ -310,25 +311,40 @@ def _candidate_cash_events(
     ledger.post_cash_event always writes, whether the event was created by a
     payment or by a prior "new"-decision bank import.
 
-    `linked`/`reversed_ids` are computed ONCE by the caller (_preview_items)
-    for the whole file, not re-queried per line — each is an unfiltered
-    full-table scan, and this function runs once per imported transaction
-    (up to MAX_ROWS=50,000 per file), so recomputing them per line made
-    preview cost quadratic in file size for no benefit (both sets are the
-    same for every line in one preview call).
+    The account's events for the file's whole date span are read in ONE
+    query and matched in memory: a 3-month Stone statement has ~3,000 lines,
+    and one query per line took minutes against the hosted database.
     """
-    start = (around - timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
-    end = (around + timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
-    rows = conn.execute(
-        """
-        SELECT id FROM cash_events
-        WHERE company=? AND cash_account_id=? AND kind='entry' AND amount_cents=?
-              AND occurred_at BETWEEN ? AND ?
-        ORDER BY occurred_at,id
-        """,
-        (company, cash_account_id, amount_cents, start, end),
-    ).fetchall()
-    return [row["id"] for row in rows if row["id"] not in linked and row["id"] not in reversed_ids]
+    by_amount: dict = {}
+    if transactions:
+        window = timedelta(days=CANDIDATE_WINDOW_DAYS)
+        start = (min(date.fromisoformat(t.date) for t in transactions) - window).isoformat()
+        end = (max(date.fromisoformat(t.date) for t in transactions) + window).isoformat()
+        rows = conn.execute(
+            """
+            SELECT id, amount_cents, occurred_at FROM cash_events
+            WHERE company=? AND cash_account_id=? AND kind='entry'
+                  AND occurred_at BETWEEN ? AND ?
+            ORDER BY occurred_at,id
+            """,
+            (company, cash_account_id, start, end),
+        ).fetchall()
+        for row in rows:
+            if row["id"] in linked or row["id"] in reversed_ids:
+                continue
+            by_amount.setdefault(int(row["amount_cents"]), []).append(
+                (str(row["occurred_at"]), row["id"])
+            )
+
+    def lookup(amount_cents: int, around: date) -> list:
+        start = (around - timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
+        end = (around + timedelta(days=CANDIDATE_WINDOW_DAYS)).isoformat()
+        return [
+            event_id for occurred, event_id in by_amount.get(int(amount_cents), ())
+            if start <= occurred <= end
+        ]
+
+    return lookup
 
 
 def _imported_external_ids(conn, company: int, cash_account_id: int) -> set:
@@ -345,6 +361,9 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
     linked = _linked_cash_event_ids(conn)
     reversed_ids = _reversed_cash_event_ids(conn)
     imported = _imported_external_ids(conn, company, cash_account_id)
+    candidates_for = _candidate_cash_events(
+        conn, company, cash_account_id, transactions, linked=linked, reversed_ids=reversed_ids,
+    )
     items = []
     for tx in transactions:
         if tx.external_id in imported:
@@ -375,10 +394,7 @@ def _preview_items(conn, company: int, cash_account_id: int, transactions: list)
                 "stone_charge": False,
             })
             continue
-        candidates = _candidate_cash_events(
-            conn, company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
-            linked=linked, reversed_ids=reversed_ids,
-        )
+        candidates = candidates_for(tx.amount_cents, date.fromisoformat(tx.date))
         # A suggestion is only ever pre-selected when it is UNAMBIGUOUS (a
         # single matching candidate) — two legitimate, independently-real
         # outflows that happen to share amount/date must never be silently
@@ -501,48 +517,132 @@ def commit_bank_import(
     duplicates = 0
     linked = 0
     transferred = 0
+    version = "1"
+    timestamp = db.now()
+    # A 3-month statement has ~3,000 lines: the "new" and Reserva Stone lines
+    # are written in batches (one round trip per table instead of ~8 per
+    # line), or the import outlives the function's time limit. Everything
+    # still runs in this one transaction.
+    record_rows: list = []
+    event_rows: list = []
+    link_rows: list = []
+
+    def flush(conn) -> None:
+        if record_rows:
+            conn.executemany(
+                """
+                INSERT INTO external_records(
+                    id,company,source,account_id,external_id,version,payload_json,payload_hash,
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                record_rows,
+            )
+        if event_rows:
+            conn.executemany(
+                """
+                INSERT INTO cash_events(
+                    id,company,cash_account_id,amount_cents,occurred_at,description,
+                    kind,entry_id,transfer_group,created_by,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                event_rows,
+            )
+        if link_rows:
+            conn.executemany(
+                """
+                INSERT INTO bank_cash_links(
+                    id,company,cash_account_id,provider,external_id,cash_event_id,created_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                link_rows,
+            )
+        record_rows.clear()
+        event_rows.clear()
+        link_rows.clear()
+
+    def add_event(account_id: int, amount_cents: int, occurred_at: str, description: str,
+                  kind: str, transfer_group=None) -> int:
+        event_id = _new_id()
+        event_rows.append((
+            event_id, company, account_id, amount_cents, occurred_at, description,
+            kind, None, transfer_group, None, timestamp,
+        ))
+        return event_id
+
     with db.connection() as conn:
+        seen_hashes = {
+            row["external_id"]: row["payload_hash"]
+            for row in conn.execute(
+                """
+                SELECT external_id, payload_hash FROM external_records
+                WHERE company=? AND source=? AND account_id=? AND version=?
+                """,
+                (company, PROVIDER_BANK_FILE, str(cash_account_id), version),
+            )
+        }
+        linked_lines = {
+            row["external_id"]
+            for row in conn.execute(
+                """
+                SELECT external_id FROM bank_cash_links
+                WHERE company=? AND cash_account_id=? AND provider=?
+                """,
+                (company, cash_account_id, PROVIDER_BANK_FILE),
+            )
+        }
+        account_checked = False
+        reserve_id = None
         for tx in transactions:
-            version = "1"
-            already_seen = _external_record_exists(
-                company, cash_account_id, tx.external_id, version, conn=conn,
-            )
             payload = {"date": tx.date, "amount_cents": tx.amount_cents, "description": tx.description}
-            records.upsert_external_record(
-                company, PROVIDER_BANK_FILE, cash_account_id, tx.external_id, version, payload,
-                conn=conn,
-            )
+            payload_hash = records._canonical_hash(payload)
+            known_hash = seen_hashes.get(tx.external_id)
+            already_seen = known_hash is not None
+            if already_seen and known_hash != payload_hash:
+                # Same key, different content: the regular upsert raises
+                # ExternalRecordConflict, exactly as before.
+                flush(conn)
+                records.upsert_external_record(
+                    company, PROVIDER_BANK_FILE, cash_account_id, tx.external_id, version, payload,
+                    conn=conn,
+                )
+            if not already_seen:
+                record_rows.append((
+                    _new_id(), company, PROVIDER_BANK_FILE, str(cash_account_id), tx.external_id,
+                    version, json.dumps(payload, ensure_ascii=False, sort_keys=True), payload_hash,
+                    timestamp, timestamp,
+                ))
+                seen_hashes[tx.external_id] = payload_hash
             raw_decision = decisions.get(tx.external_id, "new")
+            if raw_decision in (RESERVE_DECISION, "new") and not account_checked:
+                ledger._require_account(conn, company, cash_account_id)
+                account_checked = True
             if raw_decision == RESERVE_DECISION:
                 if not is_reserve_move(tx.description):
                     raise BankFileError(f"{tx.external_id!r} não é uma movimentação da Reserva Stone.")
                 if already_seen:
                     duplicates += 1
                     continue
-                reserve_id = _reserve_account_id(conn, company)
-                if reserve_id == cash_account_id:
-                    raise BankFileError("O extrato da própria Reserva Stone não tem transferências para ela mesma.")
+                if reserve_id is None:
+                    reserve_id = _reserve_account_id(conn, company)
+                    if reserve_id == cash_account_id:
+                        raise BankFileError("O extrato da própria Reserva Stone não tem transferências para ela mesma.")
+                if tx.amount_cents == 0:
+                    raise ValueError("O valor da transferência deve ser maior que zero.")
                 outgoing = tx.amount_cents < 0
-                moved = ledger.transfer(
-                    company,
-                    cash_account_id if outgoing else reserve_id,
-                    reserve_id if outgoing else cash_account_id,
-                    abs(tx.amount_cents), date.fromisoformat(tx.date),
-                    description=tx.description or RESERVE_ACCOUNT_NAME,
-                    conn=conn,
-                )
-                own_leg = next(e for e in moved["events"] if e["cash_account_id"] == cash_account_id)
-                conn.execute(
-                    """
-                    INSERT INTO bank_cash_links(
-                        id,company,cash_account_id,provider,external_id,cash_event_id,created_at
-                    ) VALUES(?,?,?,?,?,?,?)
-                    """,
-                    (
-                        _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
-                        own_leg["id"], db.now(),
-                    ),
-                )
+                amount = abs(tx.amount_cents)
+                group_id = _new_id()
+                description = (tx.description or RESERVE_ACCOUNT_NAME).strip()
+                source_id = cash_account_id if outgoing else reserve_id
+                target_id = reserve_id if outgoing else cash_account_id
+                source_leg = add_event(source_id, -amount, tx.date, description, "transfer", group_id)
+                target_leg = add_event(target_id, amount, tx.date, description, "transfer", group_id)
+                own_leg = source_leg if outgoing else target_leg
+                link_rows.append((
+                    _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
+                    own_leg, timestamp,
+                ))
+                linked_lines.add(tx.external_id)
                 transferred += 1
                 continue
             candidate_cash_event_id = _parse_decision(raw_decision, tx.external_id)
@@ -551,35 +651,23 @@ def commit_bank_import(
                 if already_seen:
                     duplicates += 1
                     continue
-                event = ledger.post_cash_event(
-                    company, cash_account_id, tx.amount_cents, date.fromisoformat(tx.date),
-                    tx.description or f"Importado ({tx.external_id})",
-                    conn=conn,
-                )
+                if tx.amount_cents == 0:
+                    raise ValueError("O valor não pode ser zero.")
+                description = (tx.description or f"Importado ({tx.external_id})").strip()
+                if not description:
+                    raise ValueError("Informe a descrição.")
+                event_id = add_event(cash_account_id, tx.amount_cents, tx.date, description, "entry")
                 # Claim the movement for this bank line, so a later statement
                 # never offers it as "already recorded" for a different line.
-                conn.execute(
-                    """
-                    INSERT INTO bank_cash_links(
-                        id,company,cash_account_id,provider,external_id,cash_event_id,created_at
-                    ) VALUES(?,?,?,?,?,?,?)
-                    """,
-                    (
-                        _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
-                        event["id"], db.now(),
-                    ),
-                )
+                link_rows.append((
+                    _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
+                    event_id, timestamp,
+                ))
+                linked_lines.add(tx.external_id)
                 imported += 1
                 continue
 
-            existing_link = conn.execute(
-                """
-                SELECT * FROM bank_cash_links
-                WHERE company=? AND cash_account_id=? AND provider=? AND external_id=?
-                """,
-                (company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id),
-            ).fetchone()
-            if existing_link:
+            if tx.external_id in linked_lines:
                 # "Links duplicados retornam registro existente" — a retry of
                 # the exact same successful link, never a second link row.
                 linked += 1
@@ -596,6 +684,8 @@ def commit_bank_import(
                     f"Esta transação já foi importada anteriormente sem vínculo: {tx.external_id!r}."
                 )
 
+            # Links are few and each needs fresh checks: write what is pending first.
+            flush(conn)
             candidate = conn.execute(
                 "SELECT * FROM cash_events WHERE id=? AND company=? AND cash_account_id=?",
                 (candidate_cash_event_id, company, cash_account_id),
@@ -633,7 +723,7 @@ def commit_bank_import(
                     """,
                     (
                         _new_id(), company, cash_account_id, PROVIDER_BANK_FILE, tx.external_id,
-                        candidate_cash_event_id, db.now(),
+                        candidate_cash_event_id, timestamp,
                     ),
                 )
             except Exception as exc:
@@ -642,7 +732,9 @@ def commit_bank_import(
                 raise BankImportConflict(
                     f"Candidato já vinculado a outra transação importada: {tx.external_id!r}."
                 ) from exc
+            linked_lines.add(tx.external_id)
             linked += 1
+        flush(conn)
 
     return {
         "total": len(transactions),
