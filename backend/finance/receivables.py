@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import date
 from typing import Optional
@@ -98,6 +99,8 @@ def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> 
     fees_by_day: dict = {}
     monthly_fees = []
     timestamp = db.now()
+    record_rows: list = []
+    receivable_rows: list = []
     with db.connection() as conn:
         existing = {
             row["external_id"]
@@ -118,32 +121,27 @@ def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> 
             if external_id in existing or key in known_keys:
                 duplicates += 1
                 continue
-            records.upsert_external_record(
-                company, "stone_receivable", cash_account_id, external_id, "1",
-                {
-                    "gross_cents": receivable.gross_cents,
-                    "fee_cents": receivable.fee_cents,
-                    "net_cents": receivable.net_cents,
-                    "settlement_date": receivable.settlement_date,
-                    "brand_id": receivable.brand_id,
-                    "category": receivable.category,
-                },
-                conn=conn,
-            )
-            conn.execute(
-                """
-                INSERT INTO stone_receivables(
-                    id,company,cash_account_id,transaction_key,installment_number,brand_id,
-                    gross_cents,fee_cents,net_cents,settlement_date,fee_entry_id,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    _new_id(), company, cash_account_id, receivable.transaction_key,
-                    receivable.installment_number, receivable.brand_id, receivable.gross_cents,
-                    receivable.fee_cents, receivable.net_cents, receivable.settlement_date,
-                    None, timestamp,
-                ),
-            )
+            payload = {
+                "gross_cents": receivable.gross_cents,
+                "fee_cents": receivable.fee_cents,
+                "net_cents": receivable.net_cents,
+                "settlement_date": receivable.settlement_date,
+                "brand_id": receivable.brand_id,
+                "category": receivable.category,
+            }
+            # Unseen keys only (checked above), so this is the insert half of
+            # records.upsert_external_record, batched below.
+            record_rows.append((
+                _new_id(), company, "stone_receivable", str(cash_account_id), external_id, "1",
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                records._canonical_hash(payload), timestamp, timestamp,
+            ))
+            receivable_rows.append((
+                _new_id(), company, cash_account_id, receivable.transaction_key,
+                receivable.installment_number, receivable.brand_id, receivable.gross_cents,
+                receivable.fee_cents, receivable.net_cents, receivable.settlement_date,
+                None, timestamp,
+            ))
             existing.add(external_id)
             known_keys.add(key)
             if receivable.category == MONTHLY_FEE_CATEGORY and receivable.net_cents < 0:
@@ -153,6 +151,28 @@ def sync_receivables_csv(company: int, cash_account_id: int, content: bytes) -> 
             day["mdr"] += receivable.fee_cents - receivable.advance_fee_cents
             day["sales"] += 1 if receivable.category == "Venda" else 0
             imported += 1
+        # One round trip per table instead of four per row: against the hosted
+        # database a quarter row by row outlived the function's time limit.
+        if record_rows:
+            conn.executemany(
+                """
+                INSERT INTO external_records(
+                    id,company,source,account_id,external_id,version,payload_json,payload_hash,
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                record_rows,
+            )
+        if receivable_rows:
+            conn.executemany(
+                """
+                INSERT INTO stone_receivables(
+                    id,company,cash_account_id,transaction_key,installment_number,brand_id,
+                    gross_cents,fee_cents,net_cents,settlement_date,fee_entry_id,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                receivable_rows,
+            )
 
         fee_entries = 0
         fee_cents = 0
