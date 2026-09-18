@@ -150,3 +150,62 @@ def test_the_reserve_account_is_not_listed_as_a_source_to_import(client):
     client.post("/api/companies/1/finance/cash-accounts", json={"name": "Reserva Stone", "kind": "bank"})
     names = [item["name"] for item in client.get("/api/companies/1/finance/reconciliation/sources").json()]
     assert names == ["Conta Stone"]
+
+
+def _report(sales: int, prefix: int) -> bytes:
+    header = (FIXTURES / "stone-recebiveis-sample.csv").read_text(encoding="utf-8-sig").splitlines()[0]
+    rows = [
+        f"00.000.000/0001-00;100000001;Venda;09/09/2026 12:00:00;10/09/2026;10/09/2026;Visa;Debito;"
+        f"{prefix}{n:013d};1;1;10,000000;9,900000;-0,100000;0,000000;0,000000;Pago;10/09/2026 00:00:00;10,000000;0,000000"
+        for n in range(sales)
+    ]
+    return ("﻿" + "\n".join([header] + rows)).encode("utf-8")
+
+
+def test_a_long_sales_report_costs_the_same_few_queries_as_a_short_one(client, monkeypatch):
+    """A quarter of Stone sales is ~7,000 rows; four queries per row outlived
+    the hosting time limit against the hosted database."""
+    from contextlib import contextmanager
+
+    calls = {"n": 0}
+    real_connection = db.connection
+
+    class Counting:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def execute(self, *args):
+            calls["n"] += 1
+            return self._conn.execute(*args)
+
+        def executemany(self, *args):
+            calls["n"] += 1
+            return self._conn.executemany(*args)
+
+    @contextmanager
+    def counting_connection(*args, **kwargs):
+        with real_connection(*args, **kwargs) as conn:
+            yield Counting(conn)
+
+    def run(sales: int) -> tuple:
+        account = client.post(
+            "/api/companies/1/finance/cash-accounts", json={"name": f"Stone {sales}", "kind": "payment"}
+        ).json()
+        monkeypatch.setattr(db, "connection", counting_connection)
+        calls["n"] = 0
+        response = client.post(
+            f"/api/companies/1/finance/cash-accounts/{account['id']}/receivables-import",
+            files={"file": ("recebiveis.csv", _report(sales, prefix=sales), "text/csv")},
+        )
+        monkeypatch.setattr(db, "connection", real_connection)
+        assert response.status_code == 201, response.text
+        return calls["n"], response.json()
+
+    run(3)  # creates the fee accounts, a one-off write
+    short_calls, _ = run(5)
+    long_calls, result = run(400)
+    assert result["imported"] == 400
+    assert long_calls == short_calls
